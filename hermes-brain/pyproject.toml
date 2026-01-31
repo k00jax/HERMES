@@ -1,0 +1,9 @@
+[project]
+name = "hermes-brain"
+version = "0.1.0"
+description = "Offline-first local reasoning system for HERMES"
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
