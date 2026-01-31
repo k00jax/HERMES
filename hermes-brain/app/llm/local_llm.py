@@ -25,9 +25,7 @@ class LocalLLM:
     def generate(self, question: str, context: str) -> str:
         if not self.model_path.exists():
             return (
-                "Local LLM model not found. "
-                "Place a GGUF model file under data/models/ and set HERMES_MODEL_PATH.\n"
-                "Returning retrieved context only.\n\n"
+                "LLM disabled: no local model installed. Answer is based on retrieved knowledge only.\n\n"
                 f"Retrieved context:\n{context or '(no local context)'}"
             )
 

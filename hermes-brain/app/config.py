@@ -26,7 +26,12 @@ class AppConfig:
     chunk_overlap: int
     top_k: int
     score_threshold: float
+    local_confidence_threshold: float
     allow_web: bool
+    web_max_sources: int
+    web_timeout_seconds: int
+    web_user_agent: str
+    web_require_explicit: bool
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
@@ -111,6 +116,18 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         os.getenv("HERMES_SCORE_THRESHOLD", None), float(file_cfg.get("score_threshold", 0.15))
     )
     allow_web = _parse_bool(os.getenv("HERMES_ALLOW_WEB", None), bool(file_cfg.get("allow_web", False)))
+    web_max_sources = _parse_int(
+        os.getenv("HERMES_WEB_MAX_SOURCES", None), int(file_cfg.get("web_max_sources", 3))
+    )
+    web_timeout_seconds = _parse_int(
+        os.getenv("HERMES_WEB_TIMEOUT_SECONDS", None), int(file_cfg.get("web_timeout_seconds", 10))
+    )
+    web_user_agent = os.getenv(
+        "HERMES_WEB_USER_AGENT", file_cfg.get("web_user_agent", "HERMES-Brain/0.1")
+    )
+    web_require_explicit = _parse_bool(
+        os.getenv("HERMES_WEB_REQUIRE_EXPLICIT", None), bool(file_cfg.get("web_require_explicit", True))
+    )
 
     return AppConfig(
         base_dir=base_dir,
@@ -126,5 +143,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         chunk_overlap=chunk_overlap,
         top_k=top_k,
         score_threshold=score_threshold,
+        local_confidence_threshold=score_threshold,
         allow_web=allow_web,
+        web_max_sources=web_max_sources,
+        web_timeout_seconds=web_timeout_seconds,
+        web_user_agent=web_user_agent,
+        web_require_explicit=web_require_explicit,
     )

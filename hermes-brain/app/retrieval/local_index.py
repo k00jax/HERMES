@@ -38,11 +38,14 @@ class LocalIndex:
             if path.is_file() and path.suffix.lower() in {".txt", ".md"}
         ]
 
+        logger.info("Discovered %s knowledge files", len(files))
+
         chunks: List[IndexChunk] = []
         doc_freq: Dict[str, int] = {}
         total_chunks = 0
 
         for file_path in files:
+            logger.info("Indexing file: %s", file_path)
             try:
                 text = file_path.read_text(encoding="utf-8")
             except Exception:

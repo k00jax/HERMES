@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import socket
+from urllib.request import Request, urlopen
 
 
 def internet_available(timeout: float = 2.0) -> bool:
     try:
-        with socket.create_connection(("1.1.1.1", 53), timeout=timeout):
+        request = Request("https://www.example.com", method="HEAD")
+        with urlopen(request, timeout=timeout):
             return True
-    except OSError:
+    except Exception:
         return False
