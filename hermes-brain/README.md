@@ -45,3 +45,15 @@ Run the serial ingestor to append sensor events to JSONL and inject a recent sum
 	- Run scripts/run_ingest.sh --port /dev/ttyACM0 --baudrate 115200
 
 - The CLI automatically injects a "Recent sensor context" summary for the last 10 minutes.
+
+## XIAO serial control
+Find the serial port on Linux:
+- Typical devices: /dev/ttyACM0 or /dev/ttyUSB0
+- Check with: ls /dev/ttyACM* /dev/ttyUSB*
+
+Ping test:
+- Run: python -m app.main xiao --port /dev/ttyACM0 ping
+
+Set LED and OLED:
+- Run: python -m app.main xiao --port /dev/ttyACM0 led green
+- Run: python -m app.main xiao --port /dev/ttyACM0 oled "Air quality bad"

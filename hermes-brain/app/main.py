@@ -13,6 +13,8 @@ from .retrieval.web_retriever import WebRetriever
 from .net.connectivity import internet_available
 from .llm.local_llm import LocalLLM
 from .ingest.event_store import EventStore
+from .ingest.serial_ingest import SerialIngestor
+from .ingest.xiao_link import XiaoLink
 
 logger = logging.getLogger("app.main")
 
@@ -28,6 +30,40 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--web-only", action="store_true", help="Use web only and skip local retrieval")
     parser.add_argument("--no-web", action="store_true", help="Disable web for this query")
     return parser.parse_args()
+
+
+def _parse_xiao_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="HERMES XIAO control")
+    parser.add_argument("--port", required=True, help="Serial port (e.g., /dev/ttyACM0)")
+    parser.add_argument("--baud", type=int, default=115200, help="Serial baudrate")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+
+    subparsers.add_parser("ping")
+
+    led = subparsers.add_parser("led")
+    led.add_argument("color", choices=["green", "red", "off"])
+
+    vibe = subparsers.add_parser("vibe")
+    vibe.add_argument("mode", choices=["short", "long"])
+
+    oled = subparsers.add_parser("oled")
+    oled.add_argument("text")
+
+    mode = subparsers.add_parser("mode")
+    mode.add_argument("mode", choices=["sentinel", "scan"])
+
+    return parser.parse_args(argv)
+
+
+def _parse_ingest_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="HERMES ingest")
+    parser.add_argument("--port", required=True, help="Serial port (e.g., /dev/ttyACM0)")
+    parser.add_argument("--baud", type=int, default=115200, help="Serial baudrate")
+    parser.add_argument("--feedback", action="store_true", help="Enable feedback to XIAO")
+    parser.add_argument("--events-dir", type=str, default="data/events", help="Events directory")
+    parser.add_argument("--feedback-port", type=str, help="Override feedback port")
+    parser.add_argument("--feedback-baud", type=int, help="Override feedback baud")
+    return parser.parse_args(argv)
 
 
 def _ensure_index(cfg: AppConfig, reindex: bool) -> None:
@@ -62,7 +98,53 @@ def _format_web_sources(chunks) -> str:
     return "\n".join(lines)
 
 
+def _run_xiao(argv: list[str]) -> int:
+    cfg = load_config()
+    setup_logging(cfg.log_level)
+    args = _parse_xiao_args(argv)
+    link = XiaoLink()
+    link.connect(args.port, args.baud)
+
+    if args.action == "ping":
+        ok = link.request("PING", wait_ack=True)
+        print("ACK PING" if ok else "ERR PING")
+    elif args.action == "led":
+        link.request(f"LED {args.color.upper()}")
+    elif args.action == "vibe":
+        link.request(f"VIBE {args.mode.upper()}")
+    elif args.action == "oled":
+        link.request(f"OLED TEXT|{args.text}")
+    elif args.action == "mode":
+        link.request(f"MODE {args.mode.upper()}")
+
+    link.close()
+    return 0
+
+
+def _run_ingest(argv: list[str]) -> int:
+    cfg = load_config()
+    setup_logging(cfg.log_level)
+    args = _parse_ingest_args(argv)
+    ingestor = SerialIngestor(
+        port=args.port,
+        baudrate=args.baud,
+        events_dir=Path(args.events_dir),
+        feedback=args.feedback,
+        feedback_port=args.feedback_port,
+        feedback_baud=args.feedback_baud,
+    )
+    ingestor.run()
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] in {"xiao", "ingest"}:
+        command = sys.argv[1]
+        if command == "xiao":
+            return _run_xiao(sys.argv[2:])
+        if command == "ingest":
+            return _run_ingest(sys.argv[2:])
+
     args = _parse_args()
     cfg = load_config()
     setup_logging(cfg.log_level)
