@@ -12,6 +12,7 @@ from .retrieval.local_retriever import LocalRetriever
 from .retrieval.web_retriever import WebRetriever
 from .net.connectivity import internet_available
 from .llm.local_llm import LocalLLM
+from .ingest.event_store import EventStore
 
 logger = logging.getLogger("app.main")
 
@@ -83,6 +84,10 @@ def main() -> int:
     use_web_only = bool(args.web_only)
     allow_web = cfg.allow_web and not args.no_web
 
+    event_store = EventStore(cfg.events_dir)
+    sensor_summary = event_store.summarize_recent(cfg.event_summary_minutes)
+    sensor_context = f"Recent sensor context:\n{sensor_summary}" if sensor_summary else ""
+
     local_chunks = []
     if not use_web_only:
         _ensure_index(cfg, args.reindex)
@@ -119,12 +124,15 @@ def main() -> int:
         f"WEB SOURCE: {chunk.url}\n{chunk.excerpt}" for chunk in web_chunks
     )
 
-    combined_context = "\n\n".join([part for part in [local_context, web_context] if part])
+    combined_context = "\n\n".join(
+        [part for part in [sensor_context, local_context, web_context] if part]
+    )
 
     llm = LocalLLM(model_path=cfg.model_path, llama_bin=cfg.llama_bin)
     answer = llm.generate(question, combined_context)
 
     print("Answer:\n" + answer)
+    print("\nRecent sensor context:\n" + (sensor_summary or "(none)"))
     print("\nRetrieved local context:\n" + (local_context or "(none)"))
     if web_chunks:
         print("\nWeb context:\n" + web_context)

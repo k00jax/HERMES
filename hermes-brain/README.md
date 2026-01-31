@@ -37,3 +37,11 @@ Safety notes:
 
 No-LLM behavior:
 - If no local model is installed, the CLI returns retrieved context and notes that LLM is disabled.
+
+## Sensor ingest (Milestone 2)
+Run the serial ingestor to append sensor events to JSONL and inject a recent summary into prompts.
+
+- Start ingest:
+	- Run scripts/run_ingest.sh --port /dev/ttyACM0 --baudrate 115200
+
+- The CLI automatically injects a "Recent sensor context" summary for the last 10 minutes.

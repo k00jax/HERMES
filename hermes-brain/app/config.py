@@ -16,6 +16,7 @@ class AppConfig:
     base_dir: Path
     knowledge_dir: Path
     data_dir: Path
+    events_dir: Path
     indexes_dir: Path
     index_path: Path
     models_dir: Path
@@ -32,6 +33,7 @@ class AppConfig:
     web_timeout_seconds: int
     web_user_agent: str
     web_require_explicit: bool
+    event_summary_minutes: int
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
@@ -92,6 +94,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         os.getenv("HERMES_KNOWLEDGE_DIR", file_cfg.get("knowledge_dir", base_dir / "knowledge"))
     )
     data_dir = Path(os.getenv("HERMES_DATA_DIR", file_cfg.get("data_dir", base_dir / "data")))
+    events_dir = Path(os.getenv("HERMES_EVENTS_DIR", file_cfg.get("events_dir", data_dir / "events")))
     indexes_dir = Path(
         os.getenv("HERMES_INDEXES_DIR", file_cfg.get("indexes_dir", data_dir / "indexes"))
     )
@@ -128,11 +131,15 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     web_require_explicit = _parse_bool(
         os.getenv("HERMES_WEB_REQUIRE_EXPLICIT", None), bool(file_cfg.get("web_require_explicit", True))
     )
+    event_summary_minutes = _parse_int(
+        os.getenv("HERMES_EVENT_SUMMARY_MINUTES", None), int(file_cfg.get("event_summary_minutes", 10))
+    )
 
     return AppConfig(
         base_dir=base_dir,
         knowledge_dir=knowledge_dir,
         data_dir=data_dir,
+        events_dir=events_dir,
         indexes_dir=indexes_dir,
         index_path=index_path,
         models_dir=models_dir,
@@ -149,4 +156,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         web_timeout_seconds=web_timeout_seconds,
         web_user_agent=web_user_agent,
         web_require_explicit=web_require_explicit,
+        event_summary_minutes=event_summary_minutes,
     )
