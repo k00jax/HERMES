@@ -1,0 +1,16 @@
+#ifndef HERMES_PROTOCOL_H
+#define HERMES_PROTOCOL_H
+
+static const uint32_t UART_BAUD = 115200;
+
+static const char FRAME_PREFIX[] = "SENS,";
+
+static const char KEY_UP[] = "up";
+static const char KEY_RSSI[] = "rssi";
+static const char KEY_HEAP[] = "heap";
+static const char KEY_PSRAM[] = "psram";
+static const char KEY_CT[] = "ct";
+
+static const int RSSI_NOT_CONNECTED = 999;
+
+#endif  // HERMES_PROTOCOL_H
