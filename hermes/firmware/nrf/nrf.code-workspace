@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../esp32"
+		},
+		{
+			"path": "../shared"
+		}
+	],
+	"settings": {}
+}

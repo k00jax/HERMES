@@ -9,6 +9,7 @@
 #include "hermes_protocol.h"
 
 #define ENABLE_USB_EXPORT 1
+#define ENABLE_ESP_CMD 1
 
 static const uint8_t OLED_ADDR_ENV = 0x3C;
 static const uint8_t OLED_ADDR_ESP = 0x3D;
@@ -17,6 +18,7 @@ static const uint8_t SCREEN_HEIGHT = 64;
 
 static const int STATUS_LED_PIN = D1;
 static const int PIN_BTN = D0;
+static const int PIN_SW = D2;
 
 static const uint32_t BTN_DEBOUNCE_MS = 25;
 static const uint32_t BTN_DOUBLE_WINDOW_MS = 350;
@@ -75,6 +77,8 @@ enum DisplayMode {
 static DisplayMode displayMode = MODE_DEFAULT;
 static bool focusMode = false;
 static uint32_t focusModeUntilMs = 0;
+static bool debugMode = false;
+static bool usbExportEnabled = false;
 
 static char lastSensLine[160] = "SENS,<none>";
 static uint32_t linesOk = 0;
@@ -97,6 +101,8 @@ static uint32_t lastParseFailSeen = 0;
 static uint32_t parseErrorUntilMs = 0;
 static uint32_t lastLedMs = 0;
 static uint32_t refreshFlashUntilMs = 0;
+static bool swState = true;
+static uint32_t swLastChangeMs = 0;
 
 static bool btnRawState = true;
 static bool btnStableState = true;
@@ -267,6 +273,9 @@ static void formatFloat(char *buffer, size_t size, float value, int precision) {
 
 static void exportUsbLine(uint32_t now) {
 #if ENABLE_USB_EXPORT
+  if (!usbExportEnabled) {
+    return;
+  }
   char tBuf[16];
   char rhBuf[16];
   char ctBuf[16];
@@ -345,13 +354,62 @@ static void initHistory() {
   }
 }
 
-static bool hasValidSeries(const float *series, int count) {
-  for (int i = 0; i < count; i++) {
-    if (!isnan(series[i])) {
-      return true;
-    }
+static void renderDisplays(uint32_t now);
+
+static void initDisplays() {
+  bool envOk = false;
+  bool espOk = false;
+  for (int attempt = 0; attempt < 3 && (!envOk || !espOk); attempt++) {
+    envOk = displayEnv.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR_ENV);
+    espOk = displayEsp.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR_ESP);
+    delay(10);
   }
-  return false;
+  if (!envOk) {
+    Serial.println("ENV OLED init failed");
+  }
+  if (!espOk) {
+    Serial.println("ESP OLED init failed");
+  }
+  displayEnv.clearDisplay();
+  displayEsp.clearDisplay();
+  displayEnv.display();
+  displayEsp.display();
+}
+
+static void softResetState(uint32_t now) {
+  rxLen = 0;
+  byteCount = 0;
+  bps = 0;
+  lastBpsMs = now;
+  lastLineMs = 0;
+  lastParseFailSeen = parseFail;
+  parseErrorUntilMs = 0;
+  linesOk = 0;
+  strncpy(lastSensLine, "SENS,<none>", sizeof(lastSensLine) - 1);
+  lastSensLine[sizeof(lastSensLine) - 1] = '\0';
+  histIndex = 0;
+  histCount = 0;
+  initHistory();
+  initDisplays();
+  lastDisplayMs = 0;
+  renderDisplays(now);
+  Serial.println("EVT,sw=toggle,action=soft_reset");
+
+#if ENABLE_ESP_CMD
+  Serial1.print("CMD,reboot\n");
+#endif
+}
+
+static void updateSwitch(uint32_t now) {
+  const bool rawState = digitalRead(PIN_SW);
+  if (rawState != swState && (now - swLastChangeMs) > 50) {
+    swState = rawState;
+    swLastChangeMs = now;
+    debugMode = !swState;
+    usbExportEnabled = debugMode;
+    displayMode = debugMode ? MODE_LINK_DEBUG : MODE_DEFAULT;
+    softResetState(now);
+  }
 }
 
 static void drawSparkline(
@@ -831,6 +889,9 @@ static void heartbeat(uint32_t now) {
     return;
   }
   lastHeartbeatMs = now;
+  if (!debugMode) {
+    return;
+  }
   Serial.print("HB bps=");
   Serial.print(bps);
   Serial.print(" up=");
@@ -854,16 +915,15 @@ void setup() {
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
   pinMode(PIN_BTN, INPUT_PULLUP);
+  pinMode(PIN_SW, INPUT_PULLUP);
   btnRawState = digitalRead(PIN_BTN);
   btnStableState = btnRawState;
   btnLastChangeMs = millis();
-
-  if (!displayEnv.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR_ENV)) {
-    Serial.println("ENV OLED init failed");
-  }
-  if (!displayEsp.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR_ESP)) {
-    Serial.println("ESP OLED init failed");
-  }
+  swState = digitalRead(PIN_SW);
+  swLastChangeMs = millis();
+  debugMode = !swState;
+  usbExportEnabled = debugMode;
+  displayMode = debugMode ? MODE_LINK_DEBUG : MODE_DEFAULT;
 
   shtOk = sht31.begin(0x44);
   if (!shtOk) {
@@ -873,11 +933,7 @@ void setup() {
   sgpOk = sgp.begin();
 
   initHistory();
-
-  displayEnv.clearDisplay();
-  displayEsp.clearDisplay();
-  displayEnv.display();
-  displayEsp.display();
+  initDisplays();
 }
 
 void loop() {
@@ -886,6 +942,7 @@ void loop() {
   updateBps(now);
   readSensors(now);
   updateHistory(now);
+  updateSwitch(now);
   updateButton(now);
   updateLed(now);
   if (focusMode && now >= focusModeUntilMs) {

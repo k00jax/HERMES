@@ -10,6 +10,9 @@
 - Mouse microswitch:
   - COM -> GND
   - NO -> nRF D0 (internal pullup enabled)
+- Slide switch:
+  - COM -> nRF D2
+  - One side -> GND (switch ON pulls LOW)
 
 ## Behavior Checklist
 - LED:
@@ -26,6 +29,10 @@
 - Graphs:
   - MODE_GRAPHS shows two text rows (T/RH and eCO2/TVOC/Light) plus four sparklines.
   - Light sparkline shows once ESP camera metrics are present.
+- Slide switch:
+  - ON (LOW) enables DEBUG_MODE (starts in Link Debug, verbose USB logs).
+  - OFF (HIGH) enables NORMAL_MODE (starts in Default, normal logs).
+  - Toggle triggers soft reset of UART stats + graph buffers + OLED reinit.
 
 ## Quick Test Flow
 1. Power ESP32 and nRF with common GND.

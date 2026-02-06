@@ -5,6 +5,8 @@
 
 #include "hermes_protocol.h"
 
+#define ENABLE_ESP_CMD 1
+
 static const uint8_t UART_RX_PIN = D7;
 static const uint8_t UART_TX_PIN = D6;
 
@@ -20,6 +22,9 @@ static float cameraLight = NAN;
 static float cameraScene = NAN;
 static uint8_t scenePrev[SCENE_SAMPLES];
 static bool scenePrevValid = false;
+
+static char cmdBuffer[64];
+static size_t cmdLen = 0;
 
 static void formatFloat(char *buffer, size_t size, float value, int precision) {
   if (isnan(value)) {
@@ -152,6 +157,32 @@ static void sampleCamera(uint32_t now) {
   }
 }
 
+static void handleSerial1Commands() {
+#if ENABLE_ESP_CMD
+  while (Serial1.available() > 0) {
+    const char c = static_cast<char>(Serial1.read());
+    if (c == '\r') {
+      continue;
+    }
+    if (c == '\n') {
+      cmdBuffer[cmdLen] = '\0';
+      if (strcmp(cmdBuffer, "CMD,reboot") == 0) {
+        Serial.println("ESP CMD reboot");
+        delay(20);
+        ESP.restart();
+      }
+      cmdLen = 0;
+      continue;
+    }
+    if (cmdLen + 1 < sizeof(cmdBuffer)) {
+      cmdBuffer[cmdLen++] = c;
+    } else {
+      cmdLen = 0;
+    }
+  }
+#endif
+}
+
 static void sendTelemetryLine() {
   const uint32_t uptimeSec = millis() / 1000;
   const uint32_t frame = ++packetCounter;
@@ -200,6 +231,7 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+  handleSerial1Commands();
   sampleCamera(now);
   if (now - lastSendMs >= 1000) {
     lastSendMs = now;
