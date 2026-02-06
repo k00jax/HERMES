@@ -122,10 +122,12 @@ static void handleSerial1() {
     if (c == '\n') {
       rxBuffer[rxLen] = '\0';
       if (rxLen > 0) {
-        if (parseTelemetryLine(rxBuffer)) {
-          lastLineMs = millis();
-        } else {
-          parseFail++;
+        if (strncmp(rxBuffer, SENS_PREFIX, strlen(SENS_PREFIX)) == 0) {
+          if (parseTelemetryLine(rxBuffer)) {
+            lastLineMs = millis();
+          } else {
+            parseFail++;
+          }
         }
       }
       rxLen = 0;
@@ -287,6 +289,7 @@ static void heartbeat(uint32_t now) {
 
 void setup() {
   Serial.begin(UART_BAUD);
+  Serial1.setPins(D7, D6);
   Serial1.begin(UART_BAUD);
   Wire.begin();
 

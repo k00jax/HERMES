@@ -3,8 +3,8 @@
 
 #include "hermes_protocol.h"
 
-static const uint8_t UART_RX_PIN = 44;
-static const uint8_t UART_TX_PIN = 43;
+static const uint8_t UART_RX_PIN = D7;
+static const uint8_t UART_TX_PIN = D6;
 
 static uint32_t lastSendMs = 0;
 
@@ -39,6 +39,7 @@ static void sendTelemetryLine() {
 
 void setup() {
   Serial.begin(115200);
+  Serial1.setPins(UART_RX_PIN, UART_TX_PIN);
   Serial1.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   delay(50);
   Serial.println("ESP32 telemetry sender ready");
