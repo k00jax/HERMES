@@ -8,6 +8,8 @@
 
 #include "hermes_protocol.h"
 
+#define ENABLE_USB_EXPORT 1
+
 static const uint8_t OLED_ADDR_ENV = 0x3C;
 static const uint8_t OLED_ADDR_ESP = 0x3D;
 static const uint8_t SCREEN_WIDTH = 128;
@@ -35,10 +37,13 @@ static Adafruit_SGP30 sgp;
 
 struct EspTelemetry {
   uint32_t up = 0;
+  uint32_t n = 0;
   int rssi = RSSI_NOT_CONNECTED;
   uint32_t heap = 0;
   uint32_t psram = 0;
   float ct = NAN;
+  float light = NAN;
+  float scene = NAN;
 };
 
 static EspTelemetry espTelemetry;
@@ -50,8 +55,19 @@ static float shtHumidity = NAN;
 static uint16_t sgpTvoc = 0;
 static uint16_t sgpEco2 = 0;
 
+static const int HIST_N = 120;
+static float histTemp[HIST_N];
+static float histRh[HIST_N];
+static float histEco2[HIST_N];
+static float histTvoc[HIST_N];
+static float histLight[HIST_N];
+static float histScene[HIST_N];
+static int histIndex = 0;
+static int histCount = 0;
+
 enum DisplayMode {
   MODE_DEFAULT = 0,
+  MODE_GRAPHS,
   MODE_LINK_DEBUG,
   MODE_ENV_BIG
 };
@@ -75,6 +91,7 @@ static uint32_t bps = 0;
 static uint32_t lastSensorMs = 0;
 static uint32_t lastDisplayMs = 0;
 static uint32_t lastHeartbeatMs = 0;
+static uint32_t lastSampleMs = 0;
 
 static uint32_t lastParseFailSeen = 0;
 static uint32_t parseErrorUntilMs = 0;
@@ -103,6 +120,10 @@ static bool parseKeyValue(char *pair) {
     espTelemetry.up = static_cast<uint32_t>(strtoul(value, nullptr, 10));
     return true;
   }
+  if (strcmp(key, KEY_N) == 0) {
+    espTelemetry.n = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+    return true;
+  }
   if (strcmp(key, KEY_RSSI) == 0) {
     espTelemetry.rssi = static_cast<int>(strtol(value, nullptr, 10));
     return true;
@@ -117,6 +138,14 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_CT) == 0) {
     espTelemetry.ct = strtof(value, nullptr);
+    return true;
+  }
+  if (strcmp(key, KEY_LIGHT) == 0) {
+    espTelemetry.light = strtof(value, nullptr);
+    return true;
+  }
+  if (strcmp(key, KEY_SCENE) == 0) {
+    espTelemetry.scene = strtof(value, nullptr);
     return true;
   }
 
@@ -223,6 +252,178 @@ static void updateBps(uint32_t now) {
     bps = (elapsed > 0) ? (byteCount * 1000 / elapsed) : 0;
     byteCount = 0;
     lastBpsMs = now;
+  }
+}
+
+static void formatFloat(char *buffer, size_t size, float value, int precision) {
+  if (isnan(value)) {
+    snprintf(buffer, size, "nan");
+    return;
+  }
+  char format[8];
+  snprintf(format, sizeof(format), "%%.%df", precision);
+  snprintf(buffer, size, format, value);
+}
+
+static void exportUsbLine(uint32_t now) {
+#if ENABLE_USB_EXPORT
+  char tBuf[16];
+  char rhBuf[16];
+  char ctBuf[16];
+  char lightBuf[16];
+  char sceneBuf[16];
+
+  formatFloat(tBuf, sizeof(tBuf), shtTempC, 1);
+  formatFloat(rhBuf, sizeof(rhBuf), shtHumidity, 1);
+  formatFloat(ctBuf, sizeof(ctBuf), espTelemetry.ct, 2);
+  formatFloat(lightBuf, sizeof(lightBuf), espTelemetry.light, 2);
+  formatFloat(sceneBuf, sizeof(sceneBuf), espTelemetry.scene, 2);
+
+  const uint32_t ageMs = getAgeMs(now);
+  char line[320];
+  snprintf(
+      line,
+      sizeof(line),
+      "LOG,t=%s,rh=%s,eco2=%u,tvoc=%u,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,bps=%lu,age=%lu,pf=%lu\n",
+      tBuf,
+      rhBuf,
+      static_cast<unsigned>(sgpEco2),
+      static_cast<unsigned>(sgpTvoc),
+      static_cast<unsigned long>(espTelemetry.n),
+      espTelemetry.rssi,
+      static_cast<unsigned long>(espTelemetry.heap),
+      static_cast<unsigned long>(espTelemetry.psram),
+      ctBuf,
+      lightBuf,
+      sceneBuf,
+      static_cast<unsigned long>(bps),
+      static_cast<unsigned long>(ageMs),
+      static_cast<unsigned long>(parseFail));
+  Serial.print(line);
+#else
+  (void)now;
+#endif
+}
+
+static void pushSample(float tC, float rh, float eco2, float tvoc, float light, float scene) {
+  histTemp[histIndex] = tC;
+  histRh[histIndex] = rh;
+  histEco2[histIndex] = eco2;
+  histTvoc[histIndex] = tvoc;
+  histLight[histIndex] = light;
+  histScene[histIndex] = scene;
+
+  histIndex = (histIndex + 1) % HIST_N;
+  if (histCount < HIST_N) {
+    histCount++;
+  }
+}
+
+static void updateHistory(uint32_t now) {
+  if (now - lastSampleMs < 1000) {
+    return;
+  }
+  lastSampleMs = now;
+  pushSample(
+      shtTempC,
+      shtHumidity,
+      static_cast<float>(sgpEco2),
+      static_cast<float>(sgpTvoc),
+      espTelemetry.light,
+      espTelemetry.scene);
+  exportUsbLine(now);
+}
+
+static void initHistory() {
+  for (int i = 0; i < HIST_N; i++) {
+    histTemp[i] = NAN;
+    histRh[i] = NAN;
+    histEco2[i] = NAN;
+    histTvoc[i] = NAN;
+    histLight[i] = NAN;
+    histScene[i] = NAN;
+  }
+}
+
+static bool hasValidSeries(const float *series, int count) {
+  for (int i = 0; i < count; i++) {
+    if (!isnan(series[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void drawSparkline(
+    int x,
+    int y,
+    int w,
+    int h,
+    const float *series,
+    int count,
+    int head,
+    Adafruit_SSD1306 &display) {
+  if (count <= 1 || w <= 1 || h <= 1) {
+    return;
+  }
+
+  bool hasValue = false;
+  float minVal = 0.0f;
+  float maxVal = 0.0f;
+  for (int i = 0; i < count; i++) {
+    const int idx = (head + i) % HIST_N;
+    const float v = series[idx];
+    if (isnan(v)) {
+      continue;
+    }
+    if (!hasValue) {
+      minVal = v;
+      maxVal = v;
+      hasValue = true;
+    } else {
+      if (v < minVal) {
+        minVal = v;
+      }
+      if (v > maxVal) {
+        maxVal = v;
+      }
+    }
+  }
+
+  if (!hasValue) {
+    return;
+  }
+
+  if (fabs(maxVal - minVal) < 0.0001f) {
+    maxVal += 1.0f;
+    minVal -= 1.0f;
+  }
+
+  int prevX = -1;
+  int prevY = -1;
+  for (int i = 0; i < count; i++) {
+    const int idx = (head + i) % HIST_N;
+    const float v = series[idx];
+    if (isnan(v)) {
+      prevX = -1;
+      prevY = -1;
+      continue;
+    }
+
+    const int xPos = x + ((count > 1) ? (i * (w - 1)) / (count - 1) : 0);
+    float norm = (v - minVal) / (maxVal - minVal);
+    if (norm < 0.0f) {
+      norm = 0.0f;
+    } else if (norm > 1.0f) {
+      norm = 1.0f;
+    }
+    const int yPos = y + (h - 1) - static_cast<int>(lroundf(norm * (h - 1)));
+
+    if (prevX >= 0) {
+      display.drawLine(prevX, prevY, xPos, yPos, SSD1306_WHITE);
+    }
+    prevX = xPos;
+    prevY = yPos;
   }
 }
 
@@ -428,8 +629,69 @@ static void drawEnvBigLeftDisplay() {
   displayEsp.display();
 }
 
+static void drawGraphsDisplay(uint32_t now) {
+  displayEnv.clearDisplay();
+  displayEnv.setTextSize(1);
+  displayEnv.setTextColor(SSD1306_WHITE);
+
+  displayEnv.setCursor(0, 0);
+  displayEnv.print("T ");
+  if (isnan(shtTempC)) {
+    displayEnv.print("nan");
+  } else {
+    displayEnv.print(shtTempC, 1);
+  }
+  displayEnv.print(" RH ");
+  if (isnan(shtHumidity)) {
+    displayEnv.print("nan");
+  } else {
+    displayEnv.print(shtHumidity, 1);
+  }
+
+  displayEnv.setCursor(0, 8);
+  displayEnv.print("L ");
+  if (isnan(espTelemetry.light)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(espTelemetry.light, 2);
+  }
+  displayEnv.print(" S ");
+  if (isnan(espTelemetry.scene)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(espTelemetry.scene, 2);
+  }
+
+  drawSparkline(0, 16, SCREEN_WIDTH, 24, histTemp, histCount, histIndex, displayEnv);
+  drawSparkline(0, 40, SCREEN_WIDTH, 24, histRh, histCount, histIndex, displayEnv);
+
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+
+  displayEsp.clearDisplay();
+  displayEsp.setTextSize(1);
+  displayEsp.setTextColor(SSD1306_WHITE);
+
+  displayEsp.setCursor(0, 0);
+  displayEsp.print("eCO2 ");
+  displayEsp.print(sgpEco2);
+
+  displayEsp.setCursor(0, 8);
+  displayEsp.print("TVOC ");
+  displayEsp.print(sgpTvoc);
+
+  drawSparkline(0, 16, SCREEN_WIDTH, 24, histEco2, histCount, histIndex, displayEsp);
+  drawSparkline(0, 40, SCREEN_WIDTH, 24, histTvoc, histCount, histIndex, displayEsp);
+
+  drawCornerFlags(displayEsp, now);
+  displayEsp.display();
+}
+
 static void renderDisplays(uint32_t now) {
   switch (displayMode) {
+    case MODE_GRAPHS:
+      drawGraphsDisplay(now);
+      break;
     case MODE_LINK_DEBUG:
       drawLinkDebugDisplay();
       drawLinkStatsDisplay(now);
@@ -454,10 +716,20 @@ static void refreshNow(uint32_t now) {
 }
 
 static void handleShortPress(uint32_t now) {
-  if (displayMode == MODE_ENV_BIG) {
-    displayMode = MODE_DEFAULT;
-  } else {
-    displayMode = static_cast<DisplayMode>(displayMode + 1);
+  switch (displayMode) {
+    case MODE_DEFAULT:
+      displayMode = MODE_GRAPHS;
+      break;
+    case MODE_GRAPHS:
+      displayMode = MODE_LINK_DEBUG;
+      break;
+    case MODE_LINK_DEBUG:
+      displayMode = MODE_ENV_BIG;
+      break;
+    case MODE_ENV_BIG:
+    default:
+      displayMode = MODE_DEFAULT;
+      break;
   }
   lastDisplayMs = now;
   renderDisplays(now);
@@ -600,6 +872,8 @@ void setup() {
 
   sgpOk = sgp.begin();
 
+  initHistory();
+
   displayEnv.clearDisplay();
   displayEsp.clearDisplay();
   displayEnv.display();
@@ -611,6 +885,7 @@ void loop() {
   handleSerial1();
   updateBps(now);
   readSensors(now);
+  updateHistory(now);
   updateButton(now);
   updateLed(now);
   if (focusMode && now >= focusModeUntilMs) {

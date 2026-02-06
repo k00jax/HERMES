@@ -18,11 +18,14 @@
   - Slow blink when SENS frames are flowing but RSSI is not connected (999).
   - Double pulse every 2 seconds if parse errors increase.
 - Button:
-  - Short press cycles display modes (Default -> Link Debug -> Env Big -> Default).
+  - Short press cycles display modes (Default -> Graphs -> Link Debug -> Env Big -> Default).
   - Double press forces immediate redraw and logs "BTN: refresh now" to USB serial.
   - Long press (>800ms) toggles focus mode and logs "BTN: focus ON/OFF".
 - Focus mode:
   - OLED refresh rate drops to 1 Hz for 5 minutes, then returns to normal.
+- Graphs:
+  - MODE_GRAPHS shows two text rows (T/RH and eCO2/TVOC/Light) plus four sparklines.
+  - Light sparkline shows once ESP camera metrics are present.
 
 ## Quick Test Flow
 1. Power ESP32 and nRF with common GND.
@@ -30,3 +33,5 @@
 3. Short press to cycle display modes.
 4. Double press to force redraw and USB log line.
 5. Long press to toggle focus mode and observe slower OLED updates.
+6. Verify MODE_GRAPHS sparklines update smoothly at 2 Hz (1 Hz in focus mode).
+7. Confirm ESP camera metrics are present (light/scene not NAN) in MODE_GRAPHS.
