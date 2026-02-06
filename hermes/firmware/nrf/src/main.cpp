@@ -79,6 +79,7 @@ static uint32_t lastHeartbeatMs = 0;
 static uint32_t lastParseFailSeen = 0;
 static uint32_t parseErrorUntilMs = 0;
 static uint32_t lastLedMs = 0;
+static uint32_t refreshFlashUntilMs = 0;
 
 static bool btnRawState = true;
 static bool btnStableState = true;
@@ -160,6 +161,22 @@ static uint32_t getAgeMs(uint32_t now) {
     return 0xFFFFFFFF;
   }
   return now - lastLineMs;
+}
+
+static void drawCornerFlags(Adafruit_SSD1306 &display, uint32_t now) {
+  if (!focusMode && now >= refreshFlashUntilMs) {
+    return;
+  }
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(114, 0);
+  if (focusMode) {
+    display.print('F');
+  }
+  if (now < refreshFlashUntilMs) {
+    display.print('R');
+  }
 }
 
 static void handleSerial1() {
@@ -266,6 +283,8 @@ static void drawEnvDisplay() {
   displayEnv.print("SGP ");
   displayEnv.print(sgpOk ? "ok" : "err");
 
+  drawCornerFlags(displayEnv, millis());
+
   displayEnv.display();
 }
 
@@ -310,6 +329,8 @@ static void drawEspDisplay(uint32_t now) {
   displayEsp.print(" pf ");
   displayEsp.print(parseFail);
 
+  drawCornerFlags(displayEsp, now);
+
   displayEsp.display();
 }
 
@@ -339,6 +360,8 @@ static void drawLinkStatsDisplay(uint32_t now) {
   displayEsp.print("ok ");
   displayEsp.print(linesOk);
 
+  drawCornerFlags(displayEsp, now);
+
   displayEsp.display();
 }
 
@@ -355,6 +378,8 @@ static void drawLinkDebugDisplay() {
       displayEnv.write(lastSensLine[idx++]);
     }
   }
+
+  drawCornerFlags(displayEnv, millis());
 
   displayEnv.display();
 }
@@ -380,6 +405,8 @@ static void drawEnvBigDisplay() {
     displayEnv.print(shtHumidity, 1);
   }
 
+  drawCornerFlags(displayEnv, millis());
+
   displayEnv.display();
 }
 
@@ -395,6 +422,8 @@ static void drawEnvBigLeftDisplay() {
   displayEsp.setCursor(0, 16);
   displayEsp.print("TVOC ");
   displayEsp.print(sgpTvoc);
+
+  drawCornerFlags(displayEsp, millis());
 
   displayEsp.display();
 }
@@ -418,6 +447,7 @@ static void renderDisplays(uint32_t now) {
 }
 
 static void refreshNow(uint32_t now) {
+  refreshFlashUntilMs = now + 500;
   lastDisplayMs = now;
   renderDisplays(now);
   Serial.println("BTN: refresh now");
