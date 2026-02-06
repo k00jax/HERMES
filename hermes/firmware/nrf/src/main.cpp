@@ -34,6 +34,11 @@ static const float MIC_SUSTAIN_DELTA = 0.05f;
 static const uint32_t MIC_SUSTAIN_MS = 3000;
 static const uint32_t MIC_SPIKE_COOLDOWN_MS = 1500;
 static const uint32_t MIC_SUSTAIN_COOLDOWN_MS = 5000;
+static const int ROC_WINDOW_SAMPLES = 60;
+static const float BASELINE_ALPHA = 0.01f;
+static const uint32_t AIR_EVENT_COOLDOWN_MS = 20000;
+static const uint32_t LIGHT_EVENT_COOLDOWN_MS = 20000;
+static const uint32_t NOISE_EVENT_COOLDOWN_MS = 20000;
 
 static const uint32_t DISPLAY_INTERVAL_MS = 500;
 static const uint32_t DISPLAY_FOCUS_INTERVAL_MS = 1000;
@@ -55,6 +60,7 @@ struct EspTelemetry {
   float mic = NAN;
   float micpk = NAN;
   float micnf = NAN;
+  uint32_t ntp = 0;
 };
 
 static EspTelemetry espTelemetry;
@@ -77,6 +83,41 @@ static float histMic[HIST_N];
 static int histIndex = 0;
 static int histCount = 0;
 
+struct RocSample {
+  uint32_t ms = 0;
+  float t = NAN;
+  float rh = NAN;
+  float eco2 = NAN;
+  float tvoc = NAN;
+  float light = NAN;
+  float mic = NAN;
+};
+
+static RocSample rocSamples[ROC_WINDOW_SAMPLES];
+static int rocIndex = 0;
+static int rocCount = 0;
+
+static float rocTemp = NAN;
+static float rocRh = NAN;
+static float rocEco2 = NAN;
+static float rocTvoc = NAN;
+static float rocLight = NAN;
+static float rocMic = NAN;
+
+static float baseTemp = NAN;
+static float baseRh = NAN;
+static float baseEco2 = NAN;
+static float baseTvoc = NAN;
+static float baseLight = NAN;
+static float baseMic = NAN;
+
+static float deltaTemp = NAN;
+static float deltaRh = NAN;
+static float deltaEco2 = NAN;
+static float deltaTvoc = NAN;
+static float deltaLight = NAN;
+static float deltaMic = NAN;
+
 enum DisplayMode {
   MODE_DEFAULT = 0,
   MODE_GRAPHS,
@@ -90,10 +131,10 @@ static uint32_t focusModeUntilMs = 0;
 static bool debugMode = false;
 static bool usbExportEnabled = false;
 
-static char lastSensLine[200] = "SENS,<none>";
+static char lastSensLine[320] = "SENS,<none>";
 static uint32_t linesOk = 0;
 
-static char rxBuffer[200];
+static char rxBuffer[320];
 static size_t rxLen = 0;
 
 static uint32_t lastLineMs = 0;
@@ -118,6 +159,12 @@ static uint32_t lastMicEventLineMs = 0;
 static uint32_t micSustainStartMs = 0;
 static uint32_t micSpikeCooldownUntilMs = 0;
 static uint32_t micSustainCooldownUntilMs = 0;
+static uint8_t airRisingCount = 0;
+static uint8_t airFallingCount = 0;
+static uint32_t airRisingCooldownUntilMs = 0;
+static uint32_t airFallingCooldownUntilMs = 0;
+static uint32_t lightDropCooldownUntilMs = 0;
+static uint32_t noiseSpikeCooldownUntilMs = 0;
 
 static bool btnRawState = true;
 static bool btnStableState = true;
@@ -179,6 +226,10 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_MICNF) == 0) {
     espTelemetry.micnf = strtof(value, nullptr);
+    return true;
+  }
+  if (strcmp(key, KEY_NTP) == 0) {
+    espTelemetry.ntp = static_cast<uint32_t>(strtoul(value, nullptr, 10));
     return true;
   }
 
@@ -298,6 +349,31 @@ static void formatFloat(char *buffer, size_t size, float value, int precision) {
   snprintf(buffer, size, format, value);
 }
 
+static float computeRoc(float current, float past, float dtMin) {
+  if (isnan(current) || isnan(past) || dtMin <= 0.0f) {
+    return NAN;
+  }
+  return (current - past) / dtMin;
+}
+
+static void updateBaseline(float current, float *baseline) {
+  if (isnan(current)) {
+    return;
+  }
+  if (isnan(*baseline)) {
+    *baseline = current;
+  } else {
+    *baseline += BASELINE_ALPHA * (current - *baseline);
+  }
+}
+
+static float computeDelta(float current, float baseline) {
+  if (isnan(current) || isnan(baseline)) {
+    return NAN;
+  }
+  return current - baseline;
+}
+
 static void exportUsbLine(uint32_t now) {
 #if ENABLE_USB_EXPORT
   if (!usbExportEnabled) {
@@ -308,19 +384,55 @@ static void exportUsbLine(uint32_t now) {
   char ctBuf[16];
   char lightBuf[16];
   char sceneBuf[16];
+  char rtBuf[16];
+  char rrhBuf[16];
+  char rco2Buf[16];
+  char rtvBuf[16];
+  char rliBuf[16];
+  char rmicBuf[16];
+  char btBuf[16];
+  char brhBuf[16];
+  char bco2Buf[16];
+  char btvBuf[16];
+  char bliBuf[16];
+  char bmicBuf[16];
+  char dtBuf[16];
+  char drhBuf[16];
+  char dco2Buf[16];
+  char dtvBuf[16];
+  char dliBuf[16];
+  char dmicBuf[16];
 
   formatFloat(tBuf, sizeof(tBuf), shtTempC, 1);
   formatFloat(rhBuf, sizeof(rhBuf), shtHumidity, 1);
   formatFloat(ctBuf, sizeof(ctBuf), espTelemetry.ct, 2);
   formatFloat(lightBuf, sizeof(lightBuf), espTelemetry.light, 2);
   formatFloat(sceneBuf, sizeof(sceneBuf), espTelemetry.scene, 2);
+  formatFloat(rtBuf, sizeof(rtBuf), rocTemp, 2);
+  formatFloat(rrhBuf, sizeof(rrhBuf), rocRh, 2);
+  formatFloat(rco2Buf, sizeof(rco2Buf), rocEco2, 2);
+  formatFloat(rtvBuf, sizeof(rtvBuf), rocTvoc, 2);
+  formatFloat(rliBuf, sizeof(rliBuf), rocLight, 2);
+  formatFloat(rmicBuf, sizeof(rmicBuf), rocMic, 2);
+  formatFloat(btBuf, sizeof(btBuf), baseTemp, 2);
+  formatFloat(brhBuf, sizeof(brhBuf), baseRh, 2);
+  formatFloat(bco2Buf, sizeof(bco2Buf), baseEco2, 2);
+  formatFloat(btvBuf, sizeof(btvBuf), baseTvoc, 2);
+  formatFloat(bliBuf, sizeof(bliBuf), baseLight, 2);
+  formatFloat(bmicBuf, sizeof(bmicBuf), baseMic, 2);
+  formatFloat(dtBuf, sizeof(dtBuf), deltaTemp, 2);
+  formatFloat(drhBuf, sizeof(drhBuf), deltaRh, 2);
+  formatFloat(dco2Buf, sizeof(dco2Buf), deltaEco2, 2);
+  formatFloat(dtvBuf, sizeof(dtvBuf), deltaTvoc, 2);
+  formatFloat(dliBuf, sizeof(dliBuf), deltaLight, 2);
+  formatFloat(dmicBuf, sizeof(dmicBuf), deltaMic, 2);
 
   const uint32_t ageMs = getAgeMs(now);
-  char line[320];
+    char line[600];
   snprintf(
       line,
       sizeof(line),
-      "LOG,t=%s,rh=%s,eco2=%u,tvoc=%u,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,bps=%lu,age=%lu,pf=%lu\n",
+      "LOG,t=%s,rh=%s,eco2=%u,tvoc=%u,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,bps=%lu,age=%lu,pf=%lu,rt=%s,rrh=%s,rco2=%s,rtv=%s,rli=%s,rmic=%s,bt=%s,brh=%s,bco2=%s,btv=%s,bli=%s,bmic=%s,dt=%s,drh=%s,dco2=%s,dtv=%s,dli=%s,dmic=%s\n",
       tBuf,
       rhBuf,
       static_cast<unsigned>(sgpEco2),
@@ -334,12 +446,32 @@ static void exportUsbLine(uint32_t now) {
       sceneBuf,
       static_cast<unsigned long>(bps),
       static_cast<unsigned long>(ageMs),
-      static_cast<unsigned long>(parseFail));
+      static_cast<unsigned long>(parseFail),
+      rtBuf,
+      rrhBuf,
+      rco2Buf,
+      rtvBuf,
+      rliBuf,
+      rmicBuf,
+      btBuf,
+      brhBuf,
+      bco2Buf,
+      btvBuf,
+      bliBuf,
+      bmicBuf,
+      dtBuf,
+      drhBuf,
+      dco2Buf,
+      dtvBuf,
+      dliBuf,
+      dmicBuf);
   Serial.print(line);
 #else
   (void)now;
 #endif
 }
+
+static void updateDerivedEvents(uint32_t now);
 
 static void pushSample(float tC, float rh, float eco2, float tvoc, float light, float scene, float mic) {
   histTemp[histIndex] = tC;
@@ -361,15 +493,92 @@ static void updateHistory(uint32_t now) {
     return;
   }
   lastSampleMs = now;
-  pushSample(
-      shtTempC,
-      shtHumidity,
-      static_cast<float>(sgpEco2),
-      static_cast<float>(sgpTvoc),
-      espTelemetry.light,
-      espTelemetry.scene,
-      espTelemetry.mic);
+
+  const bool hasPast = (rocCount >= ROC_WINDOW_SAMPLES) && (rocSamples[rocIndex].ms != 0);
+  float dtMin = NAN;
+  if (hasPast) {
+    dtMin = static_cast<float>(now - rocSamples[rocIndex].ms) / 60000.0f;
+  }
+
+  const float t = shtTempC;
+  const float rh = shtHumidity;
+  const float eco2 = static_cast<float>(sgpEco2);
+  const float tvoc = static_cast<float>(sgpTvoc);
+  const float light = espTelemetry.light;
+  const float mic = espTelemetry.mic;
+
+  rocTemp = hasPast ? computeRoc(t, rocSamples[rocIndex].t, dtMin) : NAN;
+  rocRh = hasPast ? computeRoc(rh, rocSamples[rocIndex].rh, dtMin) : NAN;
+  rocEco2 = hasPast ? computeRoc(eco2, rocSamples[rocIndex].eco2, dtMin) : NAN;
+  rocTvoc = hasPast ? computeRoc(tvoc, rocSamples[rocIndex].tvoc, dtMin) : NAN;
+  rocLight = hasPast ? computeRoc(light, rocSamples[rocIndex].light, dtMin) : NAN;
+  rocMic = hasPast ? computeRoc(mic, rocSamples[rocIndex].mic, dtMin) : NAN;
+
+  updateBaseline(t, &baseTemp);
+  updateBaseline(rh, &baseRh);
+  updateBaseline(eco2, &baseEco2);
+  updateBaseline(tvoc, &baseTvoc);
+  updateBaseline(light, &baseLight);
+  updateBaseline(mic, &baseMic);
+
+  deltaTemp = computeDelta(t, baseTemp);
+  deltaRh = computeDelta(rh, baseRh);
+  deltaEco2 = computeDelta(eco2, baseEco2);
+  deltaTvoc = computeDelta(tvoc, baseTvoc);
+  deltaLight = computeDelta(light, baseLight);
+  deltaMic = computeDelta(mic, baseMic);
+
+  updateDerivedEvents(now);
+  pushSample(t, rh, eco2, tvoc, light, espTelemetry.scene, mic);
+
+  rocSamples[rocIndex] = {now, t, rh, eco2, tvoc, light, mic};
+  rocIndex = (rocIndex + 1) % ROC_WINDOW_SAMPLES;
+  if (rocCount < ROC_WINDOW_SAMPLES) {
+    rocCount++;
+  }
   exportUsbLine(now);
+}
+
+static void updateDerivedEvents(uint32_t now) {
+  if (isnan(rocEco2)) {
+    airRisingCount = 0;
+    airFallingCount = 0;
+  } else {
+    if (rocEco2 > 30.0f) {
+      airRisingCount++;
+    } else {
+      airRisingCount = 0;
+    }
+
+    if (rocEco2 < -30.0f) {
+      airFallingCount++;
+    } else {
+      airFallingCount = 0;
+    }
+  }
+
+  if (airRisingCount >= 5 && now >= airRisingCooldownUntilMs) {
+    Serial.println("EVT,air_rising");
+    airRisingCooldownUntilMs = now + AIR_EVENT_COOLDOWN_MS;
+    airRisingCount = 0;
+  }
+  if (airFallingCount >= 5 && now >= airFallingCooldownUntilMs) {
+    Serial.println("EVT,air_falling");
+    airFallingCooldownUntilMs = now + AIR_EVENT_COOLDOWN_MS;
+    airFallingCount = 0;
+  }
+
+  if (!isnan(deltaLight) && !isnan(rocLight)) {
+    if (deltaLight < -0.10f && fabs(rocLight) > 0.05f && now >= lightDropCooldownUntilMs) {
+      Serial.println("EVT,light_drop");
+      lightDropCooldownUntilMs = now + LIGHT_EVENT_COOLDOWN_MS;
+    }
+  }
+
+  if (!isnan(deltaMic) && deltaMic > 0.10f && now >= noiseSpikeCooldownUntilMs) {
+    Serial.println("EVT,noise_spike");
+    noiseSpikeCooldownUntilMs = now + NOISE_EVENT_COOLDOWN_MS;
+  }
 }
 
 static void updateMicEvents(uint32_t now) {
@@ -416,6 +625,40 @@ static void initHistory() {
     histScene[i] = NAN;
     histMic[i] = NAN;
   }
+
+  for (int i = 0; i < ROC_WINDOW_SAMPLES; i++) {
+    rocSamples[i] = {};
+  }
+  rocIndex = 0;
+  rocCount = 0;
+
+  rocTemp = NAN;
+  rocRh = NAN;
+  rocEco2 = NAN;
+  rocTvoc = NAN;
+  rocLight = NAN;
+  rocMic = NAN;
+
+  baseTemp = NAN;
+  baseRh = NAN;
+  baseEco2 = NAN;
+  baseTvoc = NAN;
+  baseLight = NAN;
+  baseMic = NAN;
+
+  deltaTemp = NAN;
+  deltaRh = NAN;
+  deltaEco2 = NAN;
+  deltaTvoc = NAN;
+  deltaLight = NAN;
+  deltaMic = NAN;
+
+  airRisingCount = 0;
+  airFallingCount = 0;
+  airRisingCooldownUntilMs = 0;
+  airFallingCooldownUntilMs = 0;
+  lightDropCooldownUntilMs = 0;
+  noiseSpikeCooldownUntilMs = 0;
 }
 
 static void renderDisplays(uint32_t now);
@@ -697,6 +940,10 @@ static void drawLinkStatsDisplay(uint32_t now) {
   displayEsp.print("ok ");
   displayEsp.print(linesOk);
 
+  displayEsp.setCursor(0, 40);
+  displayEsp.print("ntp ");
+  displayEsp.print(espTelemetry.ntp);
+
   drawCornerFlags(displayEsp, now);
 
   displayEsp.display();
@@ -785,17 +1032,17 @@ static void drawGraphsDisplay(uint32_t now) {
   }
 
   displayEnv.setCursor(0, 8);
-  displayEnv.print("L ");
-  if (isnan(espTelemetry.light)) {
+  displayEnv.print("rT ");
+  if (isnan(rocTemp)) {
     displayEnv.print("--");
   } else {
-    displayEnv.print(espTelemetry.light, 2);
+    displayEnv.print(rocTemp, 2);
   }
-  displayEnv.print(" S ");
-  if (isnan(espTelemetry.scene)) {
+  displayEnv.print(" rC ");
+  if (isnan(rocEco2)) {
     displayEnv.print("--");
   } else {
-    displayEnv.print(espTelemetry.scene, 2);
+    displayEnv.print(rocEco2, 1);
   }
 
   drawSparkline(0, 16, SCREEN_WIDTH, 24, histTemp, histCount, histIndex, displayEnv);

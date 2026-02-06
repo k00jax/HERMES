@@ -2,10 +2,12 @@
 
 One packet per line, newline terminated.
 
-SENS,up=<seconds>,rssi=<rssi_or_999>,heap=<bytes>,psram=<bytes>,ct=<temp_c_or_nan>,n=<frame>,light=<0-1>,scene=<0-1>,mic=<0-1>,micpk=<0-1>,micnf=<0-1>
+SENS,up=<seconds>,rssi=<rssi_or_999>,ntp=<epoch_or_0>,heap=<bytes>,psram=<bytes>,ct=<temp_c_or_nan>,n=<frame>,light=<0-1>,scene=<0-1>,mic=<0-1>,micpk=<0-1>,micnf=<0-1>
 
 Example:
-SENS,up=27,rssi=999,heap=249304,psram=8373944,ct=35.4,n=42,light=0.31,scene=0.07,mic=0.04,micpk=0.21,micnf=0.02
+SENS,up=27,rssi=-55,ntp=1700000000,heap=249304,psram=8373944,ct=35.4,n=42,light=0.31,scene=0.07,mic=0.04,micpk=0.21,micnf=0.02
+
+Note: rssi is real when Wi-Fi is connected; otherwise it is 999. ntp is 0 until time sync.
 
 ## Logging JSONL (Odroid)
 

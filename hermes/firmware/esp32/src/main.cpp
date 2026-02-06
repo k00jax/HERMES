@@ -4,10 +4,23 @@
 #include "esp_camera.h"
 #include "driver/i2s.h"
 
+#if __has_include("secrets.h")
+#include "secrets.h"
+#define HAS_WIFI_SECRETS 1
+#else
+#define HAS_WIFI_SECRETS 0
+#endif
+
+#if HAS_WIFI_SECRETS
+#include <WiFi.h>
+#include <time.h>
+#endif
+
 #include "hermes_protocol.h"
 
 #define ENABLE_ESP_CMD 1
 #define ENABLE_MIC 1
+#define ENABLE_WIFI 1
 
 static const uint8_t UART_RX_PIN = D7;
 static const uint8_t UART_TX_PIN = D6;
@@ -24,6 +37,10 @@ static const int MIC_I2S_BCK_PIN = 42;
 static const int MIC_I2S_WS_PIN = 41;
 static const int MIC_I2S_DATA_PIN = 2;
 
+static const uint32_t WIFI_CHECK_MS = 2000;
+static const uint32_t WIFI_RETRY_MS = 5000;
+static const uint32_t NTP_VALID_AFTER = 1600000000UL;
+
 static uint32_t lastSendMs = 0;
 static uint32_t lastCameraMs = 0;
 static uint32_t packetCounter = 0;
@@ -32,6 +49,12 @@ static float cameraLight = NAN;
 static float cameraScene = NAN;
 static uint8_t scenePrev[SCENE_SAMPLES];
 static bool scenePrevValid = false;
+
+static int espRssi = RSSI_NOT_CONNECTED;
+static uint32_t ntpEpoch = 0;
+static uint32_t lastWifiCheckMs = 0;
+static uint32_t lastWifiBeginMs = 0;
+static bool ntpConfigured = false;
 
 static bool micOk = false;
 static float micRms = NAN;
@@ -279,6 +302,49 @@ static void sampleMic(uint32_t now) {
 #endif
 }
 
+static void initWifi() {
+#if ENABLE_WIFI && HAS_WIFI_SECRETS
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  lastWifiBeginMs = millis();
+  lastWifiCheckMs = lastWifiBeginMs;
+#endif
+}
+
+static void updateWifi(uint32_t now) {
+#if ENABLE_WIFI && HAS_WIFI_SECRETS
+  if (now - lastWifiCheckMs < WIFI_CHECK_MS) {
+    return;
+  }
+  lastWifiCheckMs = now;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    espRssi = WiFi.RSSI();
+    if (!ntpConfigured) {
+      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+      ntpConfigured = true;
+    }
+  } else {
+    espRssi = RSSI_NOT_CONNECTED;
+    if (now - lastWifiBeginMs >= WIFI_RETRY_MS) {
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      lastWifiBeginMs = now;
+    }
+  }
+
+  const time_t nowSec = time(nullptr);
+  if (nowSec > static_cast<time_t>(NTP_VALID_AFTER)) {
+    ntpEpoch = static_cast<uint32_t>(nowSec);
+  } else {
+    ntpEpoch = 0;
+  }
+#else
+  (void)now;
+  espRssi = RSSI_NOT_CONNECTED;
+  ntpEpoch = 0;
+#endif
+}
+
 static void handleSerial1Commands() {
 #if ENABLE_ESP_CMD
   while (Serial1.available() > 0) {
@@ -308,7 +374,7 @@ static void handleSerial1Commands() {
 static void sendTelemetryLine() {
   const uint32_t uptimeSec = millis() / 1000;
   const uint32_t frame = ++packetCounter;
-  const int rssi = RSSI_NOT_CONNECTED;
+  const int rssi = espRssi;
   const uint32_t heap = ESP.getFreeHeap();
   const uint32_t psram = ESP.getFreePsram();
   const float tempC = temperatureRead();
@@ -330,15 +396,16 @@ static void sendTelemetryLine() {
   formatFloat(micPkBuffer, sizeof(micPkBuffer), micPeak, 3);
   formatFloat(micNfBuffer, sizeof(micNfBuffer), micNoiseFloor, 3);
 
-  char line[240];
+    char line[260];
   snprintf(
       line,
       sizeof(line),
-      "%sup=%lu,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s\n",
+      "%sup=%lu,n=%lu,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s\n",
       SENS_PREFIX,
       static_cast<unsigned long>(uptimeSec),
       static_cast<unsigned long>(frame),
       rssi,
+      static_cast<unsigned long>(ntpEpoch),
       static_cast<unsigned long>(heap),
       static_cast<unsigned long>(psram),
       ctBuffer,
@@ -359,6 +426,7 @@ void setup() {
   Serial.println("ESP32 telemetry sender ready");
   initCamera();
   micOk = initMic();
+  initWifi();
 }
 
 void loop() {
@@ -366,6 +434,7 @@ void loop() {
   handleSerial1Commands();
   sampleCamera(now);
   sampleMic(now);
+  updateWifi(now);
   if (now - lastSendMs >= 1000) {
     lastSendMs = now;
     sendTelemetryLine();
