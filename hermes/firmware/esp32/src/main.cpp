@@ -27,7 +27,7 @@ static void sendTelemetryLine() {
       line,
       sizeof(line),
       "%sup=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s\n",
-      FRAME_PREFIX,
+      SENS_PREFIX,
       static_cast<unsigned long>(uptimeSec),
       rssi,
       static_cast<unsigned long>(heap),
@@ -38,7 +38,7 @@ static void sendTelemetryLine() {
 }
 
 void setup() {
-  Serial.begin(UART_BAUD);
+  Serial.begin(115200);
   Serial1.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   delay(50);
   Serial.println("ESP32 telemetry sender ready");

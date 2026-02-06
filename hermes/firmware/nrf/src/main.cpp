@@ -83,23 +83,31 @@ static bool parseKeyValue(char *pair) {
 }
 
 static bool parseTelemetryLine(char *line) {
-  const size_t prefixLen = strlen(FRAME_PREFIX);
-  if (strncmp(line, FRAME_PREFIX, prefixLen) != 0) {
+  const size_t prefixLen = strlen(SENS_PREFIX);
+  if (strncmp(line, SENS_PREFIX, prefixLen) != 0) {
     return false;
   }
 
   char *payload = line + prefixLen;
   char *savePtr = nullptr;
   char *token = strtok_r(payload, ",", &savePtr);
-  bool parsed = false;
+  bool malformed = false;
+  bool sawToken = false;
   while (token) {
-    if (parseKeyValue(token)) {
-      parsed = true;
+    sawToken = true;
+    if (!strchr(token, '=')) {
+      malformed = true;
+      break;
     }
+
+    parseKeyValue(token);
     token = strtok_r(nullptr, ",", &savePtr);
   }
 
-  return parsed;
+  if (malformed || !sawToken) {
+    return false;
+  }
+  return true;
 }
 
 static void handleSerial1() {

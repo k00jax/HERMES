@@ -3,7 +3,7 @@
 
 static const uint32_t UART_BAUD = 115200;
 
-static const char FRAME_PREFIX[] = "SENS,";
+static const char SENS_PREFIX[] = "SENS,";
 
 static const char KEY_UP[] = "up";
 static const char KEY_RSSI[] = "rssi";
