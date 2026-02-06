@@ -2,10 +2,10 @@
 
 One packet per line, newline terminated.
 
-SENS,up=<seconds>,rssi=<rssi_or_999>,heap=<bytes>,psram=<bytes>,ct=<temp_c_or_nan>,n=<frame>,light=<0-1>,scene=<0-1>
+SENS,up=<seconds>,rssi=<rssi_or_999>,heap=<bytes>,psram=<bytes>,ct=<temp_c_or_nan>,n=<frame>,light=<0-1>,scene=<0-1>,mic=<0-1>,micpk=<0-1>,micnf=<0-1>
 
 Example:
-SENS,up=27,rssi=999,heap=249304,psram=8373944,ct=35.4,n=42,light=0.31,scene=0.07
+SENS,up=27,rssi=999,heap=249304,psram=8373944,ct=35.4,n=42,light=0.31,scene=0.07,mic=0.04,micpk=0.21,micnf=0.02
 
 ## Logging JSONL (Odroid)
 

@@ -1,8 +1,7 @@
 {
 	"folders": [
 		{
-			"name": "HERMES",
-			"path": "../../.."
+			"path": "."
 		}
 	],
 	"settings": {}

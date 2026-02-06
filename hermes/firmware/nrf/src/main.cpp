@@ -17,6 +17,7 @@ static const uint8_t SCREEN_WIDTH = 128;
 static const uint8_t SCREEN_HEIGHT = 64;
 
 static const int STATUS_LED_PIN = D1;
+static const int DEBUG_LED_PIN = D3;
 static const int PIN_BTN = D0;
 static const int PIN_SW = D2;
 
@@ -28,6 +29,11 @@ static const uint32_t FOCUS_MODE_DURATION_MS = 5 * 60 * 1000;
 static const uint32_t LED_FAST_PERIOD_MS = 200;
 static const uint32_t LED_SLOW_PERIOD_MS = 1000;
 static const uint32_t LED_DOUBLE_PERIOD_MS = 2000;
+static const float MIC_SPIKE_DELTA = 0.10f;
+static const float MIC_SUSTAIN_DELTA = 0.05f;
+static const uint32_t MIC_SUSTAIN_MS = 3000;
+static const uint32_t MIC_SPIKE_COOLDOWN_MS = 1500;
+static const uint32_t MIC_SUSTAIN_COOLDOWN_MS = 5000;
 
 static const uint32_t DISPLAY_INTERVAL_MS = 500;
 static const uint32_t DISPLAY_FOCUS_INTERVAL_MS = 1000;
@@ -46,6 +52,9 @@ struct EspTelemetry {
   float ct = NAN;
   float light = NAN;
   float scene = NAN;
+  float mic = NAN;
+  float micpk = NAN;
+  float micnf = NAN;
 };
 
 static EspTelemetry espTelemetry;
@@ -64,6 +73,7 @@ static float histEco2[HIST_N];
 static float histTvoc[HIST_N];
 static float histLight[HIST_N];
 static float histScene[HIST_N];
+static float histMic[HIST_N];
 static int histIndex = 0;
 static int histCount = 0;
 
@@ -80,10 +90,10 @@ static uint32_t focusModeUntilMs = 0;
 static bool debugMode = false;
 static bool usbExportEnabled = false;
 
-static char lastSensLine[160] = "SENS,<none>";
+static char lastSensLine[200] = "SENS,<none>";
 static uint32_t linesOk = 0;
 
-static char rxBuffer[160];
+static char rxBuffer[200];
 static size_t rxLen = 0;
 
 static uint32_t lastLineMs = 0;
@@ -103,6 +113,11 @@ static uint32_t lastLedMs = 0;
 static uint32_t refreshFlashUntilMs = 0;
 static bool swState = true;
 static uint32_t swLastChangeMs = 0;
+
+static uint32_t lastMicEventLineMs = 0;
+static uint32_t micSustainStartMs = 0;
+static uint32_t micSpikeCooldownUntilMs = 0;
+static uint32_t micSustainCooldownUntilMs = 0;
 
 static bool btnRawState = true;
 static bool btnStableState = true;
@@ -152,6 +167,18 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_SCENE) == 0) {
     espTelemetry.scene = strtof(value, nullptr);
+    return true;
+  }
+  if (strcmp(key, KEY_MIC) == 0) {
+    espTelemetry.mic = strtof(value, nullptr);
+    return true;
+  }
+  if (strcmp(key, KEY_MICPK) == 0) {
+    espTelemetry.micpk = strtof(value, nullptr);
+    return true;
+  }
+  if (strcmp(key, KEY_MICNF) == 0) {
+    espTelemetry.micnf = strtof(value, nullptr);
     return true;
   }
 
@@ -314,13 +341,14 @@ static void exportUsbLine(uint32_t now) {
 #endif
 }
 
-static void pushSample(float tC, float rh, float eco2, float tvoc, float light, float scene) {
+static void pushSample(float tC, float rh, float eco2, float tvoc, float light, float scene, float mic) {
   histTemp[histIndex] = tC;
   histRh[histIndex] = rh;
   histEco2[histIndex] = eco2;
   histTvoc[histIndex] = tvoc;
   histLight[histIndex] = light;
   histScene[histIndex] = scene;
+  histMic[histIndex] = mic;
 
   histIndex = (histIndex + 1) % HIST_N;
   if (histCount < HIST_N) {
@@ -339,8 +367,43 @@ static void updateHistory(uint32_t now) {
       static_cast<float>(sgpEco2),
       static_cast<float>(sgpTvoc),
       espTelemetry.light,
-      espTelemetry.scene);
+      espTelemetry.scene,
+      espTelemetry.mic);
   exportUsbLine(now);
+}
+
+static void updateMicEvents(uint32_t now) {
+  if (lastLineMs == 0 || lastLineMs == lastMicEventLineMs) {
+    return;
+  }
+  lastMicEventLineMs = lastLineMs;
+
+  if (isnan(espTelemetry.mic) || isnan(espTelemetry.micnf)) {
+    micSustainStartMs = 0;
+    return;
+  }
+
+  const float delta = (espTelemetry.mic > espTelemetry.micnf)
+      ? (espTelemetry.mic - espTelemetry.micnf)
+      : 0.0f;
+
+  if (delta > MIC_SPIKE_DELTA && now >= micSpikeCooldownUntilMs) {
+    Serial.println("EVT,snd_spike");
+    micSpikeCooldownUntilMs = now + MIC_SPIKE_COOLDOWN_MS;
+  }
+
+  if (delta > MIC_SUSTAIN_DELTA) {
+    if (micSustainStartMs == 0) {
+      micSustainStartMs = now;
+    }
+    if ((now - micSustainStartMs) >= MIC_SUSTAIN_MS && now >= micSustainCooldownUntilMs) {
+      Serial.println("EVT,snd_sustain");
+      micSustainCooldownUntilMs = now + MIC_SUSTAIN_COOLDOWN_MS;
+      micSustainStartMs = now;
+    }
+  } else {
+    micSustainStartMs = 0;
+  }
 }
 
 static void initHistory() {
@@ -351,6 +414,7 @@ static void initHistory() {
     histTvoc[i] = NAN;
     histLight[i] = NAN;
     histScene[i] = NAN;
+    histMic[i] = NAN;
   }
 }
 
@@ -541,6 +605,20 @@ static void drawEnvDisplay() {
   displayEnv.setCursor(0, 40);
   displayEnv.print("SGP ");
   displayEnv.print(sgpOk ? "ok" : "err");
+
+  displayEnv.setCursor(0, 48);
+  displayEnv.print("MIC ");
+  if (isnan(espTelemetry.mic)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(espTelemetry.mic, 2);
+  }
+  displayEnv.print(" NF ");
+  if (isnan(espTelemetry.micnf)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(espTelemetry.micnf, 2);
+  }
 
   drawCornerFlags(displayEnv, millis());
 
@@ -735,11 +813,21 @@ static void drawGraphsDisplay(uint32_t now) {
   displayEsp.print(sgpEco2);
 
   displayEsp.setCursor(0, 8);
-  displayEsp.print("TVOC ");
-  displayEsp.print(sgpTvoc);
+  displayEsp.print("MIC ");
+  if (isnan(espTelemetry.mic)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(espTelemetry.mic, 2);
+  }
+  displayEsp.print(" NF ");
+  if (isnan(espTelemetry.micnf)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(espTelemetry.micnf, 2);
+  }
 
   drawSparkline(0, 16, SCREEN_WIDTH, 24, histEco2, histCount, histIndex, displayEsp);
-  drawSparkline(0, 40, SCREEN_WIDTH, 24, histTvoc, histCount, histIndex, displayEsp);
+  drawSparkline(0, 40, SCREEN_WIDTH, 24, histMic, histCount, histIndex, displayEsp);
 
   drawCornerFlags(displayEsp, now);
   displayEsp.display();
@@ -873,6 +961,7 @@ static void updateLed(uint32_t now) {
   }
 
   digitalWrite(STATUS_LED_PIN, ledOn ? HIGH : LOW);
+  digitalWrite(DEBUG_LED_PIN, usbExportEnabled ? HIGH : LOW);
 }
 
 static void updateDisplays(uint32_t now) {
@@ -914,6 +1003,8 @@ void setup() {
 
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
+  pinMode(DEBUG_LED_PIN, OUTPUT);
+  digitalWrite(DEBUG_LED_PIN, LOW);
   pinMode(PIN_BTN, INPUT_PULLUP);
   pinMode(PIN_SW, INPUT_PULLUP);
   btnRawState = digitalRead(PIN_BTN);
@@ -942,6 +1033,7 @@ void loop() {
   updateBps(now);
   readSensors(now);
   updateHistory(now);
+  updateMicEvents(now);
   updateSwitch(now);
   updateButton(now);
   updateLed(now);

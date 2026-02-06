@@ -2,10 +2,12 @@
 #include <math.h>
 
 #include "esp_camera.h"
+#include "driver/i2s.h"
 
 #include "hermes_protocol.h"
 
 #define ENABLE_ESP_CMD 1
+#define ENABLE_MIC 1
 
 static const uint8_t UART_RX_PIN = D7;
 static const uint8_t UART_TX_PIN = D6;
@@ -13,6 +15,14 @@ static const uint8_t UART_TX_PIN = D6;
 static const uint32_t CAMERA_INTERVAL_MS = 2000;
 static const int SCENE_STRIDE = 4;
 static const int SCENE_SAMPLES = (160 / SCENE_STRIDE) * (120 / SCENE_STRIDE);
+
+static const uint32_t MIC_SAMPLE_RATE = 16000;
+static const size_t MIC_WINDOW_SAMPLES = 512;
+static const uint32_t MIC_UPDATE_MS = 100;
+static const float MIC_NOISE_ALPHA = 0.01f;
+static const int MIC_I2S_BCK_PIN = 42;
+static const int MIC_I2S_WS_PIN = 41;
+static const int MIC_I2S_DATA_PIN = 2;
 
 static uint32_t lastSendMs = 0;
 static uint32_t lastCameraMs = 0;
@@ -22,6 +32,14 @@ static float cameraLight = NAN;
 static float cameraScene = NAN;
 static uint8_t scenePrev[SCENE_SAMPLES];
 static bool scenePrevValid = false;
+
+static bool micOk = false;
+static float micRms = NAN;
+static float micPeak = NAN;
+static float micNoiseFloor = NAN;
+static float micDelta = NAN;
+static uint32_t lastMicMs = 0;
+static int16_t micSamples[MIC_WINDOW_SAMPLES];
 
 static char cmdBuffer[64];
 static size_t cmdLen = 0;
@@ -157,6 +175,110 @@ static void sampleCamera(uint32_t now) {
   }
 }
 
+static bool initMic() {
+#if ENABLE_MIC
+  i2s_config_t config = {};
+  config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX);
+  config.sample_rate = MIC_SAMPLE_RATE;
+  config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  config.communication_format = I2S_COMM_FORMAT_I2S;
+  config.intr_alloc_flags = 0;
+  config.dma_buf_count = 4;
+  config.dma_buf_len = MIC_WINDOW_SAMPLES;
+  config.use_apll = false;
+  config.tx_desc_auto_clear = false;
+  config.fixed_mclk = 0;
+
+  i2s_pin_config_t pinConfig = {};
+  pinConfig.bck_io_num = MIC_I2S_BCK_PIN;
+  pinConfig.ws_io_num = MIC_I2S_WS_PIN;
+  pinConfig.data_out_num = -1;
+  pinConfig.data_in_num = MIC_I2S_DATA_PIN;
+
+  esp_err_t err = i2s_driver_install(I2S_NUM_0, &config, 0, nullptr);
+  if (err != ESP_OK) {
+    Serial.print("I2S install failed: 0x");
+    Serial.println(static_cast<unsigned long>(err), HEX);
+    return false;
+  }
+
+  err = i2s_set_pin(I2S_NUM_0, &pinConfig);
+  if (err != ESP_OK) {
+    Serial.print("I2S set pin failed: 0x");
+    Serial.println(static_cast<unsigned long>(err), HEX);
+    i2s_driver_uninstall(I2S_NUM_0);
+    return false;
+  }
+
+  i2s_zero_dma_buffer(I2S_NUM_0);
+  return true;
+#else
+  return false;
+#endif
+}
+
+static void sampleMic(uint32_t now) {
+#if ENABLE_MIC
+  if (!micOk || (now - lastMicMs) < MIC_UPDATE_MS) {
+    return;
+  }
+  lastMicMs = now;
+
+  size_t bytesRead = 0;
+  esp_err_t err = i2s_read(
+      I2S_NUM_0,
+      micSamples,
+      sizeof(micSamples),
+      &bytesRead,
+      pdMS_TO_TICKS(20));
+  if (err != ESP_OK || bytesRead == 0) {
+    return;
+  }
+
+  const size_t sampleCount = bytesRead / sizeof(int16_t);
+  if (sampleCount == 0) {
+    return;
+  }
+
+  int32_t peak = 0;
+  int64_t sumSquares = 0;
+  for (size_t i = 0; i < sampleCount; i++) {
+    const int32_t v = micSamples[i];
+    const int32_t av = abs(v);
+    if (av > peak) {
+      peak = av;
+    }
+    sumSquares += static_cast<int64_t>(v) * static_cast<int64_t>(v);
+  }
+
+  const float meanSquare = static_cast<float>(sumSquares) / static_cast<float>(sampleCount);
+  float rms = sqrtf(meanSquare) / 32768.0f;
+  float pk = static_cast<float>(peak) / 32768.0f;
+  if (rms < 0.0f) {
+    rms = 0.0f;
+  } else if (rms > 1.0f) {
+    rms = 1.0f;
+  }
+  if (pk < 0.0f) {
+    pk = 0.0f;
+  } else if (pk > 1.0f) {
+    pk = 1.0f;
+  }
+
+  micRms = rms;
+  micPeak = pk;
+  if (isnan(micNoiseFloor)) {
+    micNoiseFloor = rms;
+  } else {
+    micNoiseFloor += MIC_NOISE_ALPHA * (rms - micNoiseFloor);
+  }
+  micDelta = (rms > micNoiseFloor) ? (rms - micNoiseFloor) : 0.0f;
+#else
+  (void)now;
+#endif
+}
+
 static void handleSerial1Commands() {
 #if ENABLE_ESP_CMD
   while (Serial1.available() > 0) {
@@ -194,6 +316,9 @@ static void sendTelemetryLine() {
   char ctBuffer[16];
   char lightBuffer[16];
   char sceneBuffer[16];
+  char micBuffer[16];
+  char micPkBuffer[16];
+  char micNfBuffer[16];
   if (isnan(tempC)) {
     snprintf(ctBuffer, sizeof(ctBuffer), "nan");
   } else {
@@ -201,12 +326,15 @@ static void sendTelemetryLine() {
   }
   formatFloat(lightBuffer, sizeof(lightBuffer), cameraLight, 2);
   formatFloat(sceneBuffer, sizeof(sceneBuffer), cameraScene, 2);
+  formatFloat(micBuffer, sizeof(micBuffer), micRms, 3);
+  formatFloat(micPkBuffer, sizeof(micPkBuffer), micPeak, 3);
+  formatFloat(micNfBuffer, sizeof(micNfBuffer), micNoiseFloor, 3);
 
-  char line[180];
+  char line[240];
   snprintf(
       line,
       sizeof(line),
-      "%sup=%lu,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s\n",
+      "%sup=%lu,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s\n",
       SENS_PREFIX,
       static_cast<unsigned long>(uptimeSec),
       static_cast<unsigned long>(frame),
@@ -215,7 +343,10 @@ static void sendTelemetryLine() {
       static_cast<unsigned long>(psram),
       ctBuffer,
       lightBuffer,
-      sceneBuffer);
+      sceneBuffer,
+      micBuffer,
+      micPkBuffer,
+      micNfBuffer);
 
   Serial1.print(line);
 }
@@ -227,12 +358,14 @@ void setup() {
   delay(50);
   Serial.println("ESP32 telemetry sender ready");
   initCamera();
+  micOk = initMic();
 }
 
 void loop() {
   const uint32_t now = millis();
   handleSerial1Commands();
   sampleCamera(now);
+  sampleMic(now);
   if (now - lastSendMs >= 1000) {
     lastSendMs = now;
     sendTelemetryLine();
