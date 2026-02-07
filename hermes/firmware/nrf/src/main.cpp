@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <math.h>
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -39,9 +40,19 @@ static const float BASELINE_ALPHA = 0.01f;
 static const uint32_t AIR_EVENT_COOLDOWN_MS = 20000;
 static const uint32_t LIGHT_EVENT_COOLDOWN_MS = 20000;
 static const uint32_t NOISE_EVENT_COOLDOWN_MS = 20000;
+static const uint32_t DISPLAY_FOCUS_INTERVAL_MS = 1200;
 
-static const uint32_t DISPLAY_INTERVAL_MS = 500;
-static const uint32_t DISPLAY_FOCUS_INTERVAL_MS = 1000;
+static const int HIST_N = 120;
+
+enum UiStack {
+  UI_DEBUG = 0,
+  UI_USER
+};
+
+static const int DEBUG_PAGE_COUNT = 3;
+static const int USER_PAGE_COUNT = 4;
+static const uint32_t DISPLAY_DEBUG_INTERVAL_MS = 400;
+static const uint32_t DISPLAY_USER_INTERVAL_MS = 800;
 
 static Adafruit_SSD1306 displayEnv(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 static Adafruit_SSD1306 displayEsp(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -72,7 +83,6 @@ static float shtHumidity = NAN;
 static uint16_t sgpTvoc = 0;
 static uint16_t sgpEco2 = 0;
 
-static const int HIST_N = 120;
 static float histTemp[HIST_N];
 static float histRh[HIST_N];
 static float histEco2[HIST_N];
@@ -118,14 +128,9 @@ static float deltaTvoc = NAN;
 static float deltaLight = NAN;
 static float deltaMic = NAN;
 
-enum DisplayMode {
-  MODE_DEFAULT = 0,
-  MODE_GRAPHS,
-  MODE_LINK_DEBUG,
-  MODE_ENV_BIG
-};
-
-static DisplayMode displayMode = MODE_DEFAULT;
+static UiStack uiStack = UI_USER;
+static int debugPageIndex = 0;
+static int userPageIndex = 0;
 static bool focusMode = false;
 static uint32_t focusModeUntilMs = 0;
 static bool debugMode = false;
@@ -350,7 +355,7 @@ static void formatFloat(char *buffer, size_t size, float value, int precision) {
 }
 
 static bool isValid(float value) {
-  return !isnan(value) && isfinite(value);
+  return (value == value) && (fabsf(value) < 3.4e38f);
 }
 
 static float computeRoc(float current, float past, float dtMin) {
@@ -399,6 +404,21 @@ static void updateRocRing(RocRing *ring, uint32_t now, float current, float *roc
   if (!isValid(current)) {
     *rocOut = NAN;
     resetRocRing(ring);
+    return;
+  }
+
+  *rocOut = computeRingRoc(ring, current, now);
+  ring->ms[ring->index] = now;
+  ring->v[ring->index] = current;
+  ring->index = (ring->index + 1) % ROC_WINDOW_SAMPLES;
+  if (ring->count < ROC_WINDOW_SAMPLES) {
+    ring->count++;
+  }
+}
+
+static void updateRocRingOptional(RocRing *ring, uint32_t now, float current, float *rocOut) {
+  if (!isValid(current)) {
+    *rocOut = NAN;
     return;
   }
 
@@ -542,8 +562,8 @@ static void updateHistory(uint32_t now) {
   updateRocRing(&rocRhRing, now, rh, &rocRh);
   updateRocRing(&rocEco2Ring, now, eco2, &rocEco2);
   updateRocRing(&rocTvocRing, now, tvoc, &rocTvoc);
-  updateRocRing(&rocLightRing, now, light, &rocLight);
-  updateRocRing(&rocMicRing, now, mic, &rocMic);
+  updateRocRingOptional(&rocLightRing, now, light, &rocLight);
+  updateRocRingOptional(&rocMicRing, now, mic, &rocMic);
 
   updateBaseline(t, &baseTemp);
   updateBaseline(rh, &baseRh);
@@ -741,7 +761,7 @@ static void updateSwitch(uint32_t now) {
     swLastChangeMs = now;
     debugMode = !swState;
     usbExportEnabled = debugMode;
-    displayMode = debugMode ? MODE_LINK_DEBUG : MODE_DEFAULT;
+    uiStack = debugMode ? UI_DEBUG : UI_USER;
     softResetState(now);
   }
 }
@@ -817,6 +837,24 @@ static void drawSparkline(
     prevX = xPos;
     prevY = yPos;
   }
+}
+
+static float getSmoothedValue(const float *series) {
+  if (histCount == 0) {
+    return NAN;
+  }
+  float sum = 0.0f;
+  int count = 0;
+  for (int i = 0; i < 3 && i < histCount; i++) {
+    const int idx = (histIndex - 1 - i + HIST_N) % HIST_N;
+    const float v = series[idx];
+    if (isnan(v)) {
+      continue;
+    }
+    sum += v;
+    count++;
+  }
+  return (count > 0) ? (sum / static_cast<float>(count)) : NAN;
 }
 
 static void readSensors(uint32_t now) {
@@ -995,6 +1033,407 @@ static void drawLinkDebugDisplay() {
   displayEnv.display();
 }
 
+static void drawDebugLinkPage(uint32_t now) {
+  displayEnv.clearDisplay();
+  displayEnv.setTextSize(1);
+  displayEnv.setTextColor(SSD1306_WHITE);
+
+  displayEnv.setCursor(0, 0);
+  displayEnv.print("ESP");
+
+  displayEnv.setCursor(0, 8);
+  displayEnv.print("up ");
+  displayEnv.print(espTelemetry.up);
+
+  displayEnv.setCursor(0, 16);
+  displayEnv.print("rssi ");
+  displayEnv.print(espTelemetry.rssi);
+
+  displayEnv.setCursor(0, 24);
+  displayEnv.print("heap ");
+  displayEnv.print(espTelemetry.heap);
+
+  displayEnv.setCursor(0, 32);
+  displayEnv.print("psram ");
+  displayEnv.print(espTelemetry.psram);
+
+  displayEnv.setCursor(0, 40);
+  displayEnv.print("ct ");
+  if (isnan(espTelemetry.ct)) {
+    displayEnv.print("nan");
+  } else {
+    displayEnv.print(espTelemetry.ct, 1);
+  }
+
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+
+  drawLinkStatsDisplay(now);
+}
+
+static void drawDebugSensorsPage(uint32_t now) {
+  displayEnv.clearDisplay();
+  displayEnv.setTextSize(1);
+  displayEnv.setTextColor(SSD1306_WHITE);
+
+  displayEnv.setCursor(0, 0);
+  displayEnv.print("ENV");
+
+  displayEnv.setCursor(0, 8);
+  displayEnv.print("T ");
+  if (isnan(shtTempC)) {
+    displayEnv.print("nan");
+  } else {
+    displayEnv.print(shtTempC, 1);
+  }
+  displayEnv.print(" RH ");
+  if (isnan(shtHumidity)) {
+    displayEnv.print("nan");
+  } else {
+    displayEnv.print(shtHumidity, 1);
+  }
+
+  displayEnv.setCursor(0, 16);
+  displayEnv.print("eCO2 ");
+  displayEnv.print(sgpEco2);
+
+  displayEnv.setCursor(0, 24);
+  displayEnv.print("TVOC ");
+  displayEnv.print(sgpTvoc);
+
+  displayEnv.setCursor(0, 32);
+  displayEnv.print("SHT ");
+  displayEnv.print(shtOk ? "ok" : "err");
+
+  displayEnv.setCursor(0, 40);
+  displayEnv.print("SGP ");
+  displayEnv.print(sgpOk ? "ok" : "err");
+
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+
+  displayEsp.clearDisplay();
+  displayEsp.setTextSize(1);
+  displayEsp.setTextColor(SSD1306_WHITE);
+
+  displayEsp.setCursor(0, 0);
+  displayEsp.print("ESP");
+
+  displayEsp.setCursor(0, 8);
+  displayEsp.print("light ");
+  if (isnan(espTelemetry.light)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(espTelemetry.light, 2);
+  }
+
+  displayEsp.setCursor(0, 16);
+  displayEsp.print("scene ");
+  if (isnan(espTelemetry.scene)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(espTelemetry.scene, 2);
+  }
+
+  displayEsp.setCursor(0, 24);
+  displayEsp.print("mic ");
+  if (isnan(espTelemetry.mic)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(espTelemetry.mic, 2);
+  }
+
+  displayEsp.setCursor(0, 32);
+  displayEsp.print("micpk ");
+  if (isnan(espTelemetry.micpk)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(espTelemetry.micpk, 2);
+  }
+
+  displayEsp.setCursor(0, 40);
+  displayEsp.print("micnf ");
+  if (isnan(espTelemetry.micnf)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(espTelemetry.micnf, 2);
+  }
+
+  drawCornerFlags(displayEsp, now);
+  displayEsp.display();
+}
+
+static void drawDebugDerivedPage(uint32_t now) {
+  displayEnv.clearDisplay();
+  displayEnv.setTextSize(1);
+  displayEnv.setTextColor(SSD1306_WHITE);
+
+  displayEnv.setCursor(0, 0);
+  displayEnv.print("ROC");
+
+  displayEnv.setCursor(0, 8);
+  displayEnv.print("rt ");
+  if (isnan(rocTemp)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(rocTemp, 2);
+  }
+
+  displayEnv.setCursor(0, 16);
+  displayEnv.print("rrh ");
+  if (isnan(rocRh)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(rocRh, 2);
+  }
+
+  displayEnv.setCursor(0, 24);
+  displayEnv.print("rco2 ");
+  if (isnan(rocEco2)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(rocEco2, 1);
+  }
+
+  displayEnv.setCursor(0, 32);
+  displayEnv.print("rtv ");
+  if (isnan(rocTvoc)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(rocTvoc, 1);
+  }
+
+  displayEnv.setCursor(0, 40);
+  displayEnv.print("rli ");
+  if (isnan(rocLight)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(rocLight, 2);
+  }
+
+  displayEnv.setCursor(0, 48);
+  displayEnv.print("rmic ");
+  if (isnan(rocMic)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(rocMic, 2);
+  }
+
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+
+  displayEsp.clearDisplay();
+  displayEsp.setTextSize(1);
+  displayEsp.setTextColor(SSD1306_WHITE);
+
+  displayEsp.setCursor(0, 0);
+  displayEsp.print("BASE");
+
+  displayEsp.setCursor(0, 8);
+  displayEsp.print("bt ");
+  if (isnan(baseTemp)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(baseTemp, 2);
+  }
+
+  displayEsp.setCursor(0, 16);
+  displayEsp.print("brh ");
+  if (isnan(baseRh)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(baseRh, 2);
+  }
+
+  displayEsp.setCursor(0, 24);
+  displayEsp.print("bco2 ");
+  if (isnan(baseEco2)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(baseEco2, 1);
+  }
+
+  displayEsp.setCursor(0, 32);
+  displayEsp.print("btv ");
+  if (isnan(baseTvoc)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(baseTvoc, 1);
+  }
+
+  displayEsp.setCursor(0, 40);
+  displayEsp.print("DEL dco2 ");
+  if (isnan(deltaEco2)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(deltaEco2, 1);
+  }
+
+  displayEsp.setCursor(0, 48);
+  displayEsp.print("dmic ");
+  if (isnan(deltaMic)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(deltaMic, 2);
+  }
+
+  drawCornerFlags(displayEsp, now);
+  displayEsp.display();
+}
+
+static void renderDebugPage(uint32_t now, int pageIndex) {
+  const int idx = (pageIndex < 0) ? 0 : (pageIndex % DEBUG_PAGE_COUNT);
+  switch (idx) {
+    case 1:
+      drawDebugSensorsPage(now);
+      break;
+    case 2:
+      drawDebugDerivedPage(now);
+      break;
+    case 0:
+    default:
+      drawDebugLinkPage(now);
+      break;
+  }
+}
+
+static void drawUserOverviewPage(uint32_t now) {
+  displayEnv.clearDisplay();
+  displayEnv.setTextColor(SSD1306_WHITE);
+
+  const float tSmooth = getSmoothedValue(histTemp);
+  const float rhSmooth = getSmoothedValue(histRh);
+
+  displayEnv.setTextSize(2);
+  displayEnv.setCursor(0, 0);
+  if (isnan(tSmooth)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(tSmooth, 1);
+  }
+
+  displayEnv.setTextSize(1);
+  displayEnv.setCursor(0, 24);
+  displayEnv.print("RH ");
+  if (isnan(rhSmooth)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(rhSmooth, 1);
+  }
+
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+
+  displayEsp.clearDisplay();
+  displayEsp.setTextColor(SSD1306_WHITE);
+
+  const float eco2Smooth = getSmoothedValue(histEco2);
+
+  displayEsp.setTextSize(2);
+  displayEsp.setCursor(0, 0);
+  if (isnan(eco2Smooth)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(static_cast<int>(lroundf(eco2Smooth)));
+  }
+
+  displayEsp.setTextSize(1);
+  displayEsp.setCursor(0, 24);
+  displayEsp.print("TVOC ");
+  displayEsp.print(sgpTvoc);
+
+  displayEsp.setCursor(0, 32);
+  displayEsp.print("rCO2 ");
+  if (isnan(rocEco2)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(rocEco2, 1);
+  }
+
+  drawCornerFlags(displayEsp, now);
+  displayEsp.display();
+}
+
+static void drawUserAirTrendsPage(uint32_t now) {
+  displayEnv.clearDisplay();
+  displayEnv.setTextSize(1);
+  displayEnv.setTextColor(SSD1306_WHITE);
+  displayEnv.setCursor(0, 0);
+  displayEnv.print("CO2");
+  drawSparkline(0, 16, SCREEN_WIDTH, 48, histEco2, histCount, histIndex, displayEnv);
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+
+  displayEsp.clearDisplay();
+  displayEsp.setTextSize(1);
+  displayEsp.setTextColor(SSD1306_WHITE);
+  displayEsp.setCursor(0, 0);
+  displayEsp.print("TVOC");
+  drawSparkline(0, 16, SCREEN_WIDTH, 48, histTvoc, histCount, histIndex, displayEsp);
+  drawCornerFlags(displayEsp, now);
+  displayEsp.display();
+}
+
+static void drawUserEnvTrendsPage(uint32_t now) {
+  displayEnv.clearDisplay();
+  displayEnv.setTextSize(1);
+  displayEnv.setTextColor(SSD1306_WHITE);
+  displayEnv.setCursor(0, 0);
+  displayEnv.print("TEMP / RH");
+  drawSparkline(0, 16, SCREEN_WIDTH, 20, histTemp, histCount, histIndex, displayEnv);
+  drawSparkline(0, 40, SCREEN_WIDTH, 20, histRh, histCount, histIndex, displayEnv);
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+
+  displayEsp.clearDisplay();
+  displayEsp.setTextSize(1);
+  displayEsp.setTextColor(SSD1306_WHITE);
+  displayEsp.setCursor(0, 0);
+  displayEsp.print("LIGHT");
+  drawSparkline(0, 16, SCREEN_WIDTH, 48, histLight, histCount, histIndex, displayEsp);
+  drawCornerFlags(displayEsp, now);
+  displayEsp.display();
+}
+
+static void drawUserSoundPage(uint32_t now) {
+  displayEnv.clearDisplay();
+  displayEnv.setTextSize(1);
+  displayEnv.setTextColor(SSD1306_WHITE);
+  displayEnv.setCursor(0, 0);
+  displayEnv.print("MIC");
+  drawSparkline(0, 16, SCREEN_WIDTH, 48, histMic, histCount, histIndex, displayEnv);
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+
+  displayEsp.clearDisplay();
+  displayEsp.setTextSize(1);
+  displayEsp.setTextColor(SSD1306_WHITE);
+  displayEsp.setCursor(0, 0);
+  displayEsp.print("SCENE");
+  drawSparkline(0, 16, SCREEN_WIDTH, 48, histScene, histCount, histIndex, displayEsp);
+  drawCornerFlags(displayEsp, now);
+  displayEsp.display();
+}
+
+static void renderUserPage(uint32_t now, int pageIndex) {
+  const int idx = (pageIndex < 0) ? 0 : (pageIndex % USER_PAGE_COUNT);
+  switch (idx) {
+    case 1:
+      drawUserAirTrendsPage(now);
+      break;
+    case 2:
+      drawUserEnvTrendsPage(now);
+      break;
+    case 3:
+      drawUserSoundPage(now);
+      break;
+    case 0:
+    default:
+      drawUserOverviewPage(now);
+      break;
+  }
+}
+
 static void drawEnvBigDisplay() {
   displayEnv.clearDisplay();
   displayEnv.setTextSize(2);
@@ -1108,23 +1547,10 @@ static void drawGraphsDisplay(uint32_t now) {
 }
 
 static void renderDisplays(uint32_t now) {
-  switch (displayMode) {
-    case MODE_GRAPHS:
-      drawGraphsDisplay(now);
-      break;
-    case MODE_LINK_DEBUG:
-      drawLinkDebugDisplay();
-      drawLinkStatsDisplay(now);
-      break;
-    case MODE_ENV_BIG:
-      drawEnvBigDisplay();
-      drawEnvBigLeftDisplay();
-      break;
-    case MODE_DEFAULT:
-    default:
-      drawEnvDisplay();
-      drawEspDisplay(now);
-      break;
+  if (uiStack == UI_DEBUG) {
+    renderDebugPage(now, debugPageIndex);
+  } else {
+    renderUserPage(now, userPageIndex);
   }
 }
 
@@ -1136,27 +1562,21 @@ static void refreshNow(uint32_t now) {
 }
 
 static void handleShortPress(uint32_t now) {
-  switch (displayMode) {
-    case MODE_DEFAULT:
-      displayMode = MODE_GRAPHS;
-      break;
-    case MODE_GRAPHS:
-      displayMode = MODE_LINK_DEBUG;
-      break;
-    case MODE_LINK_DEBUG:
-      displayMode = MODE_ENV_BIG;
-      break;
-    case MODE_ENV_BIG:
-    default:
-      displayMode = MODE_DEFAULT;
-      break;
+  if (uiStack == UI_DEBUG) {
+    debugPageIndex = (debugPageIndex + 1) % DEBUG_PAGE_COUNT;
+  } else {
+    userPageIndex = (userPageIndex + 1) % USER_PAGE_COUNT;
   }
   lastDisplayMs = now;
   renderDisplays(now);
 }
 
 static void handleDoublePress(uint32_t now) {
-  refreshNow(now);
+  if (uiStack == UI_DEBUG) {
+    refreshNow(now);
+  } else {
+    Serial.println("EVT,mark");
+  }
 }
 
 static void handleLongPress(uint32_t now) {
@@ -1239,7 +1659,9 @@ static void updateLed(uint32_t now) {
 }
 
 static void updateDisplays(uint32_t now) {
-  const uint32_t interval = focusMode ? DISPLAY_FOCUS_INTERVAL_MS : DISPLAY_INTERVAL_MS;
+  const uint32_t interval = focusMode
+      ? DISPLAY_FOCUS_INTERVAL_MS
+      : (uiStack == UI_USER ? DISPLAY_USER_INTERVAL_MS : DISPLAY_DEBUG_INTERVAL_MS);
   if (now - lastDisplayMs < interval) {
     return;
   }
@@ -1288,7 +1710,7 @@ void setup() {
   swLastChangeMs = millis();
   debugMode = !swState;
   usbExportEnabled = debugMode;
-  displayMode = debugMode ? MODE_LINK_DEBUG : MODE_DEFAULT;
+  uiStack = debugMode ? UI_DEBUG : UI_USER;
 
   shtOk = sht31.begin(0x44);
   if (!shtOk) {
@@ -1309,6 +1731,7 @@ void loop() {
   updateHistory(now);
   updateMicEvents(now);
   updateSwitch(now);
+  uiStack = debugMode ? UI_DEBUG : UI_USER;
   updateButton(now);
   updateLed(now);
   if (focusMode && now >= focusModeUntilMs) {
