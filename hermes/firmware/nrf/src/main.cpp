@@ -83,19 +83,19 @@ static float histMic[HIST_N];
 static int histIndex = 0;
 static int histCount = 0;
 
-struct RocSample {
-  uint32_t ms = 0;
-  float t = NAN;
-  float rh = NAN;
-  float eco2 = NAN;
-  float tvoc = NAN;
-  float light = NAN;
-  float mic = NAN;
+struct RocRing {
+  uint32_t ms[ROC_WINDOW_SAMPLES];
+  float v[ROC_WINDOW_SAMPLES];
+  int index = 0;
+  int count = 0;
 };
 
-static RocSample rocSamples[ROC_WINDOW_SAMPLES];
-static int rocIndex = 0;
-static int rocCount = 0;
+static RocRing rocTempRing;
+static RocRing rocRhRing;
+static RocRing rocEco2Ring;
+static RocRing rocTvocRing;
+static RocRing rocLightRing;
+static RocRing rocMicRing;
 
 static float rocTemp = NAN;
 static float rocRh = NAN;
@@ -349,29 +349,66 @@ static void formatFloat(char *buffer, size_t size, float value, int precision) {
   snprintf(buffer, size, format, value);
 }
 
+static bool isValid(float value) {
+  return !isnan(value) && isfinite(value);
+}
+
 static float computeRoc(float current, float past, float dtMin) {
-  if (isnan(current) || isnan(past) || dtMin <= 0.0f) {
+  if (!isValid(current) || !isValid(past) || dtMin <= 0.0f) {
     return NAN;
   }
   return (current - past) / dtMin;
 }
 
 static void updateBaseline(float current, float *baseline) {
-  if (isnan(current)) {
+  if (!isValid(current)) {
     return;
   }
-  if (isnan(*baseline)) {
+  if (!isValid(*baseline)) {
     *baseline = current;
   } else {
-    *baseline += BASELINE_ALPHA * (current - *baseline);
+    *baseline = (*baseline * (1.0f - BASELINE_ALPHA)) + (current * BASELINE_ALPHA);
   }
 }
 
 static float computeDelta(float current, float baseline) {
-  if (isnan(current) || isnan(baseline)) {
+  if (!isValid(current) || !isValid(baseline)) {
     return NAN;
   }
   return current - baseline;
+}
+
+static void resetRocRing(RocRing *ring) {
+  for (int i = 0; i < ROC_WINDOW_SAMPLES; i++) {
+    ring->ms[i] = 0;
+    ring->v[i] = NAN;
+  }
+  ring->index = 0;
+  ring->count = 0;
+}
+
+static float computeRingRoc(const RocRing *ring, float current, uint32_t now) {
+  if (!isValid(current) || ring->count < ROC_WINDOW_SAMPLES || ring->ms[ring->index] == 0) {
+    return NAN;
+  }
+  const float dtMin = static_cast<float>(now - ring->ms[ring->index]) / 60000.0f;
+  return computeRoc(current, ring->v[ring->index], dtMin);
+}
+
+static void updateRocRing(RocRing *ring, uint32_t now, float current, float *rocOut) {
+  if (!isValid(current)) {
+    *rocOut = NAN;
+    resetRocRing(ring);
+    return;
+  }
+
+  *rocOut = computeRingRoc(ring, current, now);
+  ring->ms[ring->index] = now;
+  ring->v[ring->index] = current;
+  ring->index = (ring->index + 1) % ROC_WINDOW_SAMPLES;
+  if (ring->count < ROC_WINDOW_SAMPLES) {
+    ring->count++;
+  }
 }
 
 static void exportUsbLine(uint32_t now) {
@@ -494,12 +531,6 @@ static void updateHistory(uint32_t now) {
   }
   lastSampleMs = now;
 
-  const bool hasPast = (rocCount >= ROC_WINDOW_SAMPLES) && (rocSamples[rocIndex].ms != 0);
-  float dtMin = NAN;
-  if (hasPast) {
-    dtMin = static_cast<float>(now - rocSamples[rocIndex].ms) / 60000.0f;
-  }
-
   const float t = shtTempC;
   const float rh = shtHumidity;
   const float eco2 = static_cast<float>(sgpEco2);
@@ -507,12 +538,12 @@ static void updateHistory(uint32_t now) {
   const float light = espTelemetry.light;
   const float mic = espTelemetry.mic;
 
-  rocTemp = hasPast ? computeRoc(t, rocSamples[rocIndex].t, dtMin) : NAN;
-  rocRh = hasPast ? computeRoc(rh, rocSamples[rocIndex].rh, dtMin) : NAN;
-  rocEco2 = hasPast ? computeRoc(eco2, rocSamples[rocIndex].eco2, dtMin) : NAN;
-  rocTvoc = hasPast ? computeRoc(tvoc, rocSamples[rocIndex].tvoc, dtMin) : NAN;
-  rocLight = hasPast ? computeRoc(light, rocSamples[rocIndex].light, dtMin) : NAN;
-  rocMic = hasPast ? computeRoc(mic, rocSamples[rocIndex].mic, dtMin) : NAN;
+  updateRocRing(&rocTempRing, now, t, &rocTemp);
+  updateRocRing(&rocRhRing, now, rh, &rocRh);
+  updateRocRing(&rocEco2Ring, now, eco2, &rocEco2);
+  updateRocRing(&rocTvocRing, now, tvoc, &rocTvoc);
+  updateRocRing(&rocLightRing, now, light, &rocLight);
+  updateRocRing(&rocMicRing, now, mic, &rocMic);
 
   updateBaseline(t, &baseTemp);
   updateBaseline(rh, &baseRh);
@@ -531,11 +562,6 @@ static void updateHistory(uint32_t now) {
   updateDerivedEvents(now);
   pushSample(t, rh, eco2, tvoc, light, espTelemetry.scene, mic);
 
-  rocSamples[rocIndex] = {now, t, rh, eco2, tvoc, light, mic};
-  rocIndex = (rocIndex + 1) % ROC_WINDOW_SAMPLES;
-  if (rocCount < ROC_WINDOW_SAMPLES) {
-    rocCount++;
-  }
   exportUsbLine(now);
 }
 
@@ -626,11 +652,12 @@ static void initHistory() {
     histMic[i] = NAN;
   }
 
-  for (int i = 0; i < ROC_WINDOW_SAMPLES; i++) {
-    rocSamples[i] = {};
-  }
-  rocIndex = 0;
-  rocCount = 0;
+  resetRocRing(&rocTempRing);
+  resetRocRing(&rocRhRing);
+  resetRocRing(&rocEco2Ring);
+  resetRocRing(&rocTvocRing);
+  resetRocRing(&rocLightRing);
+  resetRocRing(&rocMicRing);
 
   rocTemp = NAN;
   rocRh = NAN;
