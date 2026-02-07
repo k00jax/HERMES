@@ -72,6 +72,11 @@ struct EspTelemetry {
   float micpk = NAN;
   float micnf = NAN;
   uint32_t ntp = 0;
+  int camok = 0;
+  int camerr = 0;
+  int micok = 0;
+  int micerr = 0;
+  int wifist = 0;
 };
 
 static EspTelemetry espTelemetry;
@@ -235,6 +240,26 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_NTP) == 0) {
     espTelemetry.ntp = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+    return true;
+  }
+  if (strcmp(key, KEY_CAMOK) == 0) {
+    espTelemetry.camok = static_cast<int>(strtol(value, nullptr, 10));
+    return true;
+  }
+  if (strcmp(key, KEY_CAMERR) == 0) {
+    espTelemetry.camerr = static_cast<int>(strtol(value, nullptr, 10));
+    return true;
+  }
+  if (strcmp(key, KEY_MICOK) == 0) {
+    espTelemetry.micok = static_cast<int>(strtol(value, nullptr, 10));
+    return true;
+  }
+  if (strcmp(key, KEY_MICERR) == 0) {
+    espTelemetry.micerr = static_cast<int>(strtol(value, nullptr, 10));
+    return true;
+  }
+  if (strcmp(key, KEY_WIFIST) == 0) {
+    espTelemetry.wifist = static_cast<int>(strtol(value, nullptr, 10));
     return true;
   }
 
@@ -441,6 +466,9 @@ static void exportUsbLine(uint32_t now) {
   char ctBuf[16];
   char lightBuf[16];
   char sceneBuf[16];
+  char micBuf[16];
+  char micPkBuf[16];
+  char micNfBuf[16];
   char rtBuf[16];
   char rrhBuf[16];
   char rco2Buf[16];
@@ -465,6 +493,9 @@ static void exportUsbLine(uint32_t now) {
   formatFloat(ctBuf, sizeof(ctBuf), espTelemetry.ct, 2);
   formatFloat(lightBuf, sizeof(lightBuf), espTelemetry.light, 2);
   formatFloat(sceneBuf, sizeof(sceneBuf), espTelemetry.scene, 2);
+  formatFloat(micBuf, sizeof(micBuf), espTelemetry.mic, 3);
+  formatFloat(micPkBuf, sizeof(micPkBuf), espTelemetry.micpk, 3);
+  formatFloat(micNfBuf, sizeof(micNfBuf), espTelemetry.micnf, 3);
   formatFloat(rtBuf, sizeof(rtBuf), rocTemp, 2);
   formatFloat(rrhBuf, sizeof(rrhBuf), rocRh, 2);
   formatFloat(rco2Buf, sizeof(rco2Buf), rocEco2, 2);
@@ -485,14 +516,17 @@ static void exportUsbLine(uint32_t now) {
   formatFloat(dmicBuf, sizeof(dmicBuf), deltaMic, 2);
 
   const uint32_t ageMs = getAgeMs(now);
-    char line[600];
+  char line[760];
   snprintf(
       line,
       sizeof(line),
-      "LOG,t=%s,rh=%s,eco2=%u,tvoc=%u,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,bps=%lu,age=%lu,pf=%lu,rt=%s,rrh=%s,rco2=%s,rtv=%s,rli=%s,rmic=%s,bt=%s,brh=%s,bco2=%s,btv=%s,bli=%s,bmic=%s,dt=%s,drh=%s,dco2=%s,dtv=%s,dli=%s,dmic=%s\n",
+      "LOG,t=%s,rh=%s,eco2=%u,tvoc=%u,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s,bps=%lu,age=%lu,pf=%lu,rt=%s,rrh=%s,rco2=%s,rtv=%s,rli=%s,rmic=%s,bt=%s,brh=%s,bco2=%s,btv=%s,bli=%s,bmic=%s,dt=%s,drh=%s,dco2=%s,dtv=%s,dli=%s,dmic=%s,camok=%d,camerr=%d,micok=%d,micerr=%d,wifist=%d\n",
       tBuf,
       rhBuf,
       static_cast<unsigned>(sgpEco2),
+      micBuf,
+      micPkBuf,
+      micNfBuf,
       static_cast<unsigned>(sgpTvoc),
       static_cast<unsigned long>(espTelemetry.n),
       espTelemetry.rssi,
@@ -501,6 +535,9 @@ static void exportUsbLine(uint32_t now) {
       ctBuf,
       lightBuf,
       sceneBuf,
+      micBuf,
+      micPkBuf,
+      micNfBuf,
       static_cast<unsigned long>(bps),
       static_cast<unsigned long>(ageMs),
       static_cast<unsigned long>(parseFail),
@@ -521,7 +558,12 @@ static void exportUsbLine(uint32_t now) {
       dco2Buf,
       dtvBuf,
       dliBuf,
-      dmicBuf);
+      dmicBuf,
+      espTelemetry.camok,
+      espTelemetry.camerr,
+      espTelemetry.micok,
+      espTelemetry.micerr,
+      espTelemetry.wifist);
   Serial.print(line);
 #else
   (void)now;

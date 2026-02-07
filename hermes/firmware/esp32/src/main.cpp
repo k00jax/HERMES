@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <math.h>
+#include <Wire.h>
 
 #include "esp_camera.h"
 #include "driver/i2s.h"
@@ -45,6 +46,7 @@ static uint32_t lastSendMs = 0;
 static uint32_t lastCameraMs = 0;
 static uint32_t packetCounter = 0;
 static bool cameraOk = false;
+static int cameraErr = 0;
 static float cameraLight = NAN;
 static float cameraScene = NAN;
 static uint8_t scenePrev[SCENE_SAMPLES];
@@ -55,8 +57,10 @@ static uint32_t ntpEpoch = 0;
 static uint32_t lastWifiCheckMs = 0;
 static uint32_t lastWifiBeginMs = 0;
 static bool ntpConfigured = false;
+static int wifiStatus = -1;
 
 static bool micOk = false;
+static int micErr = 0;
 static float micRms = NAN;
 static float micPeak = NAN;
 static float micNoiseFloor = NAN;
@@ -75,6 +79,28 @@ static void formatFloat(char *buffer, size_t size, float value, int precision) {
   char format[8];
   snprintf(format, sizeof(format), "%%.%df", precision);
   snprintf(buffer, size, format, value);
+}
+
+static void scanCameraBus() {
+  Wire.begin(40, 39);
+  uint8_t found = 0;
+  Serial.print("Camera SCCB scan:");
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print(" 0x");
+      if (addr < 16) {
+        Serial.print('0');
+      }
+      Serial.print(addr, HEX);
+      found++;
+      delay(2);
+    }
+  }
+  if (found == 0) {
+    Serial.print(" none");
+  }
+  Serial.println();
 }
 
 static void initCamera() {
@@ -105,11 +131,31 @@ static void initCamera() {
   config.jpeg_quality = 12;
   config.fb_count = 1;
 
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    config.pixel_format = PIXFORMAT_RGB565;
+  const int pwdnCandidates[] = { -1, 1 };
+  esp_err_t err = ESP_FAIL;
+  delay(200);
+  for (size_t i = 0; i < (sizeof(pwdnCandidates) / sizeof(pwdnCandidates[0])); i++) {
+    config.pin_pwdn = pwdnCandidates[i];
+    if (config.pin_pwdn >= 0) {
+      pinMode(config.pin_pwdn, OUTPUT);
+      digitalWrite(config.pin_pwdn, LOW);
+      delay(10);
+    }
+
     err = esp_camera_init(&config);
+    if (err != ESP_OK) {
+      config.pixel_format = PIXFORMAT_RGB565;
+      err = esp_camera_init(&config);
+    }
+
+    if (err == ESP_OK) {
+      break;
+    }
+
+    delay(200);
   }
+
+  cameraErr = static_cast<int>(err);
 
   if (err == ESP_OK) {
     cameraOk = true;
@@ -205,7 +251,7 @@ static bool initMic() {
   config.sample_rate = MIC_SAMPLE_RATE;
   config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
   config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
-  config.communication_format = I2S_COMM_FORMAT_I2S;
+  config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   config.intr_alloc_flags = 0;
   config.dma_buf_count = 4;
   config.dma_buf_len = MIC_WINDOW_SAMPLES;
@@ -221,6 +267,7 @@ static bool initMic() {
 
   esp_err_t err = i2s_driver_install(I2S_NUM_0, &config, 0, nullptr);
   if (err != ESP_OK) {
+    micErr = static_cast<int>(err);
     Serial.print("I2S install failed: 0x");
     Serial.println(static_cast<unsigned long>(err), HEX);
     return false;
@@ -228,6 +275,7 @@ static bool initMic() {
 
   err = i2s_set_pin(I2S_NUM_0, &pinConfig);
   if (err != ESP_OK) {
+    micErr = static_cast<int>(err);
     Serial.print("I2S set pin failed: 0x");
     Serial.println(static_cast<unsigned long>(err), HEX);
     i2s_driver_uninstall(I2S_NUM_0);
@@ -235,6 +283,7 @@ static bool initMic() {
   }
 
   i2s_zero_dma_buffer(I2S_NUM_0);
+  micErr = ESP_OK;
   return true;
 #else
   return false;
@@ -318,7 +367,8 @@ static void updateWifi(uint32_t now) {
   }
   lastWifiCheckMs = now;
 
-  if (WiFi.status() == WL_CONNECTED) {
+  wifiStatus = WiFi.status();
+  if (wifiStatus == WL_CONNECTED) {
     espRssi = WiFi.RSSI();
     if (!ntpConfigured) {
       configTime(0, 0, "pool.ntp.org", "time.nist.gov");
@@ -342,6 +392,7 @@ static void updateWifi(uint32_t now) {
   (void)now;
   espRssi = RSSI_NOT_CONNECTED;
   ntpEpoch = 0;
+  wifiStatus = -1;
 #endif
 }
 
@@ -396,11 +447,11 @@ static void sendTelemetryLine() {
   formatFloat(micPkBuffer, sizeof(micPkBuffer), micPeak, 3);
   formatFloat(micNfBuffer, sizeof(micNfBuffer), micNoiseFloor, 3);
 
-    char line[260];
+  char line[320];
   snprintf(
       line,
       sizeof(line),
-      "%sup=%lu,n=%lu,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s\n",
+      "%sup=%lu,n=%lu,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s,camok=%d,camerr=%d,micok=%d,micerr=%d,wifist=%d\n",
       SENS_PREFIX,
       static_cast<unsigned long>(uptimeSec),
       static_cast<unsigned long>(frame),
@@ -413,7 +464,12 @@ static void sendTelemetryLine() {
       sceneBuffer,
       micBuffer,
       micPkBuffer,
-      micNfBuffer);
+      micNfBuffer,
+      cameraOk ? 1 : 0,
+      cameraErr,
+      micOk ? 1 : 0,
+      micErr,
+      wifiStatus);
 
   Serial1.print(line);
 }
@@ -424,6 +480,7 @@ void setup() {
   Serial1.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   delay(50);
   Serial.println("ESP32 telemetry sender ready");
+  scanCameraBus();
   initCamera();
   micOk = initMic();
   initWifi();

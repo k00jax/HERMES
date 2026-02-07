@@ -17,6 +17,11 @@ static const char KEY_MICPK[] = "micpk";
 static const char KEY_MICNF[] = "micnf";
 static const char KEY_NTP[] = "ntp";
 static const char KEY_N[] = "n";
+static const char KEY_CAMOK[] = "camok";
+static const char KEY_CAMERR[] = "camerr";
+static const char KEY_MICOK[] = "micok";
+static const char KEY_MICERR[] = "micerr";
+static const char KEY_WIFIST[] = "wifist";
 
 static const int RSSI_NOT_CONNECTED = 999;
 
