@@ -48,6 +48,8 @@ static uint32_t packetCounter = 0;
 static bool cameraOk = false;
 static int cameraErr = 0;
 static int cameraAddr = -1;
+static int cameraSda = 40;
+static int cameraScl = 39;
 static float cameraLight = NAN;
 static float cameraScene = NAN;
 static uint8_t scenePrev[SCENE_SAMPLES];
@@ -90,34 +92,63 @@ static void waitForSerial(uint32_t timeoutMs) {
 }
 
 static void scanCameraBus() {
-  Wire.begin(40, 39);
-  uint8_t found = 0;
+  struct CameraBus {
+    int sda;
+    int scl;
+  };
+
+  const CameraBus buses[] = {
+      {40, 39},
+      {5, 6},
+      {7, 8}
+  };
+
   cameraAddr = -1;
-  Serial.print("Camera SCCB scan:");
-  Serial1.print("CAMSCAN");
-  for (uint8_t addr = 1; addr < 127; addr++) {
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0) {
-      Serial.print(" 0x");
-      if (addr < 16) {
-        Serial.print('0');
+  for (size_t i = 0; i < (sizeof(buses) / sizeof(buses[0])); i++) {
+    Wire.begin(buses[i].sda, buses[i].scl);
+    uint8_t found = 0;
+    Serial.print("Camera SCCB scan sda=");
+    Serial.print(buses[i].sda);
+    Serial.print(" scl=");
+    Serial.print(buses[i].scl);
+    Serial.print(":");
+    Serial1.print("CAMSCAN");
+    Serial1.print(",sda=");
+    Serial1.print(buses[i].sda);
+    Serial1.print(",scl=");
+    Serial1.print(buses[i].scl);
+
+    for (uint8_t addr = 1; addr < 127; addr++) {
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) {
+        Serial.print(" 0x");
+        if (addr < 16) {
+          Serial.print('0');
+        }
+        Serial.print(addr, HEX);
+        Serial1.print(',');
+        Serial1.print(addr, HEX);
+        found++;
+        if (cameraAddr < 0) {
+          cameraAddr = addr;
+          cameraSda = buses[i].sda;
+          cameraScl = buses[i].scl;
+        }
+        delay(2);
       }
-      Serial.print(addr, HEX);
-      Serial1.print(',');
-      Serial1.print(addr, HEX);
-      found++;
-      if (cameraAddr < 0) {
-        cameraAddr = addr;
-      }
-      delay(2);
+    }
+
+    if (found == 0) {
+      Serial.print(" none");
+      Serial1.print(",none");
+    }
+    Serial.println();
+    Serial1.println();
+
+    if (cameraAddr >= 0) {
+      return;
     }
   }
-  if (found == 0) {
-    Serial.print(" none");
-    Serial1.print(",none");
-  }
-  Serial.println();
-  Serial1.println();
 }
 
 static void initCamera() {
@@ -136,8 +167,8 @@ static void initCamera() {
   config.pin_pclk = 13;
   config.pin_vsync = 38;
   config.pin_href = 47;
-  config.pin_sccb_sda = 40;
-  config.pin_sccb_scl = 39;
+  config.pin_sccb_sda = cameraSda;
+  config.pin_sccb_scl = cameraScl;
   config.pin_pwdn = -1;
   config.pin_reset = -1;
   config.xclk_freq_hz = 20000000;
