@@ -3,7 +3,21 @@
 #include <Wire.h>
 
 #include "esp_camera.h"
+#if __has_include(<ESP_I2S.h>)
+#include <ESP_I2S.h>
+#define HAS_ESP_I2S 1
+#else
+#define HAS_ESP_I2S 0
+#endif
+#if !HAS_ESP_I2S && __has_include(<I2S.h>)
+#include <I2S.h>
+#define HAS_ARDUINO_I2S 1
+#else
+#define HAS_ARDUINO_I2S 0
+#endif
+#if !HAS_ESP_I2S && !HAS_ARDUINO_I2S
 #include "driver/i2s.h"
+#endif
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -34,6 +48,8 @@ static const uint32_t MIC_SAMPLE_RATE = 16000;
 static const size_t MIC_WINDOW_SAMPLES = 512;
 static const uint32_t MIC_UPDATE_MS = 100;
 static const float MIC_NOISE_ALPHA = 0.01f;
+static const int MIC_PDM_CLK_PIN = 42;
+static const int MIC_PDM_DATA_PIN = 41;
 static const int MIC_I2S_BCK_PIN = 42;
 static const int MIC_I2S_WS_PIN = 41;
 static const int MIC_I2S_DATA_PIN = 2;
@@ -70,6 +86,9 @@ static float micNoiseFloor = NAN;
 static float micDelta = NAN;
 static uint32_t lastMicMs = 0;
 static int16_t micSamples[MIC_WINDOW_SAMPLES];
+#if HAS_ESP_I2S
+static I2SClass micI2S;
+#endif
 
 static char cmdBuffer[64];
 static size_t cmdLen = 0;
@@ -294,6 +313,31 @@ static void sampleCamera(uint32_t now) {
 
 static bool initMic() {
 #if ENABLE_MIC
+#if HAS_ESP_I2S
+  micI2S.setPinsPdmRx(MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
+  if (!micI2S.begin(I2S_MODE_PDM_RX, MIC_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
+    Serial.println("PDM I2S init failed");
+    micErr = -1;
+    return false;
+  }
+  for (int i = 0; i < 256; i++) {
+    (void)micI2S.read();
+  }
+  micErr = ESP_OK;
+  return true;
+#elif HAS_ARDUINO_I2S
+  I2S.setAllPins(-1, MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN, -1, -1);
+  if (!I2S.begin(PDM_MONO_MODE, MIC_SAMPLE_RATE, 16)) {
+    Serial.println("PDM I2S init failed");
+    micErr = -1;
+    return false;
+  }
+  for (int i = 0; i < 256; i++) {
+    (void)I2S.read();
+  }
+  micErr = ESP_OK;
+  return true;
+#else
   i2s_config_t config = {};
   config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX);
   config.sample_rate = MIC_SAMPLE_RATE;
@@ -333,6 +377,7 @@ static bool initMic() {
   i2s_zero_dma_buffer(I2S_NUM_0);
   micErr = ESP_OK;
   return true;
+#endif
 #else
   return false;
 #endif
@@ -346,6 +391,17 @@ static void sampleMic(uint32_t now) {
   lastMicMs = now;
 
   size_t bytesRead = 0;
+#if HAS_ESP_I2S
+  bytesRead = micI2S.read(micSamples, sizeof(micSamples));
+  if (bytesRead == 0) {
+    return;
+  }
+#elif HAS_ARDUINO_I2S
+  bytesRead = I2S.read(reinterpret_cast<uint8_t *>(micSamples), sizeof(micSamples));
+  if (bytesRead == 0) {
+    return;
+  }
+#else
   esp_err_t err = i2s_read(
       I2S_NUM_0,
       micSamples,
@@ -355,6 +411,7 @@ static void sampleMic(uint32_t now) {
   if (err != ESP_OK || bytesRead == 0) {
     return;
   }
+#endif
 
   const size_t sampleCount = bytesRead / sizeof(int16_t);
   if (sampleCount == 0) {
