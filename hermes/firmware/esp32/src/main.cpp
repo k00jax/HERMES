@@ -34,7 +34,8 @@
 #include "hermes_protocol.h"
 
 #define ENABLE_ESP_CMD 1
-#define ENABLE_MIC 1
+#define ENABLE_CAMERA 0
+#define ENABLE_MIC 0
 #define ENABLE_WIFI 1
 
 static const uint8_t UART_RX_PIN = D7;
@@ -59,17 +60,7 @@ static const uint32_t WIFI_RETRY_MS = 5000;
 static const uint32_t NTP_VALID_AFTER = 1600000000UL;
 
 static uint32_t lastSendMs = 0;
-static uint32_t lastCameraMs = 0;
 static uint32_t packetCounter = 0;
-static bool cameraOk = false;
-static int cameraErr = 0;
-static int cameraAddr = -1;
-static int cameraSda = 40;
-static int cameraScl = 39;
-static float cameraLight = NAN;
-static float cameraScene = NAN;
-static uint8_t scenePrev[SCENE_SAMPLES];
-static bool scenePrevValid = false;
 
 static int espRssi = RSSI_NOT_CONNECTED;
 static uint32_t ntpEpoch = 0;
@@ -78,17 +69,6 @@ static uint32_t lastWifiBeginMs = 0;
 static bool ntpConfigured = false;
 static int wifiStatus = -1;
 
-static bool micOk = false;
-static int micErr = 0;
-static float micRms = NAN;
-static float micPeak = NAN;
-static float micNoiseFloor = NAN;
-static float micDelta = NAN;
-static uint32_t lastMicMs = 0;
-static int16_t micSamples[MIC_WINDOW_SAMPLES];
-#if HAS_ESP_I2S
-static I2SClass micI2S;
-#endif
 
 static char cmdBuffer[64];
 static size_t cmdLen = 0;
@@ -111,6 +91,7 @@ static void waitForSerial(uint32_t timeoutMs) {
 }
 
 static void scanCameraBus() {
+#if ENABLE_CAMERA
   struct CameraBus {
     int sda;
     int scl;
@@ -119,12 +100,23 @@ static void scanCameraBus() {
   const CameraBus buses[] = {
       {40, 39},
       {5, 6},
-      {7, 8}
+      {7, 8},
+      {1, 2},
+      {2, 1},
+      {3, 4},
+      {4, 3},
+      {8, 9},
+      {9, 8},
+      {17, 18},
+      {18, 17},
+      {41, 42},
+      {42, 41}
   };
 
   cameraAddr = -1;
   for (size_t i = 0; i < (sizeof(buses) / sizeof(buses[0])); i++) {
     Wire.begin(buses[i].sda, buses[i].scl);
+    Wire.setClock(10000);
     uint8_t found = 0;
     Serial.print("Camera SCCB scan sda=");
     Serial.print(buses[i].sda);
@@ -168,9 +160,11 @@ static void scanCameraBus() {
       return;
     }
   }
+#endif
 }
 
 static void initCamera() {
+#if ENABLE_CAMERA
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -232,9 +226,11 @@ static void initCamera() {
     Serial.print("Camera init failed: 0x");
     Serial.println(static_cast<unsigned long>(err), HEX);
   }
+#endif
 }
 
 static void sampleCamera(uint32_t now) {
+#if ENABLE_CAMERA
   if (!cameraOk || (now - lastCameraMs) < CAMERA_INTERVAL_MS) {
     return;
   }
@@ -309,6 +305,9 @@ static void sampleCamera(uint32_t now) {
       scenePrevValid = true;
     }
   }
+#else
+  (void)now;
+#endif
 }
 
 static bool initMic() {
@@ -536,27 +535,16 @@ static void sendTelemetryLine() {
   const float tempC = temperatureRead();
 
   char ctBuffer[16];
-  char lightBuffer[16];
-  char sceneBuffer[16];
-  char micBuffer[16];
-  char micPkBuffer[16];
-  char micNfBuffer[16];
   if (isnan(tempC)) {
     snprintf(ctBuffer, sizeof(ctBuffer), "nan");
   } else {
     snprintf(ctBuffer, sizeof(ctBuffer), "%.2f", tempC);
   }
-  formatFloat(lightBuffer, sizeof(lightBuffer), cameraLight, 2);
-  formatFloat(sceneBuffer, sizeof(sceneBuffer), cameraScene, 2);
-  formatFloat(micBuffer, sizeof(micBuffer), micRms, 3);
-  formatFloat(micPkBuffer, sizeof(micPkBuffer), micPeak, 3);
-  formatFloat(micNfBuffer, sizeof(micNfBuffer), micNoiseFloor, 3);
-
-    char line[340];
+  char line[220];
   snprintf(
       line,
       sizeof(line),
-      "%sup=%lu,n=%lu,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s,camok=%d,camerr=%d,micok=%d,micerr=%d,wifist=%d,camaddr=%d\n",
+      "%sup=%lu,n=%lu,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s\n",
       SENS_PREFIX,
       static_cast<unsigned long>(uptimeSec),
       static_cast<unsigned long>(frame),
@@ -564,18 +552,7 @@ static void sendTelemetryLine() {
       static_cast<unsigned long>(ntpEpoch),
       static_cast<unsigned long>(heap),
       static_cast<unsigned long>(psram),
-      ctBuffer,
-      lightBuffer,
-      sceneBuffer,
-      micBuffer,
-      micPkBuffer,
-      micNfBuffer,
-      cameraOk ? 1 : 0,
-      cameraErr,
-      micOk ? 1 : 0,
-      micErr,
-      wifiStatus,
-      cameraAddr);
+      ctBuffer);
 
   Serial1.print(line);
 }
@@ -589,7 +566,7 @@ void setup() {
   Serial.println("ESP32 telemetry sender ready");
   scanCameraBus();
   initCamera();
-  micOk = initMic();
+  initMic();
   initWifi();
 }
 

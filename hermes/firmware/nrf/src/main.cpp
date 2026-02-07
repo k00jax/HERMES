@@ -6,6 +6,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_SGP30.h>
 #include <Adafruit_SHT31.h>
+#include <PDM.h>
 
 #include "hermes_protocol.h"
 
@@ -41,6 +42,10 @@ static const uint32_t AIR_EVENT_COOLDOWN_MS = 20000;
 static const uint32_t LIGHT_EVENT_COOLDOWN_MS = 20000;
 static const uint32_t NOISE_EVENT_COOLDOWN_MS = 20000;
 static const uint32_t DISPLAY_FOCUS_INTERVAL_MS = 1200;
+static const uint32_t PDM_SAMPLE_RATE = 16000;
+static const uint32_t PDM_UPDATE_MS = 100;
+static const float MIC_NOISE_ALPHA = 0.01f;
+static const size_t PDM_BUFFER_SAMPLES = 256;
 
 static const int HIST_N = 120;
 
@@ -133,6 +138,16 @@ static float deltaEco2 = NAN;
 static float deltaTvoc = NAN;
 static float deltaLight = NAN;
 static float deltaMic = NAN;
+
+static bool localMicOk = false;
+static int localMicErr = 0;
+static float localMicRms = NAN;
+static float localMicPeak = NAN;
+static float localMicNoise = NAN;
+static int16_t pdmSamples[PDM_BUFFER_SAMPLES];
+static volatile size_t pdmBytesReady = 0;
+static volatile bool pdmReady = false;
+static uint32_t lastPdmUpdateMs = 0;
 
 static UiStack uiStack = UI_USER;
 static int debugPageIndex = 0;
@@ -384,6 +399,83 @@ static void formatFloat(char *buffer, size_t size, float value, int precision) {
   snprintf(buffer, size, format, value);
 }
 
+static void onPdmData() {
+  const int bytes = PDM.available();
+  if (bytes <= 0) {
+    return;
+  }
+  const size_t readBytes = (bytes > static_cast<int>(sizeof(pdmSamples)))
+      ? sizeof(pdmSamples)
+      : static_cast<size_t>(bytes);
+  PDM.read(pdmSamples, readBytes);
+  pdmBytesReady = readBytes;
+  pdmReady = true;
+}
+
+static void initLocalMic() {
+  PDM.onReceive(onPdmData);
+  if (!PDM.begin(1, PDM_SAMPLE_RATE)) {
+    Serial.println("PDM init failed");
+    localMicOk = false;
+    localMicErr = 1;
+    return;
+  }
+  localMicOk = true;
+  localMicErr = 0;
+  localMicRms = NAN;
+  localMicPeak = NAN;
+  localMicNoise = NAN;
+}
+
+static void updateLocalMic(uint32_t now) {
+  if (!localMicOk || (now - lastPdmUpdateMs) < PDM_UPDATE_MS) {
+    return;
+  }
+  if (!pdmReady) {
+    return;
+  }
+  pdmReady = false;
+  lastPdmUpdateMs = now;
+
+  const size_t sampleCount = pdmBytesReady / sizeof(int16_t);
+  if (sampleCount == 0) {
+    return;
+  }
+
+  int32_t peak = 0;
+  int64_t sumSquares = 0;
+  for (size_t i = 0; i < sampleCount; i++) {
+    const int32_t v = pdmSamples[i];
+    const int32_t av = abs(v);
+    if (av > peak) {
+      peak = av;
+    }
+    sumSquares += static_cast<int64_t>(v) * static_cast<int64_t>(v);
+  }
+
+  const float meanSquare = static_cast<float>(sumSquares) / static_cast<float>(sampleCount);
+  float rms = sqrtf(meanSquare) / 32768.0f;
+  float pk = static_cast<float>(peak) / 32768.0f;
+  if (rms < 0.0f) {
+    rms = 0.0f;
+  } else if (rms > 1.0f) {
+    rms = 1.0f;
+  }
+  if (pk < 0.0f) {
+    pk = 0.0f;
+  } else if (pk > 1.0f) {
+    pk = 1.0f;
+  }
+
+  localMicRms = rms;
+  localMicPeak = pk;
+  if (isnan(localMicNoise)) {
+    localMicNoise = rms;
+  } else {
+    localMicNoise += MIC_NOISE_ALPHA * (rms - localMicNoise);
+  }
+}
+
 static bool isValid(float value) {
   return (value == value) && (fabsf(value) < 3.4e38f);
 }
@@ -498,9 +590,9 @@ static void exportUsbLine(uint32_t now) {
   formatFloat(ctBuf, sizeof(ctBuf), espTelemetry.ct, 2);
   formatFloat(lightBuf, sizeof(lightBuf), espTelemetry.light, 2);
   formatFloat(sceneBuf, sizeof(sceneBuf), espTelemetry.scene, 2);
-  formatFloat(micBuf, sizeof(micBuf), espTelemetry.mic, 3);
-  formatFloat(micPkBuf, sizeof(micPkBuf), espTelemetry.micpk, 3);
-  formatFloat(micNfBuf, sizeof(micNfBuf), espTelemetry.micnf, 3);
+  formatFloat(micBuf, sizeof(micBuf), localMicRms, 3);
+  formatFloat(micPkBuf, sizeof(micPkBuf), localMicPeak, 3);
+  formatFloat(micNfBuf, sizeof(micNfBuf), localMicNoise, 3);
   formatFloat(rtBuf, sizeof(rtBuf), rocTemp, 2);
   formatFloat(rrhBuf, sizeof(rrhBuf), rocRh, 2);
   formatFloat(rco2Buf, sizeof(rco2Buf), rocEco2, 2);
@@ -563,8 +655,8 @@ static void exportUsbLine(uint32_t now) {
       dmicBuf,
       espTelemetry.camok,
       espTelemetry.camerr,
-      espTelemetry.micok,
-      espTelemetry.micerr,
+      localMicOk ? 1 : 0,
+      localMicErr,
       espTelemetry.wifist,
       espTelemetry.camaddr);
   Serial.print(line);
@@ -601,7 +693,7 @@ static void updateHistory(uint32_t now) {
   const float eco2 = static_cast<float>(sgpEco2);
   const float tvoc = static_cast<float>(sgpTvoc);
   const float light = espTelemetry.light;
-  const float mic = espTelemetry.mic;
+  const float mic = localMicRms;
 
   updateRocRing(&rocTempRing, now, t, &rocTemp);
   updateRocRing(&rocRhRing, now, rh, &rocRh);
@@ -678,13 +770,13 @@ static void updateMicEvents(uint32_t now) {
   }
   lastMicEventLineMs = lastLineMs;
 
-  if (isnan(espTelemetry.mic) || isnan(espTelemetry.micnf)) {
+  if (isnan(localMicRms) || isnan(localMicNoise)) {
     micSustainStartMs = 0;
     return;
   }
 
-  const float delta = (espTelemetry.mic > espTelemetry.micnf)
-      ? (espTelemetry.mic - espTelemetry.micnf)
+    const float delta = (localMicRms > localMicNoise)
+      ? (localMicRms - localMicNoise)
       : 0.0f;
 
   if (delta > MIC_SPIKE_DELTA && now >= micSpikeCooldownUntilMs) {
@@ -961,16 +1053,16 @@ static void readSensors(uint32_t now) {
 
   displayEnv.setCursor(0, 48);
   displayEnv.print("MIC ");
-  if (isnan(espTelemetry.mic)) {
+  if (isnan(localMicRms)) {
     displayEnv.print("--");
   } else {
-    displayEnv.print(espTelemetry.mic, 2);
+    displayEnv.print(localMicRms, 2);
   }
   displayEnv.print(" NF ");
-  if (isnan(espTelemetry.micnf)) {
+  if (isnan(localMicNoise)) {
     displayEnv.print("--");
   } else {
-    displayEnv.print(espTelemetry.micnf, 2);
+    displayEnv.print(localMicNoise, 2);
   }
 
   drawCornerFlags(displayEnv, millis());
@@ -1008,7 +1100,6 @@ static void readSensors(uint32_t now) {
   } else {
     displayEsp.print(espTelemetry.ct, 1);
   }
-
   displayEsp.setCursor(0, 40);
   displayEsp.print("bps ");
   displayEsp.print(bps);
@@ -1182,26 +1273,26 @@ static void drawDebugSensorsPage(uint32_t now) {
 
   displayEsp.setCursor(0, 24);
   displayEsp.print("mic ");
-  if (isnan(espTelemetry.mic)) {
+  if (isnan(localMicRms)) {
     displayEsp.print("--");
   } else {
-    displayEsp.print(espTelemetry.mic, 2);
+    displayEsp.print(localMicRms, 2);
   }
 
   displayEsp.setCursor(0, 32);
   displayEsp.print("micpk ");
-  if (isnan(espTelemetry.micpk)) {
+  if (isnan(localMicPeak)) {
     displayEsp.print("--");
   } else {
-    displayEsp.print(espTelemetry.micpk, 2);
+    displayEsp.print(localMicPeak, 2);
   }
 
   displayEsp.setCursor(0, 40);
   displayEsp.print("micnf ");
-  if (isnan(espTelemetry.micnf)) {
+  if (isnan(localMicNoise)) {
     displayEsp.print("--");
   } else {
-    displayEsp.print(espTelemetry.micnf, 2);
+    displayEsp.print(localMicNoise, 2);
   }
 
   drawCornerFlags(displayEsp, now);
@@ -1214,7 +1305,18 @@ static void drawDebugDerivedPage(uint32_t now) {
   displayEnv.setTextColor(SSD1306_WHITE);
 
   displayEnv.setCursor(0, 0);
-  displayEnv.print("ROC");
+  displayEnv.print("MIC ");
+  if (isnan(localMicRms)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(localMicRms, 2);
+  }
+  displayEnv.print(" NF ");
+  if (isnan(localMicNoise)) {
+    displayEnv.print("--");
+  } else {
+    displayEnv.print(localMicNoise, 2);
+  }
 
   displayEnv.setCursor(0, 8);
   displayEnv.print("rt ");
@@ -1275,11 +1377,17 @@ static void drawDebugDerivedPage(uint32_t now) {
   displayEsp.print("BASE");
 
   displayEsp.setCursor(0, 8);
-  displayEsp.print("bt ");
-  if (isnan(baseTemp)) {
+  displayEsp.print("MIC ");
+  if (isnan(localMicRms)) {
     displayEsp.print("--");
   } else {
-    displayEsp.print(baseTemp, 2);
+    displayEsp.print(localMicRms, 2);
+  }
+  displayEsp.print(" NF ");
+  if (isnan(localMicNoise)) {
+    displayEsp.print("--");
+  } else {
+    displayEsp.print(localMicNoise, 2);
   }
 
   displayEsp.setCursor(0, 16);
@@ -1572,16 +1680,16 @@ static void renderUserPage(uint32_t now, int pageIndex) {
 
   displayEsp.setCursor(0, 8);
   displayEsp.print("MIC ");
-  if (isnan(espTelemetry.mic)) {
+  if (isnan(localMicRms)) {
     displayEsp.print("--");
   } else {
-    displayEsp.print(espTelemetry.mic, 2);
+    displayEsp.print(localMicRms, 2);
   }
   displayEsp.print(" NF ");
-  if (isnan(espTelemetry.micnf)) {
+  if (isnan(localMicNoise)) {
     displayEsp.print("--");
   } else {
-    displayEsp.print(espTelemetry.micnf, 2);
+    displayEsp.print(localMicNoise, 2);
   }
 
   drawSparkline(0, 16, SCREEN_WIDTH, 24, histEco2, histCount, histIndex, displayEsp);
@@ -1764,6 +1872,8 @@ void setup() {
 
   sgpOk = sgp.begin();
 
+  initLocalMic();
+
   initHistory();
   initDisplays();
 }
@@ -1773,6 +1883,7 @@ void loop() {
   handleSerial1();
   updateBps(now);
   readSensors(now);
+  updateLocalMic(now);
   updateHistory(now);
   updateMicEvents(now);
   updateSwitch(now);
