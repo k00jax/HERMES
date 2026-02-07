@@ -47,6 +47,7 @@ static uint32_t lastCameraMs = 0;
 static uint32_t packetCounter = 0;
 static bool cameraOk = false;
 static int cameraErr = 0;
+static int cameraAddr = -1;
 static float cameraLight = NAN;
 static float cameraScene = NAN;
 static uint8_t scenePrev[SCENE_SAMPLES];
@@ -81,10 +82,19 @@ static void formatFloat(char *buffer, size_t size, float value, int precision) {
   snprintf(buffer, size, format, value);
 }
 
+static void waitForSerial(uint32_t timeoutMs) {
+  const uint32_t start = millis();
+  while (!Serial && (millis() - start) < timeoutMs) {
+    delay(10);
+  }
+}
+
 static void scanCameraBus() {
   Wire.begin(40, 39);
   uint8_t found = 0;
+  cameraAddr = -1;
   Serial.print("Camera SCCB scan:");
+  Serial1.print("CAMSCAN");
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
@@ -93,14 +103,21 @@ static void scanCameraBus() {
         Serial.print('0');
       }
       Serial.print(addr, HEX);
+      Serial1.print(',');
+      Serial1.print(addr, HEX);
       found++;
+      if (cameraAddr < 0) {
+        cameraAddr = addr;
+      }
       delay(2);
     }
   }
   if (found == 0) {
     Serial.print(" none");
+    Serial1.print(",none");
   }
   Serial.println();
+  Serial1.println();
 }
 
 static void initCamera() {
@@ -447,11 +464,11 @@ static void sendTelemetryLine() {
   formatFloat(micPkBuffer, sizeof(micPkBuffer), micPeak, 3);
   formatFloat(micNfBuffer, sizeof(micNfBuffer), micNoiseFloor, 3);
 
-  char line[320];
+    char line[340];
   snprintf(
       line,
       sizeof(line),
-      "%sup=%lu,n=%lu,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s,camok=%d,camerr=%d,micok=%d,micerr=%d,wifist=%d\n",
+      "%sup=%lu,n=%lu,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s,camok=%d,camerr=%d,micok=%d,micerr=%d,wifist=%d,camaddr=%d\n",
       SENS_PREFIX,
       static_cast<unsigned long>(uptimeSec),
       static_cast<unsigned long>(frame),
@@ -469,7 +486,8 @@ static void sendTelemetryLine() {
       cameraErr,
       micOk ? 1 : 0,
       micErr,
-      wifiStatus);
+      wifiStatus,
+      cameraAddr);
 
   Serial1.print(line);
 }
@@ -479,6 +497,7 @@ void setup() {
   Serial1.setPins(UART_RX_PIN, UART_TX_PIN);
   Serial1.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   delay(50);
+  waitForSerial(1500);
   Serial.println("ESP32 telemetry sender ready");
   scanCameraBus();
   initCamera();

@@ -77,6 +77,7 @@ struct EspTelemetry {
   int micok = 0;
   int micerr = 0;
   int wifist = 0;
+  int camaddr = -1;
 };
 
 static EspTelemetry espTelemetry;
@@ -260,6 +261,10 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_WIFIST) == 0) {
     espTelemetry.wifist = static_cast<int>(strtol(value, nullptr, 10));
+    return true;
+  }
+  if (strcmp(key, KEY_CAMADDR) == 0) {
+    espTelemetry.camaddr = static_cast<int>(strtol(value, nullptr, 10));
     return true;
   }
 
@@ -516,17 +521,14 @@ static void exportUsbLine(uint32_t now) {
   formatFloat(dmicBuf, sizeof(dmicBuf), deltaMic, 2);
 
   const uint32_t ageMs = getAgeMs(now);
-  char line[760];
+  char line[780];
   snprintf(
       line,
       sizeof(line),
-      "LOG,t=%s,rh=%s,eco2=%u,tvoc=%u,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s,bps=%lu,age=%lu,pf=%lu,rt=%s,rrh=%s,rco2=%s,rtv=%s,rli=%s,rmic=%s,bt=%s,brh=%s,bco2=%s,btv=%s,bli=%s,bmic=%s,dt=%s,drh=%s,dco2=%s,dtv=%s,dli=%s,dmic=%s,camok=%d,camerr=%d,micok=%d,micerr=%d,wifist=%d\n",
+      "LOG,t=%s,rh=%s,eco2=%u,tvoc=%u,n=%lu,rssi=%d,heap=%lu,psram=%lu,ct=%s,light=%s,scene=%s,mic=%s,micpk=%s,micnf=%s,bps=%lu,age=%lu,pf=%lu,rt=%s,rrh=%s,rco2=%s,rtv=%s,rli=%s,rmic=%s,bt=%s,brh=%s,bco2=%s,btv=%s,bli=%s,bmic=%s,dt=%s,drh=%s,dco2=%s,dtv=%s,dli=%s,dmic=%s,camok=%d,camerr=%d,micok=%d,micerr=%d,wifist=%d,camaddr=%d\n",
       tBuf,
       rhBuf,
       static_cast<unsigned>(sgpEco2),
-      micBuf,
-      micPkBuf,
-      micNfBuf,
       static_cast<unsigned>(sgpTvoc),
       static_cast<unsigned long>(espTelemetry.n),
       espTelemetry.rssi,
@@ -563,7 +565,8 @@ static void exportUsbLine(uint32_t now) {
       espTelemetry.camerr,
       espTelemetry.micok,
       espTelemetry.micerr,
-      espTelemetry.wifist);
+      espTelemetry.wifist,
+      espTelemetry.camaddr);
   Serial.print(line);
 #else
   (void)now;
@@ -918,7 +921,7 @@ static void readSensors(uint32_t now) {
   }
 }
 
-static void drawEnvDisplay() {
+[[maybe_unused]] static void drawEnvDisplay() {
   displayEnv.clearDisplay();
   displayEnv.setTextSize(1);
   displayEnv.setTextColor(SSD1306_WHITE);
@@ -975,7 +978,7 @@ static void drawEnvDisplay() {
   displayEnv.display();
 }
 
-static void drawEspDisplay(uint32_t now) {
+[[maybe_unused]] static void drawEspDisplay(uint32_t now) {
   displayEsp.clearDisplay();
   displayEsp.setTextSize(1);
   displayEsp.setTextColor(SSD1306_WHITE);
@@ -1056,7 +1059,7 @@ static void drawLinkStatsDisplay(uint32_t now) {
   displayEsp.display();
 }
 
-static void drawLinkDebugDisplay() {
+[[maybe_unused]] static void drawLinkDebugDisplay() {
   displayEnv.clearDisplay();
   displayEnv.setTextSize(1);
   displayEnv.setTextColor(SSD1306_WHITE);
@@ -1476,7 +1479,7 @@ static void renderUserPage(uint32_t now, int pageIndex) {
   }
 }
 
-static void drawEnvBigDisplay() {
+[[maybe_unused]] static void drawEnvBigDisplay() {
   displayEnv.clearDisplay();
   displayEnv.setTextSize(2);
   displayEnv.setTextColor(SSD1306_WHITE);
@@ -1502,7 +1505,7 @@ static void drawEnvBigDisplay() {
   displayEnv.display();
 }
 
-static void drawEnvBigLeftDisplay() {
+[[maybe_unused]] static void drawEnvBigLeftDisplay() {
   displayEsp.clearDisplay();
   displayEsp.setTextSize(2);
   displayEsp.setTextColor(SSD1306_WHITE);
@@ -1520,7 +1523,7 @@ static void drawEnvBigLeftDisplay() {
   displayEsp.display();
 }
 
-static void drawGraphsDisplay(uint32_t now) {
+[[maybe_unused]] static void drawGraphsDisplay(uint32_t now) {
   displayEnv.clearDisplay();
   displayEnv.setTextSize(1);
   displayEnv.setTextColor(SSD1306_WHITE);

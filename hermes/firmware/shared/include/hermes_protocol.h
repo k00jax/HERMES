@@ -22,6 +22,7 @@ static const char KEY_CAMERR[] = "camerr";
 static const char KEY_MICOK[] = "micok";
 static const char KEY_MICERR[] = "micerr";
 static const char KEY_WIFIST[] = "wifist";
+static const char KEY_CAMADDR[] = "camaddr";
 
 static const int RSSI_NOT_CONNECTED = 999;
 
