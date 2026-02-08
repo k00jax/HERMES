@@ -46,6 +46,7 @@ static const uint32_t PDM_SAMPLE_RATE = 16000;
 static const uint32_t PDM_UPDATE_MS = 100;
 static const float MIC_NOISE_ALPHA = 0.01f;
 static const size_t PDM_BUFFER_SAMPLES = 256;
+static const int TIMEZONE_OFFSET_MIN = -360;
 
 static const int HIST_N = 120;
 
@@ -55,7 +56,7 @@ enum UiStack {
 };
 
 static const int DEBUG_PAGE_COUNT = 3;
-static const int USER_PAGE_COUNT = 4;
+static const int USER_PAGE_COUNT = 5;
 static const uint32_t DISPLAY_DEBUG_INTERVAL_MS = 400;
 static const uint32_t DISPLAY_USER_INTERVAL_MS = 800;
 
@@ -144,6 +145,7 @@ static int localMicErr = 0;
 static float localMicRms = NAN;
 static float localMicPeak = NAN;
 static float localMicNoise = NAN;
+static bool localMicPrimed = false;
 static int16_t pdmSamples[PDM_BUFFER_SAMPLES];
 static volatile size_t pdmBytesReady = 0;
 static volatile bool pdmReady = false;
@@ -425,6 +427,7 @@ static void initLocalMic() {
   localMicRms = NAN;
   localMicPeak = NAN;
   localMicNoise = NAN;
+  localMicPrimed = false;
 }
 
 static void updateLocalMic(uint32_t now) {
@@ -473,6 +476,11 @@ static void updateLocalMic(uint32_t now) {
     localMicNoise = rms;
   } else {
     localMicNoise += MIC_NOISE_ALPHA * (rms - localMicNoise);
+  }
+
+  if (!localMicPrimed) {
+    localMicPrimed = true;
+    Serial.println("PDM ok");
   }
 }
 
@@ -992,6 +1000,67 @@ static float getSmoothedValue(const float *series) {
     count++;
   }
   return (count > 0) ? (sum / static_cast<float>(count)) : NAN;
+}
+
+static bool getLocalEpoch(uint32_t now, int64_t *epochOut) {
+  if (espTelemetry.ntp == 0 || lastLineMs == 0) {
+    return false;
+  }
+  const uint32_t elapsedMs = now - lastLineMs;
+  const int64_t epoch = static_cast<int64_t>(espTelemetry.ntp) + (elapsedMs / 1000) + (TIMEZONE_OFFSET_MIN * 60);
+  *epochOut = epoch;
+  return true;
+}
+
+static bool getLocalTime(uint32_t now, int *hour, int *minute, int *second) {
+  int64_t epoch = 0;
+  if (!getLocalEpoch(now, &epoch)) {
+    return false;
+  }
+  int64_t seconds = epoch % 86400;
+  if (seconds < 0) {
+    seconds += 86400;
+  }
+  *hour = static_cast<int>(seconds / 3600);
+  seconds %= 3600;
+  *minute = static_cast<int>(seconds / 60);
+  *second = static_cast<int>(seconds % 60);
+  return true;
+}
+
+static bool getLocalDate(uint32_t now, int *year, int *month, int *day, int *weekday) {
+  int64_t epoch = 0;
+  if (!getLocalEpoch(now, &epoch)) {
+    return false;
+  }
+  int64_t days = epoch / 86400;
+  int64_t rem = epoch % 86400;
+  if (rem < 0) {
+    rem += 86400;
+    days -= 1;
+  }
+
+  int w = static_cast<int>((days + 4) % 7);
+  if (w < 0) {
+    w += 7;
+  }
+  *weekday = w;
+
+  int64_t z = days + 719468;
+  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned doe = static_cast<unsigned>(z - era * 146097);
+  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  int y = static_cast<int>(yoe) + static_cast<int>(era * 400);
+  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const unsigned mp = (5 * doy + 2) / 153;
+  const unsigned d = doy - (153 * mp + 2) / 5 + 1;
+  unsigned m = mp + (mp < 10 ? 3 : -9);
+  y += (m <= 2);
+
+  *year = y;
+  *month = static_cast<int>(m);
+  *day = static_cast<int>(d);
+  return true;
 }
 
 static void readSensors(uint32_t now) {
@@ -1568,6 +1637,105 @@ static void drawUserSoundPage(uint32_t now) {
   displayEsp.display();
 }
 
+static void drawUserTimePage(uint32_t now) {
+  displayEsp.clearDisplay();
+  displayEsp.setTextColor(SSD1306_WHITE);
+  displayEsp.setTextSize(1);
+  displayEsp.setCursor(0, 0);
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int weekday = 0;
+  const char *weekdayNames[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+  char headerBuffer[32];
+  if (!getLocalTime(now, &hour, &minute, &second) || !getLocalDate(now, &year, &month, &day, &weekday)) {
+    snprintf(headerBuffer, sizeof(headerBuffer), "---");
+  } else {
+    snprintf(headerBuffer, sizeof(headerBuffer), "%s", weekdayNames[weekday]);
+  }
+  const int headerWidth = static_cast<int>(strlen(headerBuffer)) * 6;
+  displayEsp.setCursor((SCREEN_WIDTH - headerWidth) / 2, 0);
+  displayEsp.print(headerBuffer);
+
+  displayEsp.setTextSize(2);
+  const int timeCharWidth = 6 * 2;
+  const int timeWidth = 8 * timeCharWidth;
+  const int timeX = (SCREEN_WIDTH - timeWidth) / 2;
+  displayEsp.setCursor(timeX, 20);
+  if (!getLocalTime(now, &hour, &minute, &second)) {
+    displayEsp.print("--:--:--");
+  } else {
+    char timeBuffer[16];
+    snprintf(timeBuffer, sizeof(timeBuffer), "%02d:%02d:%02d", hour, minute, second);
+    displayEsp.print(timeBuffer);
+  }
+
+  displayEsp.setTextSize(1);
+  char dateBuffer[16];
+  if (!getLocalDate(now, &year, &month, &day, &weekday)) {
+    snprintf(dateBuffer, sizeof(dateBuffer), "--/--/--");
+  } else {
+    const int year2 = year % 100;
+    snprintf(dateBuffer, sizeof(dateBuffer), "%02d/%02d/%02d", month, day, year2);
+  }
+  const int dateWidth = static_cast<int>(strlen(dateBuffer)) * 6;
+  displayEsp.setCursor((SCREEN_WIDTH - dateWidth) / 2, 48);
+  displayEsp.print(dateBuffer);
+
+  drawCornerFlags(displayEsp, now);
+  displayEsp.display();
+
+  displayEnv.clearDisplay();
+  displayEnv.setTextColor(SSD1306_WHITE);
+  const int columnWidth = SCREEN_WIDTH / 2;
+  const int labelY = 0;
+  const int valueY = 30;
+
+  const char *tempLabel = "Temp";
+  const char *humidLabel = "Humid";
+  const int tempLabelWidth = static_cast<int>(strlen(tempLabel)) * 12;
+  const int humidLabelWidth = static_cast<int>(strlen(humidLabel)) * 12;
+
+  displayEnv.setTextSize(2);
+  displayEnv.setCursor((columnWidth - tempLabelWidth) / 2, labelY);
+  displayEnv.print(tempLabel);
+  displayEnv.setCursor(columnWidth + (columnWidth - humidLabelWidth) / 2, labelY);
+  displayEnv.print(humidLabel);
+
+  displayEnv.setTextSize(2);
+  if (isnan(shtTempC)) {
+    const char *tempValue = "--";
+    const int tempValueWidth = static_cast<int>(strlen(tempValue)) * 12;
+    displayEnv.setCursor((columnWidth - tempValueWidth) / 2, valueY);
+    displayEnv.print(tempValue);
+  } else {
+    char tempValue[8];
+    snprintf(tempValue, sizeof(tempValue), "%.1fC", shtTempC);
+    const int tempValueWidth = static_cast<int>(strlen(tempValue)) * 12;
+    displayEnv.setCursor((columnWidth - tempValueWidth) / 2, valueY);
+    displayEnv.print(tempValue);
+  }
+
+  if (isnan(shtHumidity)) {
+    const char *humValue = "--";
+    const int humValueWidth = static_cast<int>(strlen(humValue)) * 12;
+    displayEnv.setCursor(columnWidth + (columnWidth - humValueWidth) / 2, valueY);
+    displayEnv.print(humValue);
+  } else {
+    char humValue[8];
+    snprintf(humValue, sizeof(humValue), "%.1f%%", shtHumidity);
+    const int humValueWidth = static_cast<int>(strlen(humValue)) * 12;
+    displayEnv.setCursor(columnWidth + (columnWidth - humValueWidth) / 2, valueY);
+    displayEnv.print(humValue);
+  }
+
+  drawCornerFlags(displayEnv, now);
+  displayEnv.display();
+}
+
 static void renderUserPage(uint32_t now, int pageIndex) {
   const int idx = (pageIndex < 0) ? 0 : (pageIndex % USER_PAGE_COUNT);
   switch (idx) {
@@ -1579,6 +1747,9 @@ static void renderUserPage(uint32_t now, int pageIndex) {
       break;
     case 3:
       drawUserSoundPage(now);
+      break;
+    case 4:
+      drawUserTimePage(now);
       break;
     case 0:
     default:
