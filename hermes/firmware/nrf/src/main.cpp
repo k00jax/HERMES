@@ -166,6 +166,11 @@ static uint32_t linesOk = 0;
 static char rxBuffer[320];
 static size_t rxLen = 0;
 
+static char cmdRxBuf[128];
+static uint8_t cmdRxLen = 0;
+static char uiStatusMsg[32] = "";
+static uint32_t uiStatusUntilMs = 0;
+
 static uint32_t lastLineMs = 0;
 static uint32_t parseFail = 0;
 static uint32_t byteCount = 0;
@@ -419,6 +424,115 @@ static void emitFrame(const char *kind, const char *pairs) {
   Serial.print(kind);
   Serial.print(',');
   Serial.println(pairs);
+}
+
+static void trimWhitespace(char *line) {
+  if (!line) {
+    return;
+  }
+  size_t len = strlen(line);
+  while (len > 0 && isspace(static_cast<unsigned char>(line[len - 1]))) {
+    line[len - 1] = '\0';
+    len--;
+  }
+  size_t start = 0;
+  while (line[start] != '\0' && isspace(static_cast<unsigned char>(line[start]))) {
+    start++;
+  }
+  if (start > 0) {
+    memmove(line, line + start, strlen(line + start) + 1);
+  }
+}
+
+static void handleLine(char *line, uint32_t now) {
+  trimWhitespace(line);
+  if (line[0] == '\0') {
+    return;
+  }
+
+  if (strncmp(line, "OLED,", 5) != 0) {
+    emitFrame("NACK", "kind=UNKNOWN,reason=unknown_kind");
+    return;
+  }
+
+  char *payload = line + 5;
+  char *savePtr = nullptr;
+  char *token = strtok_r(payload, ",", &savePtr);
+  if (!token) {
+    emitFrame("NACK", "kind=OLED,op=UNKNOWN,reason=unknown_cmd");
+    return;
+  }
+
+  if (strcasecmp(token, "STATUS") == 0) {
+    snprintf(uiStatusMsg, sizeof(uiStatusMsg), "REMOTE OK");
+    uiStatusUntilMs = now + 3000;
+    emitFrame("ACK", "kind=OLED,op=STATUS");
+    return;
+  }
+
+  if (strcasecmp(token, "STACK") == 0) {
+    char *stackToken = strtok_r(nullptr, ",", &savePtr);
+    if (!stackToken) {
+      emitFrame("NACK", "kind=OLED,op=STACK,reason=missing_arg");
+      return;
+    }
+    if (strcasecmp(stackToken, "USER") == 0) {
+      debugMode = false;
+      usbExportEnabled = false;
+      uiStack = UI_USER;
+      swState = true;
+      swLastChangeMs = now;
+      softResetState(now);
+      emitFrame("ACK", "kind=OLED,op=STACK_USER");
+      return;
+    }
+    if (strcasecmp(stackToken, "DEBUG") == 0) {
+      debugMode = true;
+      usbExportEnabled = true;
+      uiStack = UI_DEBUG;
+      swState = false;
+      swLastChangeMs = now;
+      softResetState(now);
+      emitFrame("ACK", "kind=OLED,op=STACK_DEBUG");
+      return;
+    }
+    emitFrame("NACK", "kind=OLED,op=STACK,reason=unknown_arg");
+    return;
+  }
+
+  if (strcasecmp(token, "PAGE") == 0) {
+    char *pageToken = strtok_r(nullptr, ",", &savePtr);
+    if (!pageToken) {
+      emitFrame("NACK", "kind=OLED,op=PAGE,reason=missing_arg");
+      return;
+    }
+    if (strcasecmp(pageToken, "NEXT") == 0) {
+      if (uiStack == UI_DEBUG) {
+        debugPageIndex = (debugPageIndex + 1) % DEBUG_PAGE_COUNT;
+      } else {
+        userPageIndex = (userPageIndex + 1) % USER_PAGE_COUNT;
+      }
+      lastDisplayMs = now;
+      renderDisplays(now);
+      emitFrame("ACK", "kind=OLED,op=PAGE_NEXT");
+      return;
+    }
+    if (strcasecmp(pageToken, "PREV") == 0) {
+      if (uiStack == UI_DEBUG) {
+        debugPageIndex = (debugPageIndex + DEBUG_PAGE_COUNT - 1) % DEBUG_PAGE_COUNT;
+      } else {
+        userPageIndex = (userPageIndex + USER_PAGE_COUNT - 1) % USER_PAGE_COUNT;
+      }
+      lastDisplayMs = now;
+      renderDisplays(now);
+      emitFrame("ACK", "kind=OLED,op=PAGE_PREV");
+      return;
+    }
+    emitFrame("NACK", "kind=OLED,op=PAGE,reason=unknown_arg");
+    return;
+  }
+
+  emitFrame("NACK", "kind=OLED,op=UNKNOWN,reason=unknown_cmd");
 }
 
 static void emitProtoFrame() {
@@ -2106,6 +2220,24 @@ void loop() {
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
   static uint32_t hbSeq = 0;
+  while (Serial.available() > 0) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\r') {
+      continue;
+    }
+    if (c == '\n') {
+      cmdRxBuf[cmdRxLen] = '\0';
+      handleLine(cmdRxBuf, now);
+      cmdRxLen = 0;
+      continue;
+    }
+    if (cmdRxLen + 1 < sizeof(cmdRxBuf)) {
+      cmdRxBuf[cmdRxLen++] = c;
+    } else {
+      cmdRxLen = 0;
+      emitFrame("NACK", "kind=OLED,op=UNKNOWN,reason=overflow");
+    }
+  }
   if (now - lastHB >= 1000) {
     lastHB = now;
     hbSeq++;
