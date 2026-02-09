@@ -2,7 +2,8 @@ import os
 import time
 import sqlite3
 import datetime
-import selectors
+import threading
+import queue
 import socket
 import serial
 
@@ -15,6 +16,14 @@ SOCK_PATH = "/tmp/hermesd.sock"
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+stats = {
+    "lines_in": 0,
+    "last_line_ts": "never",
+    "last_error": "none",
+    "serial_connected": False,
+}
+stats_lock = threading.Lock()
 
 def utc_now():
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
@@ -63,64 +72,99 @@ def parse_line(line: str):
                 pass
     return kind, kvs
 
+def update_stats(**kwargs):
+    with stats_lock:
+        for key, value in kwargs.items():
+            stats[key] = value
+
+def snapshot_stats():
+    with stats_lock:
+        return dict(stats)
+
+def log_info(message: str):
+    print(message, flush=True)
+
 def ensure_socket_unlinked():
     if os.path.exists(SOCK_PATH):
         os.unlink(SOCK_PATH)
 
-def setup_server(selector: selectors.BaseSelector):
-    ensure_socket_unlinked()
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(SOCK_PATH)
-    server.listen(8)
-    server.setblocking(False)
-    selector.register(server, selectors.EVENT_READ, data="accept")
-    return server
-
-def open_serial(port: str, baud: int):
-    ser = serial.Serial(port, baud, timeout=0)
-    ser.reset_input_buffer()
-    return ser
-
-def handle_serial_read(ser, buffer: bytearray, conn: sqlite3.Connection):
-    try:
-        data = ser.read(ser.in_waiting or 1)
-    except Exception:
-        raise
-    if not data:
-        return
-    buffer.extend(data)
-    while True:
-        try:
-            idx = buffer.index(b"\n")
-        except ValueError:
-            break
-        line_bytes = buffer[:idx]
-        del buffer[:idx + 1]
-        if line_bytes.endswith(b"\r"):
-            line_bytes = line_bytes[:-1]
-        line = line_bytes.decode(errors="replace").strip()
-        if not line:
-            continue
-        ts = utc_now().isoformat()
-        dt = utc_now()
-        with open(raw_path(dt), "a", encoding="utf-8") as f:
-            f.write(f"{ts}\t{line}\n")
-        conn.execute(
-            "INSERT INTO raw_lines (ts_utc, source, line) VALUES (?, ?, ?)",
-            (ts, "nrf", line),
+def handle_line(conn: sqlite3.Connection, line: str):
+    dt = utc_now()
+    ts = dt.isoformat()
+    with open(raw_path(dt), "a", encoding="utf-8") as f:
+        f.write(f"{ts}\t{line}\n")
+    conn.execute(
+        "INSERT INTO raw_lines (ts_utc, source, line) VALUES (?, ?, ?)",
+        (ts, "nrf", line),
+    )
+    kind, kvs = parse_line(line)
+    if kind and kvs:
+        conn.executemany(
+            "INSERT INTO metrics (ts_utc, source, kind, key, value) VALUES (?, ?, ?, ?, ?)",
+            [(ts, "nrf", kind, k, v) for (k, v) in kvs],
         )
-        kind, kvs = parse_line(line)
-        if kind and kvs:
-            conn.executemany(
-                "INSERT INTO metrics (ts_utc, source, kind, key, value) VALUES (?, ?, ?, ?, ?)",
-                [(ts, "nrf", kind, k, v) for (k, v) in kvs],
-            )
-        conn.commit()
+    conn.commit()
+    with stats_lock:
+        stats["lines_in"] += 1
+        stats["last_line_ts"] = ts
+        if stats["lines_in"] % 50 == 0:
+            log_info(f"[hermesd] lines_in={stats['lines_in']}")
 
-def handle_client_command(cmd_line: str, ser, start_time: float, clients: int):
+def serial_worker(shutdown: threading.Event, out_q: queue.Queue):
+    conn = sqlite3.connect(DB_PATH)
+    init_db(conn)
+    ser = None
+    while not shutdown.is_set():
+        if ser is None:
+            try:
+                ser = serial.Serial(PORT, BAUD, timeout=1)
+                ser.reset_input_buffer()
+                update_stats(serial_connected=True, last_error="none")
+                log_info("[hermesd] serial connected")
+            except Exception as e:
+                update_stats(serial_connected=False, last_error=f"serial connect failed: {e}")
+                log_info(f"[hermesd] serial connect failed: {e}")
+                time.sleep(1.5)
+                continue
+
+        try:
+            line_bytes = ser.readline()
+            if line_bytes:
+                line = line_bytes.decode(errors="replace").strip()
+                if line:
+                    handle_line(conn, line)
+
+            while True:
+                try:
+                    cmd = out_q.get_nowait()
+                except queue.Empty:
+                    break
+                ser.write((cmd + "\n").encode("utf-8"))
+
+        except Exception as e:
+            update_stats(serial_connected=False, last_error=f"serial error: {e}")
+            log_info(f"[hermesd] serial error: {e}")
+            try:
+                ser.close()
+            except Exception:
+                pass
+            ser = None
+
+    if ser is not None:
+        try:
+            ser.close()
+        except Exception:
+            pass
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+def handle_command(cmd_line: str, out_q: queue.Queue):
     cmd_line = cmd_line.strip()
     if not cmd_line:
         return "ERR empty", False
+
     parts = cmd_line.split(" ", 1)
     cmd = parts[0].upper()
     arg = parts[1] if len(parts) > 1 else ""
@@ -128,150 +172,99 @@ def handle_client_command(cmd_line: str, ser, start_time: float, clients: int):
     if cmd == "PING":
         return "PONG", False
     if cmd == "STATUS":
-        uptime_s = int(time.monotonic() - start_time)
-        return f"OK port={PORT} baud={BAUD} clients={clients} uptime_s={uptime_s}", False
+        snap = snapshot_stats()
+        return (
+            "OK "
+            f"port={PORT} "
+            f"baud={BAUD} "
+            f"lines_in={snap['lines_in']} "
+            f"last_line_ts={snap['last_line_ts']} "
+            f"last_error={snap['last_error']}",
+            False,
+        )
     if cmd == "SEND":
         if not arg:
             return "ERR no payload", False
-        if ser is None:
-            return "ERR serial not connected", False
-        try:
-            ser.write((arg + "\n").encode("utf-8"))
-        except Exception:
-            return "ERR serial write failed", False
+        out_q.put(arg)
         return "OK", False
     if cmd == "STOP":
-        return "OK stopping", True
+        return "OK", True
     return "ERR unknown command", False
 
-def main():
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
-
-    print(f"[hermesd] starting. port={PORT} baud={BAUD} db={DB_PATH} sock={SOCK_PATH}")
-
-    selector = selectors.DefaultSelector()
-    server = setup_server(selector)
-
-    ser = None
-    serial_buf = bytearray()
-    last_serial_attempt = 0.0
-    start_time = time.monotonic()
-    stop_requested = False
-    client_sockets = set()
+def socket_worker(shutdown: threading.Event, out_q: queue.Queue):
+    ensure_socket_unlinked()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(SOCK_PATH)
+    server.listen(8)
+    server.settimeout(1)
+    log_info(f"[hermesd] socket listening: {SOCK_PATH}")
 
     try:
-        while not stop_requested:
-            now = time.monotonic()
-            if ser is None and now - last_serial_attempt >= 1.5:
-                last_serial_attempt = now
+        while not shutdown.is_set():
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                continue
+            except Exception as e:
+                update_stats(last_error=f"socket accept failed: {e}")
+                continue
+
+            with conn:
+                conn.settimeout(2)
+                data = b""
+                while b"\n" not in data and len(data) < 4096:
+                    chunk = conn.recv(1024)
+                    if not chunk:
+                        break
+                    data += chunk
+
+                line = data.split(b"\n", 1)[0].decode(errors="replace")
+                resp, should_stop = handle_command(line, out_q)
                 try:
-                    ser = open_serial(PORT, BAUD)
-                    selector.register(ser.fileno(), selectors.EVENT_READ, data="serial")
-                    print("[hermesd] serial connected")
-                except Exception as e:
-                    ser = None
-                    print(f"[hermesd] serial connect failed: {e}")
-
-            events = selector.select(timeout=1)
-            for key, _ in events:
-                if key.data == "accept":
-                    conn_sock, _ = server.accept()
-                    conn_sock.setblocking(False)
-                    selector.register(conn_sock, selectors.EVENT_READ, data={"buffer": b""})
-                    client_sockets.add(conn_sock)
-                    continue
-
-                if key.data == "serial":
-                    if ser is None:
-                        continue
-                    try:
-                        handle_serial_read(ser, serial_buf, conn)
-                    except Exception as e:
-                        print(f"[hermesd] serial error: {e}")
-                        try:
-                            selector.unregister(ser.fileno())
-                        except Exception:
-                            pass
-                        try:
-                            ser.close()
-                        except Exception:
-                            pass
-                        ser = None
-                    continue
-
-                conn_sock = key.fileobj
-                data = key.data
-                try:
-                    chunk = conn_sock.recv(1024)
-                except Exception:
-                    chunk = b""
-
-                if not chunk:
-                    selector.unregister(conn_sock)
-                    conn_sock.close()
-                    client_sockets.discard(conn_sock)
-                    continue
-
-                buf = data["buffer"] + chunk
-                if b"\n" not in buf:
-                    data["buffer"] = buf
-                    continue
-
-                line, _ = buf.split(b"\n", 1)
-                cmd_line = line.decode(errors="replace")
-                resp, should_stop = handle_client_command(
-                    cmd_line,
-                    ser,
-                    start_time,
-                    len(client_sockets),
-                )
-                try:
-                    conn_sock.sendall((resp + "\n").encode("utf-8"))
+                    conn.sendall((resp + "\n").encode("utf-8"))
                 except Exception:
                     pass
-                selector.unregister(conn_sock)
-                conn_sock.close()
-                client_sockets.discard(conn_sock)
                 if should_stop:
-                    stop_requested = True
+                    shutdown.set()
                     break
-
     finally:
         try:
-            selector.unregister(server)
-        except Exception:
-            pass
-        try:
             server.close()
-        except Exception:
-            pass
-        for sock in list(client_sockets):
-            try:
-                selector.unregister(sock)
-            except Exception:
-                pass
-            try:
-                sock.close()
-            except Exception:
-                pass
-        if ser is not None:
-            try:
-                selector.unregister(ser.fileno())
-            except Exception:
-                pass
-            try:
-                ser.close()
-            except Exception:
-                pass
-        try:
-            conn.close()
         except Exception:
             pass
         try:
             ensure_socket_unlinked()
         except Exception:
             pass
+
+def main():
+    log_info(f"[hermesd] starting. port={PORT} baud={BAUD} db={DB_PATH}")
+    shutdown = threading.Event()
+    out_q = queue.Queue()
+
+    serial_thread = threading.Thread(
+        target=serial_worker,
+        args=(shutdown, out_q),
+        daemon=True,
+    )
+    socket_thread = threading.Thread(
+        target=socket_worker,
+        args=(shutdown, out_q),
+        daemon=True,
+    )
+
+    serial_thread.start()
+    socket_thread.start()
+
+    try:
+        while not shutdown.is_set():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        shutdown.set()
+
+    serial_thread.join(timeout=2)
+    socket_thread.join(timeout=2)
+    log_info("[hermesd] stopped")
 
 if __name__ == "__main__":
     main()
