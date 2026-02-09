@@ -4,53 +4,27 @@ set -euo pipefail
 REPO=~/hermes-src/hermes
 NRF_PORT=/dev/hermes-nrf
 ESP_PORT=/dev/hermes-esp
-LOGGER_RUN="$REPO/linux/logger/run_logger.sh"
-LOGGER_PY="$REPO/linux/logger/logger.py"
+DAEMON_RUN="$REPO/linux/logger/run_daemon.sh"
+LOGGER_CLIENT="$REPO/linux/logger/client.py"
+OLED_CTL="$REPO/linux/oled/oledctl.py"
 
-logger_pids() {
-  pgrep -f "$LOGGER_PY" || true
+daemon_running() {
+  python3 "$LOGGER_CLIENT" status >/dev/null 2>&1
 }
 
-logger_status() {
-  local pids
-  pids="$(logger_pids)"
-  if [[ -z "$pids" ]]; then
-    echo "Logger: STOPPED"
-  else
-    echo "Logger: RUNNING (PID(s): $pids)"
-    echo "Port symlinks:"
-    ls -l /dev/hermes-* 2>/dev/null || true
-    echo "Current raw log tail:"
-    tail -n 5 ~/hermes-data/raw/nrf_$(date -u +%F).log 2>/dev/null || true
-  fi
+daemon_status() {
+  python3 "$LOGGER_CLIENT" status || echo "Daemon: STOPPED"
 }
 
-logger_stop() {
-  local pids
-  pids="$(logger_pids)"
-  if [[ -z "$pids" ]]; then
-    echo "Logger already stopped."
-    return 0
-  fi
-  echo "Stopping logger PID(s): $pids"
-  pkill -f "$LOGGER_PY" || true
-  sleep 0.3
-  echo "Stopped."
-}
-
-logger_start() {
-  local pids
-  pids="$(logger_pids)"
-  if [[ -n "$pids" ]]; then
-    echo "Logger already running (PID(s): $pids)"
-    return 0
-  fi
-  echo "Starting logger..."
-  # detach so the menu stays usable
-  nohup "$LOGGER_RUN" >/tmp/hermes_logger.out 2>&1 &
+daemon_start() {
+  "$DAEMON_RUN"
   sleep 0.4
-  logger_status
-  echo "Log output: /tmp/hermes_logger.out"
+  daemon_status
+  echo "Log output: /tmp/hermesd.out"
+}
+
+daemon_stop() {
+  python3 "$LOGGER_CLIENT" stop || echo "Daemon not running"
 }
 
 while true; do
@@ -62,10 +36,16 @@ while true; do
   echo "3) Show USB devices (tty + uf2 drive)"
   echo "4) Tail today's raw log"
   echo "5) Query last 5 raw lines (SQLite)"
-  echo "6) Logger status"
-  echo "7) Start logger"
-  echo "8) Stop logger"
-  echo "9) Exit"
+  echo "6) Daemon status"
+  echo "7) Start daemon"
+  echo "8) Stop daemon"
+  echo "9) Tail daemon output"
+  echo "10) OLED: Next page"
+  echo "11) OLED: Prev page"
+  echo "12) OLED: Stack USER"
+  echo "13) OLED: Stack DEBUG"
+  echo "14) OLED: Focus toggle"
+  echo "15) Exit"
   echo ""
   read -r -p "Choose: " choice
 
@@ -76,8 +56,8 @@ while true; do
       ;;
     2)
       echo "Put nRF into UF2 bootloader (double-tap reset), then flashing."
-      if [[ -n "$(logger_pids)" ]]; then
-        echo "Note: logger is running. Flashing is OK, but serial monitoring may require stopping the logger."
+      if daemon_running; then
+        echo "Note: daemon is running. Flashing is OK, but serial monitoring may require stopping the daemon."
       fi
       "$REPO/tools/flash_nrf_uf2.sh" ~/incoming/firmware.uf2
       read -r -p "Press Enter..."
@@ -101,18 +81,42 @@ while true; do
       read -r -p "Press Enter..."
       ;;
     6)
-      logger_status
+      daemon_status
       read -r -p "Press Enter..."
       ;;
     7)
-      logger_start
+      daemon_start
       read -r -p "Press Enter..."
       ;;
     8)
-      logger_stop
+      daemon_stop
       read -r -p "Press Enter..."
       ;;
     9)
+      echo "Tailing /tmp/hermesd.out"
+      tail -n 50 -f /tmp/hermesd.out
+      ;;
+    10)
+      python3 "$OLED_CTL" next
+      read -r -p "Press Enter..."
+      ;;
+    11)
+      python3 "$OLED_CTL" prev
+      read -r -p "Press Enter..."
+      ;;
+    12)
+      python3 "$OLED_CTL" stack user
+      read -r -p "Press Enter..."
+      ;;
+    13)
+      python3 "$OLED_CTL" stack debug
+      read -r -p "Press Enter..."
+      ;;
+    14)
+      python3 "$OLED_CTL" focus toggle
+      read -r -p "Press Enter..."
+      ;;
+    15)
       exit 0
       ;;
     *)
