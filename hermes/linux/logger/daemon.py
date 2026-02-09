@@ -1,3 +1,4 @@
+import glob
 import os
 import time
 import sqlite3
@@ -7,12 +8,14 @@ import queue
 import socket
 import serial
 
-PORT = os.environ.get("HERMES_NRF_PORT", "/dev/hermes-nrf")
+PREFERRED_PORT = os.environ.get("HERMES_NRF_PORT", "/dev/hermes-nrf")
+PORT = None
 BAUD = int(os.environ.get("HERMES_BAUD", "115200"))
 
 RAW_DIR = os.path.expanduser("~/hermes-data/raw")
 DB_PATH = os.path.expanduser("~/hermes-data/db/hermes.sqlite3")
 SOCK_PATH = "/tmp/hermesd.sock"
+NRF_BY_ID_HINT = "usb-Seeed_Studio_XIAO_nRF52840_9FBE2A3ABD93B121-if00"
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -22,6 +25,7 @@ stats = {
     "last_line_ts": "never",
     "last_error": "none",
     "serial_connected": False,
+    "port": PREFERRED_PORT,
 }
 stats_lock = threading.Lock()
 
@@ -84,6 +88,25 @@ def snapshot_stats():
 def log_info(message: str):
     print(message, flush=True)
 
+def resolve_serial_port(preferred: str) -> str:
+    if preferred and os.path.exists(preferred):
+        return preferred
+
+    by_id = f"/dev/serial/by-id/{NRF_BY_ID_HINT}"
+    if os.path.exists(by_id):
+        return by_id
+
+    for path in glob.glob("/dev/serial/by-id/*9FBE2A3ABD93B121*"):
+        return path
+
+    acms = sorted(glob.glob("/dev/ttyACM*"))
+    if acms:
+        return acms[0]
+
+    return preferred
+
+PORT = resolve_serial_port(PREFERRED_PORT)
+
 def ensure_socket_unlinked():
     if os.path.exists(SOCK_PATH):
         os.unlink(SOCK_PATH)
@@ -117,10 +140,12 @@ def serial_worker(shutdown: threading.Event, out_q: queue.Queue):
     while not shutdown.is_set():
         if ser is None:
             try:
-                ser = serial.Serial(PORT, BAUD, timeout=1)
+                port = resolve_serial_port(PORT)
+                log_info(f"[hermesd] trying serial port: {port}")
+                ser = serial.Serial(port, BAUD, timeout=1)
                 ser.reset_input_buffer()
-                update_stats(serial_connected=True, last_error="none")
-                log_info("[hermesd] serial connected")
+                update_stats(serial_connected=True, last_error="none", port=port)
+                log_info(f"[hermesd] serial connected: {port}")
             except Exception as e:
                 update_stats(serial_connected=False, last_error=f"serial connect failed: {e}")
                 log_info(f"[hermesd] serial connect failed: {e}")
@@ -175,7 +200,7 @@ def handle_command(cmd_line: str, out_q: queue.Queue):
         snap = snapshot_stats()
         return (
             "OK "
-            f"port={PORT} "
+            f"port={snap['port']} "
             f"baud={BAUD} "
             f"lines_in={snap['lines_in']} "
             f"last_line_ts={snap['last_line_ts']} "
@@ -238,7 +263,7 @@ def socket_worker(shutdown: threading.Event, out_q: queue.Queue):
             pass
 
 def main():
-    log_info(f"[hermesd] starting. port={PORT} baud={BAUD} db={DB_PATH}")
+    log_info(f"[hermesd] starting. port={PREFERRED_PORT} baud={BAUD} db={DB_PATH}")
     shutdown = threading.Event()
     out_q = queue.Queue()
 
