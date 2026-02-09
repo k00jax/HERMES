@@ -48,14 +48,14 @@ def convert_from_uf2(buf):
         block = buf[ptr:ptr + 512]
         hd = struct.unpack(b"<IIIIIIII", block[0:32])
         if hd[0] != UF2_MAGIC_START0 or hd[1] != UF2_MAGIC_START1:
-            print("Skipping block at " + ptr + "; bad magic")
+            print("Skipping block at " + str(ptr) + "; bad magic")
             continue
         if hd[2] & 1:
             # NO-flash flag set; skip block
             continue
         datalen = hd[4]
         if datalen > 476:
-            assert False, "Invalid UF2 data size at " + ptr
+            assert False, "Invalid UF2 data size at " + str(ptr)
         newaddr = hd[3]
         if (hd[2] & 0x2000) and (currfamilyid == None):
             currfamilyid = hd[7]
@@ -66,11 +66,11 @@ def convert_from_uf2(buf):
                 appstartaddr = newaddr
         padding = newaddr - curraddr
         if padding < 0:
-            assert False, "Block out of order at " + ptr
+            assert False, "Block out of order at " + str(ptr)
         if padding > 10*1024*1024:
-            assert False, "More than 10M of padding needed at " + ptr
+            assert False, "More than 10M of padding needed at " + str(ptr)
         if padding % 4 != 0:
-            assert False, "Non-word padding size at " + ptr
+            assert False, "Non-word padding size at " + str(ptr)
         while padding > 0:
             padding -= 4
             outp.append(b"\x00\x00\x00\x00")
@@ -118,7 +118,9 @@ def convert_to_carray(file_content):
     return bytes(outp, "utf-8")
 
 def convert_to_uf2(file_content):
-    global familyid
+    global familyid, appstartaddr
+    if appstartaddr is None:
+        appstartaddr = 0x2000
     datapadding = b""
     while len(datapadding) < 512 - 256 - 32 - 4:
         datapadding += b"\x00\x00\x00\x00"
@@ -239,7 +241,10 @@ def get_drives():
 def board_id(path):
     with open(path + INFO_FILE, mode='r') as file:
         file_content = file.read()
-    return re.search(r"Board-ID: ([^\r\n]*)", file_content).group(1)
+    match = re.search(r"Board-ID: ([^\r\n]*)", file_content)
+    if match:
+        return match.group(1)
+    return ""
 
 
 def list_drives():
