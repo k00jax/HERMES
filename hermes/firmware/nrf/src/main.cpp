@@ -2017,6 +2017,9 @@ static void heartbeat(uint32_t now) {
 
 void setup() {
   Serial.begin(UART_BAUD);
+  delay(1500);
+  Serial.println("HB,boot");
+  Serial.flush();
   Serial1.setPins(D7, D6);
   Serial1.begin(UART_BAUD);
   Wire.begin();
@@ -2051,6 +2054,11 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+  static uint32_t lastHB = 0;
+  if (now - lastHB >= 1000) {
+    lastHB = now;
+    Serial.println("HB,tick");
+  }
   handleSerial1();
   updateBps(now);
   readSensors(now);
