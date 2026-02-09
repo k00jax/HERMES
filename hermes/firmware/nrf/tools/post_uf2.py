@@ -1,4 +1,4 @@
-Import("env")
+mport("env")
 import os
 import subprocess
 
