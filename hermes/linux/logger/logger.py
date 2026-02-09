@@ -4,7 +4,7 @@ import sqlite3
 import datetime
 import serial
 
-PORT = os.environ.get("HERMES_NRF_PORT", "/dev/ttyACM1")
+PORT = os.environ.get("HERMES_NRF_PORT", "/dev/hermes-nrf")
 BAUD = int(os.environ.get("HERMES_BAUD", "115200"))
 
 RAW_DIR = os.path.expanduser("~/hermes-data/raw")
