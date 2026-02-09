@@ -47,8 +47,12 @@ static const uint32_t PDM_UPDATE_MS = 100;
 static const float MIC_NOISE_ALPHA = 0.01f;
 static const size_t PDM_BUFFER_SAMPLES = 256;
 static const int TIMEZONE_OFFSET_MIN = -360;
+<<<<<<< HEAD
 static const char FW_STRING[] = "nrf";
 static const char BUILD_STRING[] = __DATE__;
+=======
+static const char *FW_NAME = "hermes-nrf";
+>>>>>>> a0d876c81064fd293d5c252d061e8a60a911803b
 
 static const int HIST_N = 120;
 
@@ -403,6 +407,38 @@ static void formatFloat(char *buffer, size_t size, float value, int precision) {
   snprintf(buffer, size, format, value);
 }
 
+static void sanitizeToken(char *buffer) {
+  for (size_t i = 0; buffer[i] != '\0'; i++) {
+    if (buffer[i] == ' ') {
+      buffer[i] = '_';
+    }
+  }
+}
+
+static void buildInfo(char *buffer, size_t size) {
+  snprintf(buffer, size, "%s_%s", __DATE__, __TIME__);
+  sanitizeToken(buffer);
+}
+
+static void emitFrame(const char *kind, const char *pairs) {
+  Serial.print(kind);
+  Serial.print(',');
+  Serial.println(pairs);
+}
+
+static void emitProtoFrame() {
+  char buildBuf[32];
+  buildInfo(buildBuf, sizeof(buildBuf));
+  char pairs[128];
+  snprintf(
+      pairs,
+      sizeof(pairs),
+      "ver=1,device=nrf52840,fw=%s,build=%s",
+      FW_NAME,
+      buildBuf);
+  emitFrame("PROTO", pairs);
+}
+
 static void onPdmData() {
   const int bytes = PDM.available();
   if (bytes <= 0) {
@@ -419,7 +455,7 @@ static void onPdmData() {
 static void initLocalMic() {
   PDM.onReceive(onPdmData);
   if (!PDM.begin(1, PDM_SAMPLE_RATE)) {
-    Serial.println("PDM init failed");
+    emitFrame("SYS", "component=pdm,err=init_failed");
     localMicOk = false;
     localMicErr = 1;
     return;
@@ -482,7 +518,7 @@ static void updateLocalMic(uint32_t now) {
 
   if (!localMicPrimed) {
     localMicPrimed = true;
-    Serial.println("PDM ok");
+    emitFrame("SYS", "component=pdm,status=ok");
   }
 }
 
@@ -751,25 +787,25 @@ static void updateDerivedEvents(uint32_t now) {
   }
 
   if (airRisingCount >= 5 && now >= airRisingCooldownUntilMs) {
-    Serial.println("EVT,air_rising");
+    emitFrame("EVT", "type=air_rising");
     airRisingCooldownUntilMs = now + AIR_EVENT_COOLDOWN_MS;
     airRisingCount = 0;
   }
   if (airFallingCount >= 5 && now >= airFallingCooldownUntilMs) {
-    Serial.println("EVT,air_falling");
+    emitFrame("EVT", "type=air_falling");
     airFallingCooldownUntilMs = now + AIR_EVENT_COOLDOWN_MS;
     airFallingCount = 0;
   }
 
   if (!isnan(deltaLight) && !isnan(rocLight)) {
     if (deltaLight < -0.10f && fabs(rocLight) > 0.05f && now >= lightDropCooldownUntilMs) {
-      Serial.println("EVT,light_drop");
+      emitFrame("EVT", "type=light_drop");
       lightDropCooldownUntilMs = now + LIGHT_EVENT_COOLDOWN_MS;
     }
   }
 
   if (!isnan(deltaMic) && deltaMic > 0.10f && now >= noiseSpikeCooldownUntilMs) {
-    Serial.println("EVT,noise_spike");
+    emitFrame("EVT", "type=noise_spike");
     noiseSpikeCooldownUntilMs = now + NOISE_EVENT_COOLDOWN_MS;
   }
 }
@@ -790,7 +826,7 @@ static void updateMicEvents(uint32_t now) {
       : 0.0f;
 
   if (delta > MIC_SPIKE_DELTA && now >= micSpikeCooldownUntilMs) {
-    Serial.println("EVT,snd_spike");
+    emitFrame("EVT", "type=snd_spike");
     micSpikeCooldownUntilMs = now + MIC_SPIKE_COOLDOWN_MS;
   }
 
@@ -799,7 +835,7 @@ static void updateMicEvents(uint32_t now) {
       micSustainStartMs = now;
     }
     if ((now - micSustainStartMs) >= MIC_SUSTAIN_MS && now >= micSustainCooldownUntilMs) {
-      Serial.println("EVT,snd_sustain");
+      emitFrame("EVT", "type=snd_sustain");
       micSustainCooldownUntilMs = now + MIC_SUSTAIN_COOLDOWN_MS;
       micSustainStartMs = now;
     }
@@ -866,10 +902,10 @@ static void initDisplays() {
     delay(10);
   }
   if (!envOk) {
-    Serial.println("ENV OLED init failed");
+    emitFrame("SYS", "component=oled_env,err=init_failed");
   }
   if (!espOk) {
-    Serial.println("ESP OLED init failed");
+    emitFrame("SYS", "component=oled_esp,err=init_failed");
   }
   displayEnv.clearDisplay();
   displayEsp.clearDisplay();
@@ -1082,6 +1118,23 @@ static void readSensors(uint32_t now) {
       sgpEco2 = sgp.eCO2;
     }
   }
+
+  char tempBuf[16];
+  char humBuf[16];
+  formatFloat(tempBuf, sizeof(tempBuf), shtTempC, 1);
+  formatFloat(humBuf, sizeof(humBuf), shtHumidity, 1);
+  char envPairs[64];
+  snprintf(envPairs, sizeof(envPairs), "temp_c=%s,hum_pct=%s", tempBuf, humBuf);
+  emitFrame("ENV", envPairs);
+
+  char airPairs[64];
+  snprintf(
+      airPairs,
+      sizeof(airPairs),
+      "eco2_ppm=%u,tvoc_ppb=%u",
+      static_cast<unsigned>(sgpEco2),
+      static_cast<unsigned>(sgpTvoc));
+  emitFrame("AIR", airPairs);
 }
 
 [[maybe_unused]] static void drawEnvDisplay() {
@@ -1884,7 +1937,7 @@ static void refreshNow(uint32_t now) {
   refreshFlashUntilMs = now + 500;
   lastDisplayMs = now;
   renderDisplays(now);
-  Serial.println("BTN: refresh now");
+  emitFrame("BTN", "action=refresh_now");
 }
 
 static void handleShortPress(uint32_t now) {
@@ -1901,7 +1954,7 @@ static void handleDoublePress(uint32_t now) {
   if (uiStack == UI_DEBUG) {
     refreshNow(now);
   } else {
-    Serial.println("EVT,mark");
+    emitFrame("EVT", "type=mark");
   }
 }
 
@@ -1909,10 +1962,10 @@ static void handleLongPress(uint32_t now) {
   focusMode = !focusMode;
   if (focusMode) {
     focusModeUntilMs = now + FOCUS_MODE_DURATION_MS;
-    Serial.println("BTN: focus ON");
+    emitFrame("BTN", "action=focus,mode=on");
   } else {
     focusModeUntilMs = 0;
-    Serial.println("BTN: focus OFF");
+    emitFrame("BTN", "action=focus,mode=off");
   }
 }
 
@@ -2003,28 +2056,32 @@ static void heartbeat(uint32_t now) {
   if (!debugMode) {
     return;
   }
-  Serial.print("HB bps=");
-  Serial.print(bps);
-  Serial.print(" up=");
-  Serial.print(espTelemetry.up);
-  Serial.print(" rssi=");
-  Serial.print(espTelemetry.rssi);
-  Serial.print(" ct=");
-  if (isnan(espTelemetry.ct)) {
-    Serial.println("nan");
-  } else {
-    Serial.println(espTelemetry.ct, 1);
-  }
+  char ctBuf[16];
+  formatFloat(ctBuf, sizeof(ctBuf), espTelemetry.ct, 1);
+  char dbgPairs[96];
+  snprintf(
+      dbgPairs,
+      sizeof(dbgPairs),
+      "bps=%lu,up=%lu,rssi=%d,ct=%s",
+      static_cast<unsigned long>(bps),
+      static_cast<unsigned long>(espTelemetry.up),
+      espTelemetry.rssi,
+      ctBuf);
+  emitFrame("DBG", dbgPairs);
 }
 
 void setup() {
   Serial.begin(UART_BAUD);
   delay(1500);
+<<<<<<< HEAD
   Serial.print("PROTO,ver=1,device=nrf52840,fw=");
   Serial.print(FW_STRING);
   Serial.print(",build=");
   Serial.println(BUILD_STRING);
   Serial.println("HB,boot");
+=======
+  emitProtoFrame();
+>>>>>>> a0d876c81064fd293d5c252d061e8a60a911803b
   Serial.flush();
   Serial1.setPins(D7, D6);
   Serial1.begin(UART_BAUD);
@@ -2061,15 +2118,18 @@ void setup() {
 void loop() {
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
-  static uint32_t tick = 0;
+  static uint32_t hbSeq = 0;
   if (now - lastHB >= 1000) {
     lastHB = now;
-    tick++;
-    const uint32_t uptime_s = now / 1000;
-    Serial.print("HB,tick=");
-    Serial.print(tick);
-    Serial.print(",uptime_s=");
-    Serial.println(uptime_s);
+    hbSeq++;
+    char hbPairs[64];
+    snprintf(
+        hbPairs,
+        sizeof(hbPairs),
+        "tick=%lu,seq=%lu",
+        static_cast<unsigned long>(now),
+        static_cast<unsigned long>(hbSeq));
+    emitFrame("HB", hbPairs);
   }
   handleSerial1();
   updateBps(now);
