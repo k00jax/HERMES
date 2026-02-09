@@ -10,6 +10,7 @@
 
 #include "hermes_protocol.h"
 
+#define HERMES_SERIAL Serial
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
 
@@ -47,12 +48,7 @@ static const uint32_t PDM_UPDATE_MS = 100;
 static const float MIC_NOISE_ALPHA = 0.01f;
 static const size_t PDM_BUFFER_SAMPLES = 256;
 static const int TIMEZONE_OFFSET_MIN = -360;
-<<<<<<< HEAD
-static const char FW_STRING[] = "nrf";
-static const char BUILD_STRING[] = __DATE__;
-=======
 static const char *FW_NAME = "hermes-nrf";
->>>>>>> a0d876c81064fd293d5c252d061e8a60a911803b
 
 static const int HIST_N = 120;
 
@@ -426,9 +422,9 @@ static void buildInfo(char *buffer, size_t size) {
 }
 
 static void emitFrame(const char *kind, const char *pairs) {
-  Serial.print(kind);
-  Serial.print(',');
-  Serial.println(pairs);
+  HERMES_SERIAL.print(kind);
+  HERMES_SERIAL.print(',');
+  HERMES_SERIAL.println(pairs);
 }
 
 static void trimWhitespace(char *line) {
@@ -487,7 +483,7 @@ static void handleLine(char *line, uint32_t now) {
       uiStack = UI_USER;
       swState = true;
       swLastChangeMs = now;
-      softResetState(now);
+      userPageIndex = 0;
       emitFrame("ACK", "kind=OLED,op=STACK_USER");
       return;
     }
@@ -497,7 +493,7 @@ static void handleLine(char *line, uint32_t now) {
       uiStack = UI_DEBUG;
       swState = false;
       swLastChangeMs = now;
-      softResetState(now);
+      debugPageIndex = 0;
       emitFrame("ACK", "kind=OLED,op=STACK_DEBUG");
       return;
     }
@@ -518,7 +514,6 @@ static void handleLine(char *line, uint32_t now) {
         userPageIndex = (userPageIndex + 1) % USER_PAGE_COUNT;
       }
       lastDisplayMs = now;
-      renderDisplays(now);
       emitFrame("ACK", "kind=OLED,op=PAGE_NEXT");
       return;
     }
@@ -529,7 +524,6 @@ static void handleLine(char *line, uint32_t now) {
         userPageIndex = (userPageIndex + USER_PAGE_COUNT - 1) % USER_PAGE_COUNT;
       }
       lastDisplayMs = now;
-      renderDisplays(now);
       emitFrame("ACK", "kind=OLED,op=PAGE_PREV");
       return;
     }
@@ -819,7 +813,7 @@ static void exportUsbLine(uint32_t now) {
       localMicErr,
       espTelemetry.wifist,
       espTelemetry.camaddr);
-  Serial.print(line);
+  HERMES_SERIAL.print(line);
 #else
   (void)now;
 #endif
@@ -1044,7 +1038,7 @@ static void softResetState(uint32_t now) {
   initDisplays();
   lastDisplayMs = 0;
   renderDisplays(now);
-  Serial.println("EVT,sw=toggle,action=soft_reset");
+  HERMES_SERIAL.println("EVT,sw=toggle,action=soft_reset");
 
 #if ENABLE_ESP_CMD
   Serial1.print("CMD,reboot\n");
@@ -2185,18 +2179,11 @@ static void heartbeat(uint32_t now) {
 }
 
 void setup() {
-  Serial.begin(UART_BAUD);
+  HERMES_SERIAL.begin(UART_BAUD);
+  while (!HERMES_SERIAL) { delay(10); }
   delay(1500);
-<<<<<<< HEAD
-  Serial.print("PROTO,ver=1,device=nrf52840,fw=");
-  Serial.print(FW_STRING);
-  Serial.print(",build=");
-  Serial.println(BUILD_STRING);
-  Serial.println("HB,boot");
-=======
   emitProtoFrame();
->>>>>>> a0d876c81064fd293d5c252d061e8a60a911803b
-  Serial.flush();
+  HERMES_SERIAL.flush();
   Serial1.setPins(D7, D6);
   Serial1.begin(UART_BAUD);
   Wire.begin();
@@ -2233,8 +2220,8 @@ void loop() {
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
   static uint32_t hbSeq = 0;
-  while (Serial.available() > 0) {
-    const char c = static_cast<char>(Serial.read());
+  while (HERMES_SERIAL.available() > 0) {
+    const char c = static_cast<char>(HERMES_SERIAL.read());
     if (c == '\r') {
       continue;
     }
@@ -2244,7 +2231,7 @@ void loop() {
       cmdRxLen = 0;
       continue;
     }
-    if (cmdRxLen + 1 < sizeof(cmdRxBuf)) {
+    if ((size_t)(cmdRxLen + 1) < sizeof(cmdRxBuf)) {
       cmdRxBuf[cmdRxLen++] = c;
     } else {
       cmdRxLen = 0;
