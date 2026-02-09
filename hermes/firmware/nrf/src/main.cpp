@@ -2055,9 +2055,15 @@ void setup() {
 void loop() {
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
+  static uint32_t tick = 0;
   if (now - lastHB >= 1000) {
     lastHB = now;
-    Serial.println("HB,tick");
+    tick++;
+    const uint32_t uptime_s = now / 1000;
+    Serial.print("HB,tick=");
+    Serial.print(tick);
+    Serial.print(",uptime_s=");
+    Serial.println(uptime_s);
   }
   handleSerial1();
   updateBps(now);
