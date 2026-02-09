@@ -17,10 +17,13 @@ def make_uf2(source, target, env):
         print("Missing uf2conv.py at:", uf2conv)
         return
 
-    family = "0xADA52840"  # nRF52840 UF2 family ID
+    family = "0xADA52840"  # nRF52840
+
+    # Use PlatformIO's own python interpreter (works on Windows/macOS/Linux)
+    python_exe = env.subst("$PYTHONEXE")  # provided by PlatformIO/SCons
 
     cmd = [
-        "python3",
+        python_exe,
         uf2conv,
         "--convert",
         "--family", family,
