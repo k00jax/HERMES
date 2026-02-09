@@ -47,6 +47,8 @@ static const uint32_t PDM_UPDATE_MS = 100;
 static const float MIC_NOISE_ALPHA = 0.01f;
 static const size_t PDM_BUFFER_SAMPLES = 256;
 static const int TIMEZONE_OFFSET_MIN = -360;
+static const char FW_STRING[] = "nrf";
+static const char BUILD_STRING[] = __DATE__;
 
 static const int HIST_N = 120;
 
@@ -2018,6 +2020,10 @@ static void heartbeat(uint32_t now) {
 void setup() {
   Serial.begin(UART_BAUD);
   delay(1500);
+  Serial.print("PROTO,ver=1,device=nrf52840,fw=");
+  Serial.print(FW_STRING);
+  Serial.print(",build=");
+  Serial.println(BUILD_STRING);
   Serial.println("HB,boot");
   Serial.flush();
   Serial1.setPins(D7, D6);
