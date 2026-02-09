@@ -10,6 +10,10 @@
 
 #include "hermes_protocol.h"
 
+// Forward declarations to ensure functions are known before use
+static void renderDisplays(uint32_t now);
+static void softResetState(uint32_t now);
+
 #define HERMES_SERIAL Serial
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
@@ -168,7 +172,7 @@ static char rxBuffer[320];
 static size_t rxLen = 0;
 
 static char cmdRxBuf[128];
-static uint8_t cmdRxLen = 0;
+static size_t cmdRxLen = 0; // changed from uint8_t to size_t to avoid signed/unsigned comparison issues with sizeof()
 static char uiStatusMsg[32] = "";
 static uint32_t uiStatusUntilMs = 0;
 
