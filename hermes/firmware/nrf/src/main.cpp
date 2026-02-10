@@ -10,6 +10,11 @@
 
 #include "hermes_protocol.h"
 
+// Forward declarations to ensure functions are known before use
+static void renderDisplays(uint32_t now);
+static void softResetState(uint32_t now);
+
+#define HERMES_SERIAL Serial
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
 
@@ -169,7 +174,7 @@ static char rxBuffer[320];
 static size_t rxLen = 0;
 
 static char cmdRxBuf[128];
-static uint8_t cmdRxLen = 0;
+static size_t cmdRxLen = 0; // changed from uint8_t to size_t to avoid signed/unsigned comparison issues with sizeof()
 static char uiStatusMsg[32] = "";
 static uint32_t uiStatusUntilMs = 0;
 
@@ -484,7 +489,7 @@ static void handleLine(char *line, uint32_t now) {
       uiStack = UI_USER;
       swState = true;
       swLastChangeMs = now;
-      softResetState(now);
+      userPageIndex = 0;
       emitFrame("ACK", "kind=OLED,op=STACK_USER");
       return;
     }
@@ -494,7 +499,7 @@ static void handleLine(char *line, uint32_t now) {
       uiStack = UI_DEBUG;
       swState = false;
       swLastChangeMs = now;
-      softResetState(now);
+      debugPageIndex = 0;
       emitFrame("ACK", "kind=OLED,op=STACK_DEBUG");
       return;
     }
@@ -515,7 +520,6 @@ static void handleLine(char *line, uint32_t now) {
         userPageIndex = (userPageIndex + 1) % USER_PAGE_COUNT;
       }
       lastDisplayMs = now;
-      renderDisplays(now);
       emitFrame("ACK", "kind=OLED,op=PAGE_NEXT");
       return;
     }
@@ -526,7 +530,6 @@ static void handleLine(char *line, uint32_t now) {
         userPageIndex = (userPageIndex + USER_PAGE_COUNT - 1) % USER_PAGE_COUNT;
       }
       lastDisplayMs = now;
-      renderDisplays(now);
       emitFrame("ACK", "kind=OLED,op=PAGE_PREV");
       return;
     }
@@ -2183,6 +2186,7 @@ static void heartbeat(uint32_t now) {
 
 void setup() {
   HERMES_SERIAL.begin(UART_BAUD);
+  while (!HERMES_SERIAL) { delay(10); }
   delay(1500);
   emitProtoFrame();
   HERMES_SERIAL.flush();
@@ -2222,14 +2226,8 @@ void loop() {
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
   static uint32_t hbSeq = 0;
-  static uint32_t rxByteCount = 0;
   while (HERMES_SERIAL.available() > 0) {
     const char c = static_cast<char>(HERMES_SERIAL.read());
-    rxByteCount++;
-    if ((rxByteCount % 16) == 1) {
-      HERMES_SERIAL.print("DBG,kind=RX,bytes=");
-      HERMES_SERIAL.println(rxByteCount);
-    }
     if (c == '\r') {
       continue;
     }
@@ -2239,7 +2237,7 @@ void loop() {
       cmdRxLen = 0;
       continue;
     }
-    if (cmdRxLen + 1 < sizeof(cmdRxBuf)) {
+    if ((size_t)(cmdRxLen + 1) < sizeof(cmdRxBuf)) {
       cmdRxBuf[cmdRxLen++] = c;
     } else {
       cmdRxLen = 0;
