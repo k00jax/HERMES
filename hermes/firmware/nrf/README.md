@@ -24,3 +24,20 @@ If your Odroid IP changes:
 ```powershell
 .\tools\flash-nrf.ps1 -ODROID_HOST "odroid@10.0.0.80"
 ```
+
+## OLED Command Protocol (USB CDC)
+
+Commands arrive over the USB CDC device (Odroid `/dev/hermes-nrf`) and responses are emitted on the same stream. Only lines starting with `OLED,` are treated as commands; all other telemetry lines are ignored by the command parser.
+
+Supported commands:
+
+- `OLED,STATUS` -> `ACK,kind=OLED,op=STATUS`
+- `OLED,STACK,USER` -> toggles to user stack, `ACK,kind=OLED,op=STACK`
+- `OLED,STACK,DEBUG` -> toggles to debug stack, `ACK,kind=OLED,op=STACK`
+- `OLED,PAGE,NEXT` -> next page, `ACK,kind=OLED,op=PAGE`
+- `OLED,PAGE,PREV` -> previous page, `ACK,kind=OLED,op=PAGE`
+
+Errors:
+
+- Unknown or malformed OLED commands -> `NACK,kind=OLED,op=<OP>,reason=unknown_cmd`
+- RX buffer overflow -> `NACK,kind=OLED,reason=overflow`
