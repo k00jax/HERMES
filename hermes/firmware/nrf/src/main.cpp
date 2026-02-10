@@ -180,6 +180,21 @@ static size_t cmdRxLen = 0; // changed from uint8_t to size_t to avoid signed/un
 static char uiStatusMsg[32] = "";
 static uint32_t uiStatusUntilMs = 0;
 
+struct HostContext {
+  float temp_d5 = NAN;
+  float rh_d5 = NAN;
+  float temp_d60 = NAN;
+  float rh_d60 = NAN;
+  int32_t eco2_d5 = 0;
+  int32_t tvoc_d5 = 0;
+  int32_t eco2_d60 = 0;
+  int32_t tvoc_d60 = 0;
+  uint32_t ctx_set_ms = 0;
+  bool ctx_valid = false;
+};
+
+static HostContext hostContext;
+
 static uint32_t lastLineMs = 0;
 static uint32_t parseFail = 0;
 static uint32_t byteCount = 0;
@@ -593,6 +608,59 @@ static void handleLine(char *line, uint32_t now) {
     snprintf(uiStatusMsg, sizeof(uiStatusMsg), "REMOTE OK");
     uiStatusUntilMs = now + 3000;
     emitStatusAck();
+    return;
+  }
+
+  if (strcasecmp(token, "CONTEXT") == 0) {
+    char *kvToken = strtok_r(nullptr, ",", &savePtr);
+    if (!kvToken) {
+      emitNack("CONTEXT", "missing_payload");
+      return;
+    }
+    uint8_t parsedCount = 0;
+    while (kvToken) {
+      char *equals = strchr(kvToken, '=');
+      if (equals) {
+        *equals = '\0';
+        const char *key = kvToken;
+        const char *value = equals + 1;
+        if (strcmp(key, "temp_d5") == 0) {
+          hostContext.temp_d5 = static_cast<float>(atof(value));
+          parsedCount++;
+        } else if (strcmp(key, "rh_d5") == 0) {
+          hostContext.rh_d5 = static_cast<float>(atof(value));
+          parsedCount++;
+        } else if (strcmp(key, "temp_d60") == 0) {
+          hostContext.temp_d60 = static_cast<float>(atof(value));
+          parsedCount++;
+        } else if (strcmp(key, "rh_d60") == 0) {
+          hostContext.rh_d60 = static_cast<float>(atof(value));
+          parsedCount++;
+        } else if (strcmp(key, "eco2_d5") == 0) {
+          hostContext.eco2_d5 = static_cast<int32_t>(atoi(value));
+          parsedCount++;
+        } else if (strcmp(key, "tvoc_d5") == 0) {
+          hostContext.tvoc_d5 = static_cast<int32_t>(atoi(value));
+          parsedCount++;
+        } else if (strcmp(key, "eco2_d60") == 0) {
+          hostContext.eco2_d60 = static_cast<int32_t>(atoi(value));
+          parsedCount++;
+        } else if (strcmp(key, "tvoc_d60") == 0) {
+          hostContext.tvoc_d60 = static_cast<int32_t>(atoi(value));
+          parsedCount++;
+        }
+      }
+      kvToken = strtok_r(nullptr, ",", &savePtr);
+    }
+
+    if (parsedCount > 0) {
+      hostContext.ctx_valid = true;
+      hostContext.ctx_set_ms = now;
+    }
+
+    char pairs[64];
+    snprintf(pairs, sizeof(pairs), "kind=OLED,op=CONTEXT,parsed=%u", parsedCount);
+    emitFrame("ACK", pairs);
     return;
   }
 
