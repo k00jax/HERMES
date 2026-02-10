@@ -18,8 +18,6 @@ static void softResetState(uint32_t now);
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
 
-#define HERMES_SERIAL Serial
-
 static const uint8_t OLED_ADDR_ENV = 0x3C;
 static const uint8_t OLED_ADDR_ESP = 0x3D;
 static const uint8_t SCREEN_WIDTH = 128;
@@ -392,6 +390,29 @@ static void handleSerial1() {
   }
 }
 
+static void handleUsbCommands(uint32_t now) {
+  while (HERMES_SERIAL.available() > 0) {
+    const char c = static_cast<char>(HERMES_SERIAL.read());
+    if (c == '\r') {
+      continue;
+    }
+    if (c == '\n') {
+      cmdRxBuf[cmdRxLen] = '\0';
+      if (cmdRxLen > 0) {
+        handleLine(cmdRxBuf, now);
+      }
+      cmdRxLen = 0;
+      continue;
+    }
+    if ((cmdRxLen + 1) < sizeof(cmdRxBuf)) {
+      cmdRxBuf[cmdRxLen++] = c;
+    } else {
+      cmdRxLen = 0;
+      emitFrame("NACK", "kind=OLED,reason=overflow");
+    }
+  }
+}
+
 static void updateBps(uint32_t now) {
   if (lastBpsMs == 0) {
     lastBpsMs = now;
@@ -433,6 +454,45 @@ static void emitFrame(const char *kind, const char *pairs) {
   HERMES_SERIAL.println(pairs);
 }
 
+static void emitAck(const char *op) {
+  char pairs[64];
+  snprintf(pairs, sizeof(pairs), "kind=OLED,op=%s", op);
+  emitFrame("ACK", pairs);
+}
+
+static void emitNack(const char *op, const char *reason) {
+  char pairs[96];
+  snprintf(pairs, sizeof(pairs), "kind=OLED,op=%s,reason=%s", op, reason);
+  emitFrame("NACK", pairs);
+}
+
+static void extractOpGuess(const char *line, char *opBuf, size_t opSize) {
+  if (!opBuf || opSize == 0) {
+    return;
+  }
+  const char *start = line;
+  if (strncmp(line, "OLED,", 5) == 0) {
+    start = line + 5;
+  }
+  const char *end = start;
+  while (*end != '\0' && *end != ',') {
+    end++;
+  }
+  size_t len = static_cast<size_t>(end - start);
+  if (len == 0) {
+    snprintf(opBuf, opSize, "UNKNOWN");
+    return;
+  }
+  if (len >= opSize) {
+    len = opSize - 1;
+  }
+  memcpy(opBuf, start, len);
+  opBuf[len] = '\0';
+  for (size_t i = 0; opBuf[i] != '\0'; i++) {
+    opBuf[i] = static_cast<char>(toupper(static_cast<unsigned char>(opBuf[i])));
+  }
+}
+
 static void trimWhitespace(char *line) {
   if (!line) {
     return;
@@ -457,8 +517,11 @@ static void handleLine(char *line, uint32_t now) {
     return;
   }
 
+  char opGuess[24];
+  extractOpGuess(line, opGuess, sizeof(opGuess));
+
   if (strncmp(line, "OLED,", 5) != 0) {
-    emitFrame("NACK", "kind=UNKNOWN,reason=unknown_kind");
+    emitNack(opGuess, "unknown_cmd");
     return;
   }
 
@@ -466,21 +529,21 @@ static void handleLine(char *line, uint32_t now) {
   char *savePtr = nullptr;
   char *token = strtok_r(payload, ",", &savePtr);
   if (!token) {
-    emitFrame("NACK", "kind=OLED,op=UNKNOWN,reason=unknown_cmd");
+    emitNack("UNKNOWN", "unknown_cmd");
     return;
   }
 
   if (strcasecmp(token, "STATUS") == 0) {
     snprintf(uiStatusMsg, sizeof(uiStatusMsg), "REMOTE OK");
     uiStatusUntilMs = now + 3000;
-    emitFrame("ACK", "kind=OLED,op=STATUS");
+    emitAck("STATUS");
     return;
   }
 
   if (strcasecmp(token, "STACK") == 0) {
     char *stackToken = strtok_r(nullptr, ",", &savePtr);
     if (!stackToken) {
-      emitFrame("NACK", "kind=OLED,op=STACK,reason=missing_arg");
+      emitNack("STACK", "missing_arg");
       return;
     }
     if (strcasecmp(stackToken, "USER") == 0) {
@@ -489,8 +552,8 @@ static void handleLine(char *line, uint32_t now) {
       uiStack = UI_USER;
       swState = true;
       swLastChangeMs = now;
-      userPageIndex = 0;
-      emitFrame("ACK", "kind=OLED,op=STACK_USER");
+      softResetState(now);
+      emitAck("STACK");
       return;
     }
     if (strcasecmp(stackToken, "DEBUG") == 0) {
@@ -499,18 +562,18 @@ static void handleLine(char *line, uint32_t now) {
       uiStack = UI_DEBUG;
       swState = false;
       swLastChangeMs = now;
-      debugPageIndex = 0;
-      emitFrame("ACK", "kind=OLED,op=STACK_DEBUG");
+      softResetState(now);
+      emitAck("STACK");
       return;
     }
-    emitFrame("NACK", "kind=OLED,op=STACK,reason=unknown_arg");
+    emitNack("STACK", "unknown_arg");
     return;
   }
 
   if (strcasecmp(token, "PAGE") == 0) {
     char *pageToken = strtok_r(nullptr, ",", &savePtr);
     if (!pageToken) {
-      emitFrame("NACK", "kind=OLED,op=PAGE,reason=missing_arg");
+      emitNack("PAGE", "missing_arg");
       return;
     }
     if (strcasecmp(pageToken, "NEXT") == 0) {
@@ -520,7 +583,7 @@ static void handleLine(char *line, uint32_t now) {
         userPageIndex = (userPageIndex + 1) % USER_PAGE_COUNT;
       }
       lastDisplayMs = now;
-      emitFrame("ACK", "kind=OLED,op=PAGE_NEXT");
+      emitAck("PAGE");
       return;
     }
     if (strcasecmp(pageToken, "PREV") == 0) {
@@ -530,14 +593,14 @@ static void handleLine(char *line, uint32_t now) {
         userPageIndex = (userPageIndex + USER_PAGE_COUNT - 1) % USER_PAGE_COUNT;
       }
       lastDisplayMs = now;
-      emitFrame("ACK", "kind=OLED,op=PAGE_PREV");
+      emitAck("PAGE");
       return;
     }
-    emitFrame("NACK", "kind=OLED,op=PAGE,reason=unknown_arg");
+    emitNack("PAGE", "unknown_arg");
     return;
   }
 
-  emitFrame("NACK", "kind=OLED,op=UNKNOWN,reason=unknown_cmd");
+  emitNack(opGuess, "unknown_cmd");
 }
 
 static void emitProtoFrame() {
@@ -2226,24 +2289,7 @@ void loop() {
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
   static uint32_t hbSeq = 0;
-  while (HERMES_SERIAL.available() > 0) {
-    const char c = static_cast<char>(HERMES_SERIAL.read());
-    if (c == '\r') {
-      continue;
-    }
-    if (c == '\n') {
-      cmdRxBuf[cmdRxLen] = '\0';
-      handleLine(cmdRxBuf, now);
-      cmdRxLen = 0;
-      continue;
-    }
-    if ((size_t)(cmdRxLen + 1) < sizeof(cmdRxBuf)) {
-      cmdRxBuf[cmdRxLen++] = c;
-    } else {
-      cmdRxLen = 0;
-      emitFrame("NACK", "kind=OLED,op=UNKNOWN,reason=overflow");
-    }
-  }
+  handleUsbCommands(now);
   if (now - lastHB >= 1000) {
     lastHB = now;
     hbSeq++;
