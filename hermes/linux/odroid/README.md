@@ -5,6 +5,7 @@ Odroid-specific services, scripts, containers, and systemd units.
 ## OLED Context Pusher
 
 Pushes host-computed deltas to the nRF OLED overlay.
+Also sends host epoch time for OLED time/date fallback.
 
 Script:
 

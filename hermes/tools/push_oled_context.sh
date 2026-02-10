@@ -79,4 +79,7 @@ fi
 
 python3 "$CLIENT" send "$cmd" >/dev/null
 
+epoch=$(date +%s)
+python3 "$CLIENT" send "OLED,TIME,epoch=$epoch" >/dev/null
+
 echo "sent: $cmd"
