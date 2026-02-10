@@ -537,6 +537,22 @@ static void emitStatusAck() {
   emitFrame("ACK", pairs);
 }
 
+static void drawContextDelta(Adafruit_SSD1306 &display, int32_t value, bool valid) {
+  if (!valid) {
+    return;
+  }
+  char buf[12];
+  snprintf(buf, sizeof(buf), "60m%+ld", static_cast<long>(value));
+  const int textWidth = static_cast<int>(strlen(buf)) * 6;
+  int x = SCREEN_WIDTH - textWidth;
+  if (x < 0) {
+    x = 0;
+  }
+  display.setTextSize(1);
+  display.setCursor(x, 0);
+  display.print(buf);
+}
+
 static void extractOpGuess(const char *line, char *opBuf, size_t opSize) {
   if (!opBuf || opSize == 0) {
     return;
@@ -1938,6 +1954,7 @@ static void drawUserAirTrendsPage(uint32_t now) {
   displayEnv.setTextColor(SSD1306_WHITE);
   displayEnv.setCursor(0, 0);
   displayEnv.print("CO2");
+  drawContextDelta(displayEnv, hostContext.eco2_d60, hostContext.ctx_valid);
   drawSparkline(0, 16, SCREEN_WIDTH, 48, histEco2, histCount, histIndex, displayEnv);
   drawCornerFlags(displayEnv, now);
   displayEnv.display();
@@ -1947,6 +1964,7 @@ static void drawUserAirTrendsPage(uint32_t now) {
   displayEsp.setTextColor(SSD1306_WHITE);
   displayEsp.setCursor(0, 0);
   displayEsp.print("TVOC");
+  drawContextDelta(displayEsp, hostContext.tvoc_d60, hostContext.ctx_valid);
   drawSparkline(0, 16, SCREEN_WIDTH, 48, histTvoc, histCount, histIndex, displayEsp);
   drawCornerFlags(displayEsp, now);
   displayEsp.display();
