@@ -8,9 +8,21 @@ if [[ ! -e "$DEVICE" ]]; then
   exit 2
 fi
 
+tmpfile="$(mktemp)"
+cleanup() {
+  rm -f "$tmpfile"
+}
+trap cleanup EXIT
+
+sudo timeout 2 cat "$DEVICE" > "$tmpfile" &
+reader_pid=$!
+sleep 0.1
+
 echo "OLED,STATUS" | sudo tee "$DEVICE" > /dev/null
 
-if sudo timeout 2 cat "$DEVICE" | head -n 200 | grep -m 1 -q '^ACK,kind=OLED,op=STATUS$'; then
+wait "$reader_pid" 2>/dev/null || true
+
+if head -n 400 "$tmpfile" | grep -m 1 -q '^ACK,kind=OLED,op=STATUS$'; then
   echo "PASS: ACK received"
   exit 0
 fi
