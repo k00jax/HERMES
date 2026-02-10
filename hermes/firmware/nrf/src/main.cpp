@@ -470,6 +470,58 @@ static void emitNack(const char *op, const char *reason) {
   emitFrame("NACK", pairs);
 }
 
+static const char *getDebugPageName(int index) {
+  const int idx = (index < 0) ? 0 : (index % DEBUG_PAGE_COUNT);
+  switch (idx) {
+    case 1:
+      return "debug_sensors";
+    case 2:
+      return "debug_derived";
+    case 0:
+    default:
+      return "debug_link";
+  }
+}
+
+static const char *getUserPageName(int index) {
+  const int idx = (index < 0) ? 0 : (index % USER_PAGE_COUNT);
+  switch (idx) {
+    case 1:
+      return "user_air";
+    case 2:
+      return "user_env";
+    case 3:
+      return "user_sound";
+    case 4:
+      return "user_time";
+    case 0:
+    default:
+      return "user_overview";
+  }
+}
+
+static void emitStatusAck() {
+  const char *stackName = (uiStack == UI_DEBUG) ? "DEBUG" : "USER";
+  const int page = (uiStack == UI_DEBUG) ? debugPageIndex : userPageIndex;
+  const char *screen = (uiStack == UI_DEBUG)
+      ? getDebugPageName(debugPageIndex)
+      : getUserPageName(userPageIndex);
+  if (!screen) {
+    screen = "unknown";
+  }
+  char pairs[160];
+  snprintf(
+      pairs,
+      sizeof(pairs),
+      "kind=OLED,op=STATUS,stack=%s,page=%d,focus=%d,debug=%d,screen=%s",
+      stackName,
+      page,
+      focusMode ? 1 : 0,
+      debugMode ? 1 : 0,
+      screen);
+  emitFrame("ACK", pairs);
+}
+
 static void extractOpGuess(const char *line, char *opBuf, size_t opSize) {
   if (!opBuf || opSize == 0) {
     return;
@@ -540,7 +592,7 @@ static void handleLine(char *line, uint32_t now) {
   if (strcasecmp(token, "STATUS") == 0) {
     snprintf(uiStatusMsg, sizeof(uiStatusMsg), "REMOTE OK");
     uiStatusUntilMs = now + 3000;
-    emitAck("STATUS");
+    emitStatusAck();
     return;
   }
 
