@@ -1,0 +1,13 @@
+[0;1;32m●[0m hermes-logger.service - HERMES Logger Daemon
+     Loaded: loaded (/etc/systemd/system/hermes-logger.service; enabled; vendor preset: enabled)
+     Active: [0;1;32mactive (running)[0m since Tue 2026-02-10 06:27:04 UTC; 4s ago
+   Main PID: 51269 (python3)
+      Tasks: 3 (limit: 9161)
+     Memory: 5.2M
+     CGroup: /system.slice/hermes-logger.service
+             └─51269 /usr/bin/python3 -u /home/odroid/hermes-src/hermes/linux/logger/daemon.py
+
+Feb 10 06:27:05 server python3[51269]: [hermesd] starting. port=/dev/hermes-nrf baud=115200 db=/home/odroid/hermes-data/db/hermes.sqlite3
+Feb 10 06:27:05 server python3[51269]: [hermesd] socket listening: /tmp/hermesd.sock
+Feb 10 06:27:05 server python3[51269]: [hermesd] trying serial port: /dev/hermes-nrf
+Feb 10 06:27:05 server python3[51269]: [hermesd] serial connected: /dev/hermes-nrf
