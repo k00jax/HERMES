@@ -1,0 +1,14 @@
+[Unit]
+Description=HERMES Logger Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=odroid
+WorkingDirectory=/home/odroid/hermes-src/hermes
+ExecStart=/usr/bin/python3 -u /home/odroid/hermes-src/hermes/linux/logger/daemon.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

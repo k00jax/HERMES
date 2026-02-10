@@ -27,3 +27,20 @@ Check status:
 systemctl status hermes-oled-context.timer
 journalctl -u hermes-oled-context.service -n 50
 ```
+
+## Logger Daemon (systemd)
+
+Install and enable the logger daemon:
+
+```bash
+sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-logger.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-logger.service
+```
+
+Check status:
+
+```bash
+systemctl status hermes-logger.service
+sudo journalctl -u hermes-logger.service -n 50
+```

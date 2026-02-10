@@ -28,6 +28,14 @@ cd hermes/firmware/nrf
 python3 ~/hermes-src/hermes/linux/logger/daemon.py
 ```
 
+### Logger (systemd)
+
+```bash
+sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-logger.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-logger.service
+```
+
 ### Push OLED Context (on Odroid)
 
 ```bash
