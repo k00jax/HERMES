@@ -523,6 +523,7 @@ static void handleLine(char *line, uint32_t now) {
 
   if (strncmp(line, "OLED,", 5) != 0) {
     return;
+    
   }
 
   char opGuess[24];
