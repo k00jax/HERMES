@@ -206,6 +206,9 @@ static uint32_t lastDisplayMs = 0;
 static uint32_t lastHeartbeatMs = 0;
 static uint32_t lastSampleMs = 0;
 
+static uint32_t hostEpochBase = 0;
+static uint32_t hostEpochBaseMs = 0;
+
 static uint32_t lastParseFailSeen = 0;
 static uint32_t parseErrorUntilMs = 0;
 static uint32_t lastLedMs = 0;
@@ -677,6 +680,38 @@ static void handleLine(char *line, uint32_t now) {
     char pairs[64];
     snprintf(pairs, sizeof(pairs), "kind=OLED,op=CONTEXT,parsed=%u", parsedCount);
     emitFrame("ACK", pairs);
+    return;
+  }
+
+  if (strcasecmp(token, "TIME") == 0) {
+    char *kvToken = strtok_r(nullptr, ",", &savePtr);
+    if (!kvToken) {
+      emitNack("TIME", "missing_payload");
+      return;
+    }
+    uint8_t parsedCount = 0;
+    while (kvToken) {
+      char *equals = strchr(kvToken, '=');
+      if (equals) {
+        *equals = '\0';
+        const char *key = kvToken;
+        const char *value = equals + 1;
+        if (strcmp(key, "epoch") == 0) {
+          const uint32_t epoch = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+          if (epoch > 0) {
+            hostEpochBase = epoch;
+            hostEpochBaseMs = now;
+            parsedCount++;
+          }
+        }
+      }
+      kvToken = strtok_r(nullptr, ",", &savePtr);
+    }
+    if (parsedCount == 0) {
+      emitNack("TIME", "missing_payload");
+      return;
+    }
+    emitAck("TIME");
     return;
   }
 
@@ -1359,7 +1394,13 @@ static float getSmoothedValue(const float *series) {
 
 static bool getLocalEpoch(uint32_t now, int64_t *epochOut) {
   if (espTelemetry.ntp == 0 || lastLineMs == 0) {
-    return false;
+    if (hostEpochBase == 0 || hostEpochBaseMs == 0) {
+      return false;
+    }
+    const uint32_t elapsedMs = now - hostEpochBaseMs;
+    const int64_t epoch = static_cast<int64_t>(hostEpochBase) + (elapsedMs / 1000) + (TIMEZONE_OFFSET_MIN * 60);
+    *epochOut = epoch;
+    return true;
   }
   const uint32_t elapsedMs = now - lastLineMs;
   const int64_t epoch = static_cast<int64_t>(espTelemetry.ntp) + (elapsedMs / 1000) + (TIMEZONE_OFFSET_MIN * 60);
