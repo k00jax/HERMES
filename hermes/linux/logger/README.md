@@ -24,6 +24,11 @@ python3 ~/hermes-src/hermes/linux/logger/logger.py
 * Raw logs: `~/hermes-data/raw/nrf_YYYY-MM-DD.log`
 * SQLite DB: `~/hermes-data/db/hermes.sqlite3`
 * OLED status table: `oled_status(ts_utc, source, stack, page, focus, debug, screen)`
+* Typed tables: `hb`, `env`, `air`, `acks` (each includes `ts_utc` and `ts_local`)
+
+### Local Time
+
+All tables keep `ts_utc` as the source of truth and add `ts_local` in America/Chicago (CST/CDT).
 
 ## OLED Status Query
 
