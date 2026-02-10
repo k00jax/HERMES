@@ -1,3 +1,5 @@
+nRF: run build_nrf.ps1 on PC → run ./flash-nrf on Odroid
+
 # Hermes Monorepo
 
 Scaffolding for firmware, Linux (Odroid), hardware docs, and tooling.

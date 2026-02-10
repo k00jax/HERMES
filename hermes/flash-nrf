@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+cd ~/hermes-src/hermes || exit 1
+./tools/flash_nrf_uf2.sh ~/incoming/firmware.uf2
