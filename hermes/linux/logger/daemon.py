@@ -24,6 +24,9 @@ RAW_DIR = os.path.expanduser("~/hermes-data/raw")
 DB_PATH = os.path.expanduser("~/hermes-data/db/hermes.sqlite3")
 SOCK_PATH = "/tmp/hermesd.sock"
 NRF_BY_ID_HINT = "usb-Seeed_Studio_XIAO_nRF52840_9FBE2A3ABD93B121-if00"
+RAW_RETENTION_DAYS = int(os.environ.get("HERMES_RAW_RETENTION_DAYS", "30"))
+RAW_RETENTION_SECS = RAW_RETENTION_DAYS * 86400
+RAW_CLEANUP_INTERVAL_SECS = 3600
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -67,6 +70,26 @@ def day_stamp(dt):
 
 def raw_path(dt):
     return os.path.join(RAW_DIR, f"nrf_{day_stamp(dt)}.log")
+
+def cleanup_raw_logs(now_ts: float):
+    if RAW_RETENTION_DAYS <= 0:
+        return
+    cutoff = now_ts - RAW_RETENTION_SECS
+    removed = 0
+    for name in os.listdir(RAW_DIR):
+        if not (name.startswith("nrf_") and name.endswith(".log")):
+            continue
+        path = os.path.join(RAW_DIR, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except Exception as e:
+            log_info(f"[hermesd] raw cleanup failed: {name} err={e}")
+    if removed:
+        log_info(f"[hermesd] raw cleanup removed={removed}")
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str):
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -359,6 +382,7 @@ def serial_worker(shutdown: threading.Event, out_q: queue.Queue):
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
     ser = None
+    last_cleanup = 0.0
     while not shutdown.is_set():
         if ser is None:
             try:
@@ -387,6 +411,11 @@ def serial_worker(shutdown: threading.Event, out_q: queue.Queue):
                 except queue.Empty:
                     break
                 ser.write((cmd + "\n").encode("utf-8"))
+
+            now_ts = time.time()
+            if (now_ts - last_cleanup) >= RAW_CLEANUP_INTERVAL_SECS:
+                cleanup_raw_logs(now_ts)
+                last_cleanup = now_ts
 
         except Exception as e:
             update_stats(serial_connected=False, last_error=f"serial error: {e}")

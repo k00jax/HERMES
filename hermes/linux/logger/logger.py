@@ -17,6 +17,9 @@ BAUD = int(os.environ.get("HERMES_BAUD", "115200"))
 
 RAW_DIR = os.path.expanduser("~/hermes-data/raw")
 DB_PATH = os.path.expanduser("~/hermes-data/db/hermes.sqlite3")
+RAW_RETENTION_DAYS = int(os.environ.get("HERMES_RAW_RETENTION_DAYS", "30"))
+RAW_RETENTION_SECS = RAW_RETENTION_DAYS * 86400
+RAW_CLEANUP_INTERVAL_SECS = 3600
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -51,6 +54,22 @@ def day_stamp(dt):
 
 def raw_path(dt):
     return os.path.join(RAW_DIR, f"nrf_{day_stamp(dt)}.log")
+
+def cleanup_raw_logs(now_ts: float):
+    if RAW_RETENTION_DAYS <= 0:
+        return
+    cutoff = now_ts - RAW_RETENTION_SECS
+    for name in os.listdir(RAW_DIR):
+        if not (name.startswith("nrf_") and name.endswith(".log")):
+            continue
+        path = os.path.join(RAW_DIR, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except Exception as e:
+            print(f"[logger] raw cleanup failed: {name} err={e}")
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str):
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -263,66 +282,6 @@ def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: 
         )
         return
 
-def parse_int(value: str):
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-def parse_float(value: str):
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-def insert_typed_frames(conn: sqlite3.Connection, ts: str, line: str):
-    kind, kvs = parse_kv_pairs(line)
-    if not kind:
-        return
-    if kind == "HB":
-        tick = parse_int(kvs.get("tick"))
-        seq = parse_int(kvs.get("seq"))
-        if tick is None and seq is None:
-            return
-        conn.execute(
-            "INSERT INTO hb (ts_utc, source, tick_ms, seq) VALUES (?, ?, ?, ?)",
-            (ts, "nrf", tick, seq),
-        )
-        return
-    if kind == "ENV":
-        temp_c = parse_float(kvs.get("temp_c"))
-        hum_pct = parse_float(kvs.get("hum_pct"))
-        if temp_c is None and hum_pct is None:
-            return
-        conn.execute(
-            "INSERT INTO env (ts_utc, source, temp_c, hum_pct) VALUES (?, ?, ?, ?)",
-            (ts, "nrf", temp_c, hum_pct),
-        )
-        return
-    if kind == "AIR":
-        eco2_ppm = parse_float(kvs.get("eco2_ppm"))
-        tvoc_ppb = parse_float(kvs.get("tvoc_ppb"))
-        if eco2_ppm is None and tvoc_ppb is None:
-            return
-        conn.execute(
-            "INSERT INTO air (ts_utc, source, eco2_ppm, tvoc_ppb) VALUES (?, ?, ?, ?)",
-            (ts, "nrf", eco2_ppm, tvoc_ppb),
-        )
-        return
-    if kind == "ACK":
-        ack_kind = kvs.get("kind")
-        ack_op = kvs.get("op")
-        if not ack_kind and not ack_op:
-            return
-        conn.execute(
-            "INSERT INTO acks (ts_utc, source, kind, op) VALUES (?, ?, ?, ?)",
-            (ts, "nrf", ack_kind, ack_op),
-        )
-        return
 
 def main():
     conn = sqlite3.connect(DB_PATH)
@@ -330,6 +289,7 @@ def main():
 
     print(f"[logger] starting. port={PORT} baud={BAUD} db={DB_PATH}")
 
+    last_cleanup = 0.0
     while True:
         try:
             with serial.Serial(PORT, BAUD, timeout=1) as ser:
@@ -386,9 +346,12 @@ def main():
 
                     insert_typed_frames(conn, ts, ts_local, line)
 
-                    insert_typed_frames(conn, ts, line)
-
                     conn.commit()
+
+                    now_ts = time.time()
+                    if (now_ts - last_cleanup) >= RAW_CLEANUP_INTERVAL_SECS:
+                        cleanup_raw_logs(now_ts)
+                        last_cleanup = now_ts
 
         except Exception as e:
             print(f"[logger] disconnected or error: {e}")

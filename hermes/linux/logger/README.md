@@ -32,6 +32,11 @@ All tables keep `ts_utc` as the source of truth and add `ts_local` in America/Ch
 You can override the timezone with `HERMES_TZ` (default: `America/Chicago`). If timezone data is
 unavailable, the logger falls back to fixed CST (-06:00).
 
+### Raw Log Retention
+
+Raw log files are cleaned up periodically. Set `HERMES_RAW_RETENTION_DAYS` to control retention
+days (default: 30). Use `0` to disable cleanup.
+
 ## OLED Status Query
 
 Send a STATUS command via the daemon client:
