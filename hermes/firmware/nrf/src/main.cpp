@@ -13,6 +13,10 @@
 // Forward declarations to ensure functions are known before use
 static void renderDisplays(uint32_t now);
 static void softResetState(uint32_t now);
+static void emitFrame(const char *kind, const char *pairs);
+static void handleLine(char *line, uint32_t now);
+
+
 
 #define HERMES_SERIAL Serial
 #define ENABLE_USB_EXPORT 1
@@ -517,13 +521,12 @@ static void handleLine(char *line, uint32_t now) {
     return;
   }
 
-  char opGuess[24];
-  extractOpGuess(line, opGuess, sizeof(opGuess));
-
   if (strncmp(line, "OLED,", 5) != 0) {
-    emitNack(opGuess, "unknown_cmd");
     return;
   }
+
+  char opGuess[24];
+  extractOpGuess(line, opGuess, sizeof(opGuess));
 
   char *payload = line + 5;
   char *savePtr = nullptr;
