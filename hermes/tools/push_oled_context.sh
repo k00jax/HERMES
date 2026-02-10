@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+HOME="${HOME:-/home/odroid}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB="$HOME/hermes-data/db/hermes.sqlite3"
 CLIENT="$ROOT_DIR/linux/logger/client.py"
