@@ -23,6 +23,15 @@ python3 ~/hermes-src/hermes/linux/logger/logger.py
 
 * Raw logs: `~/hermes-data/raw/nrf_YYYY-MM-DD.log`
 * SQLite DB: `~/hermes-data/db/hermes.sqlite3`
+* OLED status table: `oled_status(ts_utc, source, stack, page, focus, debug, screen)`
+
+## OLED Status Query
+
+Send a STATUS command via the daemon client:
+
+```bash
+python3 ~/hermes-src/hermes/linux/logger/client.py oled-status
+```
 
 <!--
 ```bash

@@ -41,6 +41,18 @@ def init_db(conn: sqlite3.Connection):
       value REAL
     );
     """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS oled_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            source TEXT NOT NULL,
+            stack TEXT,
+            page INTEGER,
+            focus INTEGER,
+            debug INTEGER,
+            screen TEXT
+        );
+        """)
     conn.commit()
 
 def parse_line(line: str):
@@ -60,6 +72,39 @@ def parse_line(line: str):
                 # ignore non-numeric values for now
                 pass
     return kind, kvs
+
+def parse_kv_pairs(line: str):
+    parts = [p.strip() for p in line.split(",") if p.strip()]
+    if not parts:
+        return None, {}
+    kind = parts[0]
+    kvs = {}
+    for p in parts[1:]:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            kvs[k.strip()] = v.strip()
+    return kind, kvs
+
+def parse_oled_status(line: str):
+    kind, kvs = parse_kv_pairs(line)
+    if kind != "ACK":
+        return None
+    if kvs.get("kind") != "OLED" or kvs.get("op") != "STATUS":
+        return None
+    out = {
+        "stack": kvs.get("stack"),
+        "screen": kvs.get("screen"),
+    }
+    for key in ("page", "focus", "debug"):
+        value = kvs.get(key)
+        if value is None:
+            out[key] = None
+            continue
+        try:
+            out[key] = int(value)
+        except ValueError:
+            out[key] = None
+    return out
 
 def main():
     conn = sqlite3.connect(DB_PATH)
@@ -99,6 +144,24 @@ def main():
                         conn.executemany(
                             "INSERT INTO metrics (ts_utc, source, kind, key, value) VALUES (?, ?, ?, ?, ?)",
                             [(ts, "nrf", kind, k, v) for (k, v) in kvs],
+                        )
+
+                    oled_status = parse_oled_status(line)
+                    if oled_status:
+                        conn.execute(
+                            """
+                            INSERT INTO oled_status (ts_utc, source, stack, page, focus, debug, screen)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                ts,
+                                "nrf",
+                                oled_status.get("stack"),
+                                oled_status.get("page"),
+                                oled_status.get("focus"),
+                                oled_status.get("debug"),
+                                oled_status.get("screen"),
+                            ),
                         )
 
                     conn.commit()

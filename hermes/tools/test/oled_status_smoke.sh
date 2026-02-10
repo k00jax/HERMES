@@ -22,7 +22,7 @@ echo "OLED,STATUS" | sudo tee "$DEVICE" > /dev/null
 
 wait "$reader_pid" 2>/dev/null || true
 
-if head -n 400 "$tmpfile" | grep -m 1 -q '^ACK,kind=OLED,op=STATUS$'; then
+if head -n 400 "$tmpfile" | grep -m 1 -q '^ACK,kind=OLED,op=STATUS'; then
   echo "PASS: ACK received"
   exit 0
 fi
