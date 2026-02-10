@@ -1,31 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEVICE="${1:-/dev/hermes-nrf}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CLIENT="$ROOT_DIR/linux/logger/client.py"
+SOCK="/tmp/hermesd.sock"
+DB_PATH="$HOME/hermes-data/db/hermes.sqlite3"
 
-if [[ ! -e "$DEVICE" ]]; then
-  echo "Device not found: $DEVICE" >&2
+if [[ ! -S "$SOCK" ]]; then
+  echo "Daemon socket not found: $SOCK" >&2
   exit 2
 fi
 
-tmpfile="$(mktemp)"
-cleanup() {
-  rm -f "$tmpfile"
-}
-trap cleanup EXIT
+if [[ ! -f "$DB_PATH" ]]; then
+  echo "DB not found: $DB_PATH" >&2
+  exit 2
+fi
 
-sudo timeout 2 cat "$DEVICE" > "$tmpfile" &
-reader_pid=$!
-sleep 0.1
+python3 "$CLIENT" oled-status >/dev/null
+sleep 1
 
-echo "OLED,STATUS" | sudo tee "$DEVICE" > /dev/null
-
-wait "$reader_pid" 2>/dev/null || true
-
-if head -n 400 "$tmpfile" | grep -m 1 -q '^ACK,kind=OLED,op=STATUS'; then
-  echo "PASS: ACK received"
+count=$(sqlite3 "$DB_PATH" "select count(*) from oled_status where julianday(ts_utc) >= julianday('now','-5 seconds');")
+if [[ "$count" -gt 0 ]]; then
+  echo "PASS: ACK recorded"
+  sqlite3 "$DB_PATH" "select ts_utc,stack,page,focus,debug,screen from oled_status order by id desc limit 1;"
   exit 0
 fi
 
-echo "FAIL: no ACK received" >&2
+echo "FAIL: no ACK recorded" >&2
 exit 1

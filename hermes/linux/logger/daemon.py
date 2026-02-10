@@ -39,14 +39,14 @@ def raw_path(dt):
     return os.path.join(RAW_DIR, f"nrf_{day_stamp(dt)}.log")
 
 def init_db(conn: sqlite3.Connection):
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS raw_lines (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts_utc TEXT NOT NULL,
-      source TEXT NOT NULL,
-      line TEXT NOT NULL
-    );
-    """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            source TEXT NOT NULL,
+            line TEXT NOT NULL
+        );
+        """)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +69,7 @@ def init_db(conn: sqlite3.Connection):
             screen TEXT
         );
         """)
-    conn.commit()
+        conn.commit()
 
 def parse_line(line: str):
     parts = [p.strip() for p in line.split(",") if p.strip()]
