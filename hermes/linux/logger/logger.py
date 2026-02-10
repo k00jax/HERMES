@@ -53,6 +53,42 @@ def init_db(conn: sqlite3.Connection):
             screen TEXT
         );
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS hb (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            source TEXT NOT NULL,
+            tick_ms INTEGER,
+            seq INTEGER
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS env (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            source TEXT NOT NULL,
+            temp_c REAL,
+            hum_pct REAL
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS air (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            source TEXT NOT NULL,
+            eco2_ppm REAL,
+            tvoc_ppb REAL
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS acks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            source TEXT NOT NULL,
+            kind TEXT,
+            op TEXT
+        );
+        """)
     conn.commit()
 
 def parse_line(line: str):
@@ -105,6 +141,67 @@ def parse_oled_status(line: str):
         except ValueError:
             out[key] = None
     return out
+
+def parse_int(value: str):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+def parse_float(value: str):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+def insert_typed_frames(conn: sqlite3.Connection, ts: str, line: str):
+    kind, kvs = parse_kv_pairs(line)
+    if not kind:
+        return
+    if kind == "HB":
+        tick = parse_int(kvs.get("tick"))
+        seq = parse_int(kvs.get("seq"))
+        if tick is None and seq is None:
+            return
+        conn.execute(
+            "INSERT INTO hb (ts_utc, source, tick_ms, seq) VALUES (?, ?, ?, ?)",
+            (ts, "nrf", tick, seq),
+        )
+        return
+    if kind == "ENV":
+        temp_c = parse_float(kvs.get("temp_c"))
+        hum_pct = parse_float(kvs.get("hum_pct"))
+        if temp_c is None and hum_pct is None:
+            return
+        conn.execute(
+            "INSERT INTO env (ts_utc, source, temp_c, hum_pct) VALUES (?, ?, ?, ?)",
+            (ts, "nrf", temp_c, hum_pct),
+        )
+        return
+    if kind == "AIR":
+        eco2_ppm = parse_float(kvs.get("eco2_ppm"))
+        tvoc_ppb = parse_float(kvs.get("tvoc_ppb"))
+        if eco2_ppm is None and tvoc_ppb is None:
+            return
+        conn.execute(
+            "INSERT INTO air (ts_utc, source, eco2_ppm, tvoc_ppb) VALUES (?, ?, ?, ?)",
+            (ts, "nrf", eco2_ppm, tvoc_ppb),
+        )
+        return
+    if kind == "ACK":
+        ack_kind = kvs.get("kind")
+        ack_op = kvs.get("op")
+        if not ack_kind and not ack_op:
+            return
+        conn.execute(
+            "INSERT INTO acks (ts_utc, source, kind, op) VALUES (?, ?, ?, ?)",
+            (ts, "nrf", ack_kind, ack_op),
+        )
+        return
 
 def main():
     conn = sqlite3.connect(DB_PATH)
@@ -163,6 +260,8 @@ def main():
                                 oled_status.get("screen"),
                             ),
                         )
+
+                    insert_typed_frames(conn, ts, line)
 
                     conn.commit()
 
