@@ -140,10 +140,15 @@ def init_db(conn: sqlite3.Connection):
         ensure_column(conn, "air", "ts_local", "TEXT")
         ensure_column(conn, "acks", "ts_local", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_ts ON hb(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_local ON hb(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_env_ts ON env(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_env_local ON env(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_air_ts ON air(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_air_local ON air(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_acks_ts ON acks(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_acks_local ON acks(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_ts ON oled_status(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_local ON oled_status(ts_local);")
     conn.commit()
 
 def parse_line(line: str):
