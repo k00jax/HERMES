@@ -28,6 +28,12 @@ cd hermes/firmware/nrf
 python3 ~/hermes-src/hermes/linux/logger/daemon.py
 ```
 
+### Push OLED Context (on Odroid)
+
+```bash
+~/hermes-src/hermes/tools/push_oled_context.sh
+```
+
 ## Docs
 
 - Project docs: `hermes/docs/`

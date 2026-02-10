@@ -1,0 +1,7 @@
+[Unit]
+Description=Push OLED context to nRF
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/odroid/hermes-src/hermes/tools/push_oled_context.sh
