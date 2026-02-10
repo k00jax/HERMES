@@ -11,6 +11,10 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None
+try:
+    from backports.zoneinfo import ZoneInfo as BackportZoneInfo
+except ImportError:  # pragma: no cover
+    BackportZoneInfo = None
 
 PREFERRED_PORT = os.environ.get("HERMES_NRF_PORT", "/dev/hermes-nrf")
 PORT = None
@@ -33,7 +37,22 @@ stats = {
 }
 stats_lock = threading.Lock()
 
-CENTRAL_TZ = ZoneInfo("America/Chicago") if ZoneInfo else None
+TZ_NAME = os.environ.get("HERMES_TZ", "America/Chicago")
+
+def resolve_tz():
+    if ZoneInfo:
+        try:
+            return ZoneInfo(TZ_NAME)
+        except Exception:
+            pass
+    if BackportZoneInfo:
+        try:
+            return BackportZoneInfo(TZ_NAME)
+        except Exception:
+            pass
+    return datetime.timezone(datetime.timedelta(hours=-6))
+
+CENTRAL_TZ = resolve_tz()
 
 def utc_now():
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)

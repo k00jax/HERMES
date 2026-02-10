@@ -7,6 +7,10 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None
+try:
+    from backports.zoneinfo import ZoneInfo as BackportZoneInfo
+except ImportError:  # pragma: no cover
+    BackportZoneInfo = None
 
 PORT = os.environ.get("HERMES_NRF_PORT", "/dev/hermes-nrf")
 BAUD = int(os.environ.get("HERMES_BAUD", "115200"))
@@ -20,7 +24,22 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 def utc_now():
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
 
-CENTRAL_TZ = ZoneInfo("America/Chicago") if ZoneInfo else None
+TZ_NAME = os.environ.get("HERMES_TZ", "America/Chicago")
+
+def resolve_tz():
+    if ZoneInfo:
+        try:
+            return ZoneInfo(TZ_NAME)
+        except Exception:
+            pass
+    if BackportZoneInfo:
+        try:
+            return BackportZoneInfo(TZ_NAME)
+        except Exception:
+            pass
+    return datetime.timezone(datetime.timedelta(hours=-6))
+
+CENTRAL_TZ = resolve_tz()
 
 def local_now():
     if CENTRAL_TZ:

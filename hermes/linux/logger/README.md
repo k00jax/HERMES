@@ -29,6 +29,8 @@ python3 ~/hermes-src/hermes/linux/logger/logger.py
 ### Local Time
 
 All tables keep `ts_utc` as the source of truth and add `ts_local` in America/Chicago (CST/CDT).
+You can override the timezone with `HERMES_TZ` (default: `America/Chicago`). If timezone data is
+unavailable, the logger falls back to fixed CST (-06:00).
 
 ## OLED Status Query
 
