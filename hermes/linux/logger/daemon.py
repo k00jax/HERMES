@@ -47,16 +47,16 @@ def init_db(conn: sqlite3.Connection):
       line TEXT NOT NULL
     );
     """)
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS metrics (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts_utc TEXT NOT NULL,
-      source TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      key TEXT NOT NULL,
-      value REAL
-    );
-    """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            source TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value REAL
+        );
+        """)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS oled_status (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
