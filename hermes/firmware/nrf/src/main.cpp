@@ -13,6 +13,8 @@
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
 
+#define HERMES_SERIAL Serial
+
 static const uint8_t OLED_ADDR_ENV = 0x3C;
 static const uint8_t OLED_ADDR_ESP = 0x3D;
 static const uint8_t SCREEN_WIDTH = 128;
@@ -47,12 +49,7 @@ static const uint32_t PDM_UPDATE_MS = 100;
 static const float MIC_NOISE_ALPHA = 0.01f;
 static const size_t PDM_BUFFER_SAMPLES = 256;
 static const int TIMEZONE_OFFSET_MIN = -360;
-<<<<<<< HEAD
-static const char FW_STRING[] = "nrf";
-static const char BUILD_STRING[] = __DATE__;
-=======
 static const char *FW_NAME = "hermes-nrf";
->>>>>>> a0d876c81064fd293d5c252d061e8a60a911803b
 
 static const int HIST_N = 120;
 
@@ -426,9 +423,9 @@ static void buildInfo(char *buffer, size_t size) {
 }
 
 static void emitFrame(const char *kind, const char *pairs) {
-  Serial.print(kind);
-  Serial.print(',');
-  Serial.println(pairs);
+  HERMES_SERIAL.print(kind);
+  HERMES_SERIAL.print(',');
+  HERMES_SERIAL.println(pairs);
 }
 
 static void trimWhitespace(char *line) {
@@ -819,7 +816,7 @@ static void exportUsbLine(uint32_t now) {
       localMicErr,
       espTelemetry.wifist,
       espTelemetry.camaddr);
-  Serial.print(line);
+  HERMES_SERIAL.print(line);
 #else
   (void)now;
 #endif
@@ -1044,7 +1041,7 @@ static void softResetState(uint32_t now) {
   initDisplays();
   lastDisplayMs = 0;
   renderDisplays(now);
-  Serial.println("EVT,sw=toggle,action=soft_reset");
+  HERMES_SERIAL.println("EVT,sw=toggle,action=soft_reset");
 
 #if ENABLE_ESP_CMD
   Serial1.print("CMD,reboot\n");
@@ -2185,18 +2182,10 @@ static void heartbeat(uint32_t now) {
 }
 
 void setup() {
-  Serial.begin(UART_BAUD);
+  HERMES_SERIAL.begin(UART_BAUD);
   delay(1500);
-<<<<<<< HEAD
-  Serial.print("PROTO,ver=1,device=nrf52840,fw=");
-  Serial.print(FW_STRING);
-  Serial.print(",build=");
-  Serial.println(BUILD_STRING);
-  Serial.println("HB,boot");
-=======
   emitProtoFrame();
->>>>>>> a0d876c81064fd293d5c252d061e8a60a911803b
-  Serial.flush();
+  HERMES_SERIAL.flush();
   Serial1.setPins(D7, D6);
   Serial1.begin(UART_BAUD);
   Wire.begin();
@@ -2233,8 +2222,14 @@ void loop() {
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
   static uint32_t hbSeq = 0;
-  while (Serial.available() > 0) {
-    const char c = static_cast<char>(Serial.read());
+  static uint32_t rxByteCount = 0;
+  while (HERMES_SERIAL.available() > 0) {
+    const char c = static_cast<char>(HERMES_SERIAL.read());
+    rxByteCount++;
+    if ((rxByteCount % 16) == 1) {
+      HERMES_SERIAL.print("DBG,kind=RX,bytes=");
+      HERMES_SERIAL.println(rxByteCount);
+    }
     if (c == '\r') {
       continue;
     }
