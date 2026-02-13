@@ -27,6 +27,9 @@ NRF_BY_ID_HINT = "usb-Seeed_Studio_XIAO_nRF52840_9FBE2A3ABD93B121-if00"
 RAW_RETENTION_DAYS = int(os.environ.get("HERMES_RAW_RETENTION_DAYS", "30"))
 RAW_RETENTION_SECS = RAW_RETENTION_DAYS * 86400
 RAW_CLEANUP_INTERVAL_SECS = 3600
+PARSE_FAIL_MAX_RAW_CHARS = 200
+PARSE_FAIL_SUMMARY_INTERVAL_SECS = 600
+PARSER_VERSION = "v1"
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -39,6 +42,16 @@ stats = {
     "port": PREFERRED_PORT,
 }
 stats_lock = threading.Lock()
+
+parse_fail_stats = {
+    "total": 0,
+    "window_total": 0,
+    "window_start": time.time(),
+    "by_reason_total": {},
+    "by_prefix_total": {},
+    "by_reason_window": {},
+    "by_prefix_window": {},
+}
 
 TZ_NAME = os.environ.get("HERMES_TZ", "America/Chicago")
 
@@ -171,6 +184,18 @@ def init_db(conn: sqlite3.Connection):
             op TEXT
         );
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS parse_fail (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            ts_local TEXT,
+            source TEXT NOT NULL,
+            raw TEXT NOT NULL,
+            reason TEXT,
+            prefix TEXT,
+            parser_version TEXT
+        );
+        """)
         ensure_column(conn, "raw_lines", "ts_local", "TEXT")
         ensure_column(conn, "metrics", "ts_local", "TEXT")
         ensure_column(conn, "oled_status", "ts_local", "TEXT")
@@ -178,6 +203,7 @@ def init_db(conn: sqlite3.Connection):
         ensure_column(conn, "env", "ts_local", "TEXT")
         ensure_column(conn, "air", "ts_local", "TEXT")
         ensure_column(conn, "acks", "ts_local", "TEXT")
+        ensure_column(conn, "parse_fail", "ts_local", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_ts ON hb(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_local ON hb(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_env_ts ON env(ts_utc);")
@@ -188,6 +214,8 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_acks_local ON acks(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_ts ON oled_status(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_local ON oled_status(ts_local);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_fail_ts ON parse_fail(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_fail_local ON parse_fail(ts_local);")
         conn.commit()
 
 def parse_line(line: str):
@@ -256,6 +284,42 @@ def parse_float(value: str):
     except ValueError:
         return None
 
+def bump_counter(counter: dict, key: str):
+    counter[key] = counter.get(key, 0) + 1
+
+def record_parse_fail(conn: sqlite3.Connection, ts: str, ts_local: str, line: str, reason: str, prefix: str):
+    raw = line[:PARSE_FAIL_MAX_RAW_CHARS]
+    conn.execute(
+        "INSERT INTO parse_fail (ts_utc, ts_local, source, raw, reason, prefix, parser_version) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (ts, ts_local, "nrf", raw, reason, prefix, PARSER_VERSION),
+    )
+    parse_fail_stats["total"] += 1
+    parse_fail_stats["window_total"] += 1
+    bump_counter(parse_fail_stats["by_reason_total"], reason)
+    bump_counter(parse_fail_stats["by_prefix_total"], prefix)
+    bump_counter(parse_fail_stats["by_reason_window"], reason)
+    bump_counter(parse_fail_stats["by_prefix_window"], prefix)
+
+def maybe_log_parse_fail_summary(now_ts: float):
+    if (now_ts - parse_fail_stats["window_start"]) < PARSE_FAIL_SUMMARY_INTERVAL_SECS:
+        return
+    window_total = parse_fail_stats["window_total"]
+    if window_total:
+        reason_items = list(parse_fail_stats["by_reason_window"].items())
+        prefix_items = list(parse_fail_stats["by_prefix_window"].items())
+        reason_items.sort(key=lambda item: item[1], reverse=True)
+        prefix_items.sort(key=lambda item: item[1], reverse=True)
+        top_reason = reason_items[0] if reason_items else ("unknown", 0)
+        top_prefix = prefix_items[0] if prefix_items else ("unknown", 0)
+        minutes = int(PARSE_FAIL_SUMMARY_INTERVAL_SECS / 60)
+        log_info(
+            f"[hermesd] parse_fail: {window_total} in last {minutes}m, top: {top_reason[0]}={top_reason[1]} ({top_prefix[0]})"
+        )
+    parse_fail_stats["window_total"] = 0
+    parse_fail_stats["by_reason_window"].clear()
+    parse_fail_stats["by_prefix_window"].clear()
+    parse_fail_stats["window_start"] = now_ts
+
 def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: str):
     kind, kvs = parse_kv_pairs(line)
     if not kind:
@@ -300,6 +364,68 @@ def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: 
             (ts, ts_local, "nrf", ack_kind, ack_op),
         )
         return
+
+def classify_parse_failure(line: str):
+    kind, kvs = parse_kv_pairs(line)
+    if not kind:
+        return "no_match", None
+
+    prefix = kind
+    non_typed = {"NACK", "PROTO", "SYS", "EVT", "BTN", "DBG", "SENS"}
+    if prefix in non_typed:
+        return None, prefix
+
+    if prefix == "HB":
+        tick_raw = kvs.get("tick")
+        seq_raw = kvs.get("seq")
+        tick = parse_int(tick_raw)
+        seq = parse_int(seq_raw)
+        if tick_raw is None and seq_raw is None:
+            return "missing_fields", prefix
+        if tick_raw is not None and tick is None:
+            return "bad_int", prefix
+        if seq_raw is not None and seq is None:
+            return "bad_int", prefix
+        return None, prefix
+
+    if prefix == "ENV":
+        temp_raw = kvs.get("temp_c")
+        hum_raw = kvs.get("hum_pct")
+        temp = parse_float(temp_raw)
+        hum = parse_float(hum_raw)
+        if temp_raw is None and hum_raw is None:
+            return "missing_fields", prefix
+        if temp_raw is not None and temp is None:
+            return "bad_float", prefix
+        if hum_raw is not None and hum is None:
+            return "bad_float", prefix
+        return None, prefix
+
+    if prefix == "AIR":
+        eco2_raw = kvs.get("eco2_ppm")
+        tvoc_raw = kvs.get("tvoc_ppb")
+        eco2 = parse_float(eco2_raw)
+        tvoc = parse_float(tvoc_raw)
+        if eco2_raw is None and tvoc_raw is None:
+            return "missing_fields", prefix
+        if eco2_raw is not None and eco2 is None:
+            return "bad_float", prefix
+        if tvoc_raw is not None and tvoc is None:
+            return "bad_float", prefix
+        return None, prefix
+
+    if prefix == "ACK":
+        ack_kind = kvs.get("kind")
+        ack_op = kvs.get("op")
+        if not ack_kind and not ack_op:
+            return "missing_fields", prefix
+        return None, prefix
+
+    kind_num, kvs_num = parse_line(line)
+    if kind_num and kvs_num:
+        return None, prefix
+
+    return "unknown_prefix", prefix
 
 def update_stats(**kwargs):
     with stats_lock:
@@ -371,6 +497,10 @@ def handle_line(conn: sqlite3.Connection, line: str):
             ),
         )
     insert_typed_frames(conn, ts, ts_local, line)
+    reason, prefix = classify_parse_failure(line)
+    if reason:
+        record_parse_fail(conn, ts, ts_local, line, reason, prefix or "")
+    maybe_log_parse_fail_summary(time.time())
     conn.commit()
     with stats_lock:
         stats["lines_in"] += 1

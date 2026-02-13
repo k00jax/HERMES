@@ -1990,13 +1990,41 @@ static void drawUserOverviewPage(uint32_t now) {
 }
 
 static void drawUserAirTrendsPage(uint32_t now) {
+  // Stale-context guard and context age badge
+  const uint32_t STALE_MS = 10 * 60 * 1000; // 10 minutes
+  uint32_t ctx_age_ms = now - hostContext.ctx_set_ms;
+  bool context_stale = ctx_age_ms > STALE_MS || !hostContext.ctx_valid;
+
   displayEnv.clearDisplay();
   displayEnv.setTextSize(1);
   displayEnv.setTextColor(SSD1306_WHITE);
   displayEnv.setCursor(0, 0);
   displayEnv.print("CO2");
-  drawContextDelta(displayEnv, hostContext.eco2_d60, hostContext.ctx_valid);
+  // Only show overlay if context is not stale
+  if (!context_stale) {
+    drawContextDelta(displayEnv, hostContext.eco2_d60, true);
+  } else {
+    // Optionally show a stale badge
+    displayEnv.setCursor(SCREEN_WIDTH - 36, 0);
+    displayEnv.print("STALE");
+  }
   drawSparkline(0, 16, SCREEN_WIDTH, 48, histEco2, histCount, histIndex, displayEnv);
+  // Context age badge
+  displayEnv.setTextSize(1);
+  displayEnv.setCursor(0, 56);
+  if (!context_stale && hostContext.ctx_set_ms > 0) {
+    if (ctx_age_ms < 60000) {
+      displayEnv.print("ctx: <1m");
+    } else if (ctx_age_ms < 3600000) {
+      uint8_t min = ctx_age_ms / 60000;
+      if (min > 99) min = 99;
+      displayEnv.print("ctx: ");
+      displayEnv.print(min);
+      displayEnv.print("m");
+    } else {
+      displayEnv.print("ctx: >1h");
+    }
+  }
   drawCornerFlags(displayEnv, now);
   displayEnv.display();
 
@@ -2005,10 +2033,31 @@ static void drawUserAirTrendsPage(uint32_t now) {
   displayEsp.setTextColor(SSD1306_WHITE);
   displayEsp.setCursor(0, 0);
   displayEsp.print("TVOC");
-  drawContextDelta(displayEsp, hostContext.tvoc_d60, hostContext.ctx_valid);
+  if (!context_stale) {
+    drawContextDelta(displayEsp, hostContext.tvoc_d60, true);
+  } else {
+    displayEsp.setCursor(SCREEN_WIDTH - 36, 0);
+    displayEsp.print("STALE");
+  }
   drawSparkline(0, 16, SCREEN_WIDTH, 48, histTvoc, histCount, histIndex, displayEsp);
+  displayEsp.setTextSize(1);
+  displayEsp.setCursor(0, 56);
+  if (!context_stale && hostContext.ctx_set_ms > 0) {
+    if (ctx_age_ms < 60000) {
+      displayEsp.print("ctx: <1m");
+    } else if (ctx_age_ms < 3600000) {
+      uint8_t min = ctx_age_ms / 60000;
+      if (min > 99) min = 99;
+      displayEsp.print("ctx: ");
+      displayEsp.print(min);
+      displayEsp.print("m");
+    } else {
+      displayEsp.print("ctx: >1h");
+    }
+  }
   drawCornerFlags(displayEsp, now);
   displayEsp.display();
+}
 }
 
 static void drawUserEnvTrendsPage(uint32_t now) {
