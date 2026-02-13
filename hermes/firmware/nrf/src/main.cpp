@@ -323,9 +323,6 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_WIFIST) == 0) {
     espTelemetry.wifist = static_cast<int>(strtol(value, nullptr, 10));
-    if (espTelemetry.wifist != 3) {
-      espTelemetry.ip[0] = '\0';
-    }
     espNetSeen = true;
     return true;
   }
@@ -335,12 +332,8 @@ static bool parseKeyValue(char *pair) {
   }
 
   if (strcmp(key, "ip") == 0) {
-    if (value[0] == '\0' || strcmp(value, "none") == 0 || strcmp(value, "0.0.0.0") == 0) {
-      espTelemetry.ip[0] = '\0';
-    } else {
-      strncpy(espTelemetry.ip, value, sizeof(espTelemetry.ip) - 1);
-      espTelemetry.ip[sizeof(espTelemetry.ip) - 1] = '\0';
-    }
+    strncpy(espTelemetry.ip, value, sizeof(espTelemetry.ip) - 1);
+    espTelemetry.ip[sizeof(espTelemetry.ip) - 1] = '\0';
     espNetSeen = true;
     return true;
   }
