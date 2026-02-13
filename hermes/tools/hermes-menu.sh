@@ -34,6 +34,7 @@ while true; do
   echo "1) Flash ESP32-S3 (Odroid -> ESP)"
   echo "2) Flash nRF (Odroid copies UF2 already in ~/incoming)"
   echo "3) Show USB devices (tty + uf2 drive)"
+  echo "16) Detect ESP32 port(s)"
   echo "4) Tail today's raw log"
   echo "5) Query last 5 raw lines (SQLite)"
   echo "6) Daemon status"
@@ -68,6 +69,29 @@ while true; do
       echo ""
       echo "Block devices:"
       lsblk -o NAME,SIZE,RM,TYPE,FSTYPE,MOUNTPOINT,LABEL
+      read -r -p "Press Enter..."
+      ;;
+    16)
+      echo "Scanning serial devices for ESP32 (USB VID 303a)..."
+      found=0
+      for d in /dev/ttyACM* /dev/ttyUSB*; do
+        [[ -e "$d" ]] || continue
+        vid="$(udevadm info --query=property --name="$d" 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p' | head -n1)"
+        model="$(udevadm info --query=property --name="$d" 2>/dev/null | sed -n 's/^ID_MODEL=//p' | head -n1)"
+        serial="$(udevadm info --query=property --name="$d" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p' | head -n1)"
+        if [[ "${vid,,}" == "303a" ]]; then
+          found=1
+          echo "ESP candidate: $d model=${model:-unknown} serial=${serial:-unknown}"
+        fi
+      done
+      if [[ "$found" -eq 0 ]]; then
+        echo "No ESP32 serial device detected."
+      fi
+      if [[ -e /dev/hermes-esp ]]; then
+        echo "Stable link: /dev/hermes-esp -> $(readlink -f /dev/hermes-esp)"
+      else
+        echo "Stable link: /dev/hermes-esp not present"
+      fi
       read -r -p "Press Enter..."
       ;;
     4)
