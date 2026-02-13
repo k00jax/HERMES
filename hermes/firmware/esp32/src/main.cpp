@@ -127,8 +127,33 @@ static void runCameraProbe() {
   Serial.print("[camera_probe] pins.xclk=");
   Serial.println(CAM_PIN_XCLK);
 
+  const uint32_t probe_xclk_hz = 20000000;
+  ledcSetup(LEDC_CHANNEL_0, probe_xclk_hz, 1);
+  ledcAttachPin(CAM_PIN_XCLK, LEDC_CHANNEL_0);
+  ledcWrite(LEDC_CHANNEL_0, 1);
+  Serial.print("[camera_probe] xclk.enabled_hz=");
+  Serial.println(static_cast<unsigned long>(probe_xclk_hz));
+  delay(30);
+
   Wire.begin(CAM_PIN_SIOD, CAM_PIN_SIOC);
   Wire.setClock(100000);
+  uint8_t i2c_found = 0;
+  Serial.println("[camera_probe] i2c.scan.start=0x08..0x77");
+  for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+    Wire.beginTransmission(addr);
+    const uint8_t rc = Wire.endTransmission();
+    if (rc == 0) {
+      Serial.print("[camera_probe] i2c.found=0x");
+      if (addr < 16) {
+        Serial.print('0');
+      }
+      Serial.println(addr, HEX);
+      i2c_found++;
+    }
+  }
+  Serial.print("[camera_probe] i2c.found_count=");
+  Serial.println(static_cast<unsigned long>(i2c_found));
+
   Wire.beginTransmission(CAM_SCCB_ADDR);
   const uint8_t sccb_rc = Wire.endTransmission();
   Serial.print("[camera_probe] sccb.addr=0x");

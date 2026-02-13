@@ -10,6 +10,7 @@ import re
 import fcntl
 from typing import Optional
 import serial
+from serial.tools import list_ports
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
@@ -744,9 +745,26 @@ def resolve_serial_port(preferred: Optional[str]) -> str:
     for path in glob.glob("/dev/serial/by-id/*9FBE2A3ABD93B121*"):
         return path
 
-    acms = sorted(glob.glob("/dev/ttyACM*"))
-    if acms:
-        return acms[0]
+    nrf_ports = []
+    for port_info in list_ports.comports():
+        device = port_info.device
+        if not device:
+            continue
+        vid = getattr(port_info, "vid", None)
+        pid = getattr(port_info, "pid", None)
+        serial_number = (getattr(port_info, "serial_number", "") or "").upper()
+
+        if vid == 0x2886:
+            nrf_ports.append(device)
+            continue
+        if vid == 0x239A and pid == 0x00C9:
+            nrf_ports.append(device)
+            continue
+        if "9FBE2A3ABD93B121" in serial_number:
+            nrf_ports.append(device)
+
+    if nrf_ports:
+        return sorted(set(nrf_ports))[0]
 
     return preferred or PREFERRED_PORT
 
