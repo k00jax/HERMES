@@ -3,6 +3,8 @@ import socket
 import sys
 
 SOCK_PATH = "/tmp/hermesd.sock"
+SOCKET_TIMEOUT_SECS = 2.0
+MAX_RESPONSE_BYTES = 65536
 
 USAGE = """Usage:
   python3 client.py ping
@@ -36,21 +38,45 @@ def main():
 
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(SOCKET_TIMEOUT_SECS)
         sock.connect(SOCK_PATH)
+    except socket.timeout:
+        print(f"ERR connect timeout after {SOCKET_TIMEOUT_SECS:.1f}s")
+        return 1
     except Exception as e:
         print(f"ERR connect failed: {e}")
         return 1
 
     with sock:
-        sock.sendall((line + "\n").encode("utf-8"))
-        chunks = []
+        try:
+            sock.sendall((line + "\n").encode("utf-8"))
+        except socket.timeout:
+            print(f"ERR send timeout after {SOCKET_TIMEOUT_SECS:.1f}s")
+            return 1
+        except Exception as e:
+            print(f"ERR send failed: {e}")
+            return 1
+
+        response = bytearray()
         while True:
-            data = sock.recv(4096)
+            try:
+                data = sock.recv(4096)
+            except socket.timeout:
+                print(f"ERR response timeout after {SOCKET_TIMEOUT_SECS:.1f}s")
+                return 1
+            except Exception as e:
+                print(f"ERR recv failed: {e}")
+                return 1
             if not data:
                 break
-            chunks.append(data)
+            response.extend(data)
+            if b"\n" in data:
+                break
+            if len(response) >= MAX_RESPONSE_BYTES:
+                print("ERR response too large")
+                return 1
 
-    out = b"".join(chunks).decode(errors="replace").strip()
+    out = bytes(response).decode(errors="replace").strip()
     if out:
         print(out)
     return 0

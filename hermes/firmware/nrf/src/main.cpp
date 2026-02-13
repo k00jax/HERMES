@@ -94,7 +94,7 @@ struct EspTelemetry {
   int micerr = 0;
   int wifist = 0;
   int camaddr = -1;
-  char ip[32] = "0.0.0.0";
+  char ip[32] = "";
   char ssid[64] = "";
 };
 
@@ -236,7 +236,7 @@ static bool espNetCacheValid = false;
 static int lastEspNetWifist = 0;
 static int lastEspNetRssi = RSSI_NOT_CONNECTED;
 static uint32_t lastEspNetNtp = 0;
-static char lastEspNetIp[32] = "0.0.0.0";
+static char lastEspNetIp[32] = "";
 
 static bool btnRawState = true;
 static bool btnStableState = true;
@@ -323,6 +323,9 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_WIFIST) == 0) {
     espTelemetry.wifist = static_cast<int>(strtol(value, nullptr, 10));
+    if (espTelemetry.wifist != 3) {
+      espTelemetry.ip[0] = '\0';
+    }
     espNetSeen = true;
     return true;
   }
@@ -332,8 +335,12 @@ static bool parseKeyValue(char *pair) {
   }
 
   if (strcmp(key, "ip") == 0) {
-    strncpy(espTelemetry.ip, value, sizeof(espTelemetry.ip) - 1);
-    espTelemetry.ip[sizeof(espTelemetry.ip) - 1] = '\0';
+    if (value[0] == '\0' || strcmp(value, "none") == 0 || strcmp(value, "0.0.0.0") == 0) {
+      espTelemetry.ip[0] = '\0';
+    } else {
+      strncpy(espTelemetry.ip, value, sizeof(espTelemetry.ip) - 1);
+      espTelemetry.ip[sizeof(espTelemetry.ip) - 1] = '\0';
+    }
     espNetSeen = true;
     return true;
   }
@@ -402,14 +409,24 @@ static void maybeEmitEspNet(uint32_t now) {
   }
 
   char pairs[128];
-  snprintf(
-      pairs,
-      sizeof(pairs),
-      "NET,wifist=%d,rssi=%d,ntp=%lu,ip=%s",
-      espTelemetry.wifist,
-      espTelemetry.rssi,
-      static_cast<unsigned long>(espTelemetry.ntp),
-      espTelemetry.ip);
+  if (espTelemetry.ip[0] != '\0') {
+    snprintf(
+        pairs,
+        sizeof(pairs),
+        "NET,wifist=%d,rssi=%d,ntp=%lu,ip=%s",
+        espTelemetry.wifist,
+        espTelemetry.rssi,
+        static_cast<unsigned long>(espTelemetry.ntp),
+        espTelemetry.ip);
+  } else {
+    snprintf(
+        pairs,
+        sizeof(pairs),
+        "NET,wifist=%d,rssi=%d,ntp=%lu",
+        espTelemetry.wifist,
+        espTelemetry.rssi,
+        static_cast<unsigned long>(espTelemetry.ntp));
+  }
   emitFrame("ESP", pairs);
 
   lastEspNetEmitMs = now;

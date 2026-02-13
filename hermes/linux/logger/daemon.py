@@ -35,6 +35,7 @@ PARSE_FAIL_MAX_RAW_CHARS = 200
 PARSE_FAIL_SUMMARY_INTERVAL_SECS = 600
 PARSER_VERSION = "v1"
 HEALTH_WINDOW_SECS = 60
+HEALTH_MAX_RESPONSE_CHARS = 2000
 FRAME_PREFIX_RE = re.compile(r"^[A-Z]{2,8},")
 
 EXPECTED_PREFIXES = {
@@ -487,7 +488,7 @@ def format_health_summary():
     freshness_text = "|".join(freshness_tokens)
     expected_fps_text = "|".join(expected_fps_tokens)
 
-    return (
+    summary = (
         "OK "
         f"freshness={freshness_text} "
         f"fps_expected={expected_fps_text} "
@@ -502,6 +503,11 @@ def format_health_summary():
         f"last_seen_esp={last_seen_esp} "
         f"last_seen_prefix={seen_text}"
     )
+
+    summary = summary.replace("\n", " ").replace("\r", " ")
+    if len(summary) > HEALTH_MAX_RESPONSE_CHARS:
+        summary = summary[: HEALTH_MAX_RESPONSE_CHARS - 9] + " ...trunc"
+    return summary
 
 def record_parse_fail(conn: sqlite3.Connection, ts: str, ts_local: str, line: str, reason: str, prefix: str):
     raw = line[:PARSE_FAIL_MAX_RAW_CHARS]
@@ -1016,7 +1022,11 @@ def handle_command(cmd_line: str, out_q: queue.Queue):
             False,
         )
     if cmd == "HEALTH":
-        return format_health_summary(), False
+        try:
+            return format_health_summary(), False
+        except Exception as e:
+            update_stats(last_error=f"health format failed: {e}")
+            return f"ERR health failed: {e}", False
     if cmd == "SEND":
         if not arg:
             return "ERR no payload", False
@@ -1047,11 +1057,25 @@ def socket_worker(shutdown: threading.Event, out_q: queue.Queue):
             with conn:
                 conn.settimeout(2)
                 data = b""
-                while b"\n" not in data and len(data) < 4096:
-                    chunk = conn.recv(1024)
-                    if not chunk:
-                        break
-                    data += chunk
+                try:
+                    while b"\n" not in data and len(data) < 4096:
+                        chunk = conn.recv(1024)
+                        if not chunk:
+                            break
+                        data += chunk
+                except socket.timeout:
+                    try:
+                        conn.sendall(b"ERR timeout\n")
+                    except Exception:
+                        pass
+                    continue
+                except Exception as e:
+                    update_stats(last_error=f"socket recv failed: {e}")
+                    try:
+                        conn.sendall(b"ERR recv failed\n")
+                    except Exception:
+                        pass
+                    continue
 
                 line = data.split(b"\n", 1)[0].decode(errors="replace")
                 resp, should_stop = handle_command(line, out_q)

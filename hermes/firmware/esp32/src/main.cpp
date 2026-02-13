@@ -643,15 +643,55 @@ static void updateWifi(uint32_t now) {
   if (reportDue) {
     lastWifiReportMs = now;
     const int currentRssi = (wifiStatus == WL_CONNECTED) ? WiFi.RSSI() : RSSI_NOT_CONNECTED;
+    IPAddress localIp = WiFi.localIP();
+    IPAddress gatewayIp = WiFi.gatewayIP();
+    const bool hasIp =
+        (wifiStatus == WL_CONNECTED)
+        && (localIp[0] != 0 || localIp[1] != 0 || localIp[2] != 0 || localIp[3] != 0);
+    const bool hasGw =
+        (wifiStatus == WL_CONNECTED)
+        && (gatewayIp[0] != 0 || gatewayIp[1] != 0 || gatewayIp[2] != 0 || gatewayIp[3] != 0);
     char netLine[128];
-    snprintf(
-        netLine,
-        sizeof(netLine),
-        "SENS,n=%lu,wifist=%d,rssi=%d,ntp=%lu\n",
-        static_cast<unsigned long>(++wifiReportSeq),
-        wifiStatus,
-        currentRssi,
-        static_cast<unsigned long>(ntpEpoch));
+    if (hasIp && hasGw) {
+      snprintf(
+          netLine,
+          sizeof(netLine),
+          "SENS,n=%lu,wifist=%d,rssi=%d,ntp=%lu,ip=%u.%u.%u.%u,gw=%u.%u.%u.%u\n",
+          static_cast<unsigned long>(++wifiReportSeq),
+          wifiStatus,
+          currentRssi,
+          static_cast<unsigned long>(ntpEpoch),
+          localIp[0],
+          localIp[1],
+          localIp[2],
+          localIp[3],
+          gatewayIp[0],
+          gatewayIp[1],
+          gatewayIp[2],
+          gatewayIp[3]);
+    } else if (hasIp) {
+      snprintf(
+          netLine,
+          sizeof(netLine),
+          "SENS,n=%lu,wifist=%d,rssi=%d,ntp=%lu,ip=%u.%u.%u.%u\n",
+          static_cast<unsigned long>(++wifiReportSeq),
+          wifiStatus,
+          currentRssi,
+          static_cast<unsigned long>(ntpEpoch),
+          localIp[0],
+          localIp[1],
+          localIp[2],
+          localIp[3]);
+    } else {
+      snprintf(
+          netLine,
+          sizeof(netLine),
+          "SENS,n=%lu,wifist=%d,rssi=%d,ntp=%lu\n",
+          static_cast<unsigned long>(++wifiReportSeq),
+          wifiStatus,
+          currentRssi,
+          static_cast<unsigned long>(ntpEpoch));
+    }
     Serial1.print(netLine);
   }
 #else
