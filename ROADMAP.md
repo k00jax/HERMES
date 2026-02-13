@@ -21,6 +21,7 @@ In Progress:
 - OLED stale-context guard
 - Structured event categorization cleanup
 - Robust error handling in daemon
+- Camera freeze note: XIAO S3 Sense OV2640 SCCB remains nonresponsive (`i2c_found=0`, `sccb.endTransmission_rc=2`). Camera path is disabled by default (`ENABLE_CAMERA=0`) until alternate camera hardware is available.
 
 ---
 

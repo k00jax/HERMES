@@ -35,11 +35,13 @@
 #include "hermes_protocol.h"
 
 #ifndef CAMERA_PROBE_MODE
-#define CAMERA_PROBE_MODE 1
+#define CAMERA_PROBE_MODE 0
 #endif
 
 #define ENABLE_ESP_CMD 1
+#ifndef ENABLE_CAMERA
 #define ENABLE_CAMERA 0
+#endif
 #define ENABLE_MIC 0
 #define ENABLE_WIFI 1
 
@@ -73,6 +75,8 @@ static uint32_t lastWifiCheckMs = 0;
 static uint32_t lastWifiBeginMs = 0;
 static bool ntpConfigured = false;
 static int wifiStatus = -1;
+static uint32_t lastWifiReportMs = 0;
+static uint32_t wifiReportSeq = 0;
 
 
 static char cmdBuffer[64];
@@ -633,6 +637,22 @@ static void updateWifi(uint32_t now) {
     ntpEpoch = static_cast<uint32_t>(nowSec);
   } else {
     ntpEpoch = 0;
+  }
+
+  const bool reportDue = (now - lastWifiReportMs) >= 5000;
+  if (reportDue) {
+    lastWifiReportMs = now;
+    const int currentRssi = (wifiStatus == WL_CONNECTED) ? WiFi.RSSI() : RSSI_NOT_CONNECTED;
+    char netLine[128];
+    snprintf(
+        netLine,
+        sizeof(netLine),
+        "SENS,n=%lu,wifist=%d,rssi=%d,ntp=%lu\n",
+        static_cast<unsigned long>(++wifiReportSeq),
+        wifiStatus,
+        currentRssi,
+        static_cast<unsigned long>(ntpEpoch));
+    Serial1.print(netLine);
   }
 #else
   (void)now;

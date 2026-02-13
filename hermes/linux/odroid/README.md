@@ -46,6 +46,28 @@ systemctl status hermes-logger.service
 sudo journalctl -u hermes-logger.service -n 50
 ```
 
+## ESP32 Wi-Fi Credentials (Odroid)
+
+Create local Wi-Fi credentials for ESP32 station mode:
+
+```bash
+cat > ~/hermes-src/hermes/firmware/esp32/src/secrets.h <<'EOF'
+#pragma once
+#define WIFI_SSID "REDACTED_WIFI_SSID"
+#define WIFI_PASS "REDACTED_WIFI_PASSWORD"
+EOF
+```
+
+Reflash ESP32 from Odroid:
+
+```bash
+cd ~/hermes-src/hermes && ./tools/flash_esp.sh /dev/hermes-esp
+```
+
+Notes:
+- `firmware/esp32/src/secrets.h` is gitignored and stays local to the device.
+- Firmware uses STA mode (`WIFI_STA`) and joins your existing network.
+
 ## Validation after Flash
 
 Use this checklist after flashing nRF and restarting services.

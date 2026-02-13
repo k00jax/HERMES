@@ -43,6 +43,7 @@ EXPECTED_PREFIXES = {
     "AIR": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
     "LIGHT": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
     "MIC": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
+    "ESP,NET": {"period_s": 5.0, "stale_s": 20.0, "dead_s": 60.0},
 }
 
 LOCK_PATH = "/tmp/hermesd.lock"
@@ -246,6 +247,17 @@ def init_db(conn: sqlite3.Connection):
         );
         """)
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS esp_net (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            ts_local TEXT,
+            wifist INTEGER,
+            rssi INTEGER,
+            ntp INTEGER,
+            ip TEXT
+        );
+        """)
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS parse_fail (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_utc TEXT NOT NULL,
@@ -269,6 +281,7 @@ def init_db(conn: sqlite3.Connection):
         ensure_column(conn, "acks", "ts_local", "TEXT")
         ensure_column(conn, "light", "ts_local", "TEXT")
         ensure_column(conn, "mic_noise", "ts_local", "TEXT")
+        ensure_column(conn, "esp_net", "ts_local", "TEXT")
         ensure_column(conn, "parse_fail", "ts_local", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_ts ON hb(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_local ON hb(ts_local);")
@@ -282,6 +295,8 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_light_local ON light(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mic_noise_ts ON mic_noise(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mic_noise_local ON mic_noise(ts_local);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_esp_net_ts ON esp_net(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_esp_net_local ON esp_net(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_ts ON oled_status(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_local ON oled_status(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_fail_ts ON parse_fail(ts_utc);")
@@ -316,6 +331,13 @@ def parse_kv_pairs(line: str):
             k, v = p.split("=", 1)
             kvs[k.strip()] = v.strip()
     return kind, kvs
+
+def frame_prefix_label(line: str, kind: Optional[str]) -> str:
+    if kind == "ESP" and line.startswith("ESP,NET"):
+        return "ESP,NET"
+    if kind:
+        return kind
+    return "UNKNOWN"
 
 def parse_oled_status(line: str):
     kind, kvs = parse_kv_pairs(line)
@@ -395,7 +417,7 @@ def record_ingest_health(
         bump_counter(ingest_health["frame_counts_window"], prefix)
         ingest_health["last_seen_by_prefix"][prefix] = ts
         stats["last_seen_nrf"] = ts
-        if prefix in {"SENS", "LOG", "LIGHT"}:
+        if prefix in {"SENS", "LOG", "LIGHT", "ESP,NET"}:
             stats["last_seen_esp"] = ts
 
         if corrupt:
@@ -518,6 +540,18 @@ def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: 
     kind, kvs = parse_kv_pairs(line)
     if not kind:
         return
+    if kind == "ESP" and line.startswith("ESP,NET"):
+        wifist = parse_int(kvs.get("wifist"))
+        rssi = parse_int(kvs.get("rssi"))
+        ntp = parse_int(kvs.get("ntp"))
+        ip = kvs.get("ip")
+        if wifist is None and rssi is None and ntp is None and not ip:
+            return
+        conn.execute(
+            "INSERT INTO esp_net (ts_utc, ts_local, wifist, rssi, ntp, ip) VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, ts_local, wifist, rssi, ntp, ip),
+        )
+        return
     if kind == "HB":
         tick = parse_int(kvs.get("tick"))
         seq = parse_int(kvs.get("seq"))
@@ -606,6 +640,24 @@ def classify_parse_failure(line: str):
     non_typed = {"NACK", "PROTO", "SYS", "EVT", "BTN", "DBG", "SENS"}
     if prefix in non_typed:
         return None, prefix
+
+    if prefix == "ESP" and line.startswith("ESP,NET"):
+        wifist_raw = kvs.get("wifist")
+        rssi_raw = kvs.get("rssi")
+        ntp_raw = kvs.get("ntp")
+        ip_raw = kvs.get("ip")
+        wifist = parse_int(wifist_raw)
+        rssi = parse_int(rssi_raw)
+        ntp = parse_int(ntp_raw)
+        if wifist_raw is None and rssi_raw is None and ntp_raw is None and not ip_raw:
+            return "missing_fields", "ESP,NET"
+        if wifist_raw is not None and wifist is None:
+            return "bad_int", "ESP,NET"
+        if rssi_raw is not None and rssi is None:
+            return "bad_int", "ESP,NET"
+        if ntp_raw is not None and ntp is None:
+            return "bad_int", "ESP,NET"
+        return None, "ESP,NET"
 
     if prefix == "HB":
         tick_raw = kvs.get("tick")
@@ -864,7 +916,7 @@ def handle_line(conn: sqlite3.Connection, line: str):
     reason, prefix = classify_parse_failure(line)
     if reason:
         record_parse_fail(conn, ts, ts_local, line, reason, prefix or "")
-    effective_prefix = prefix or (kind if kind else "UNKNOWN")
+    effective_prefix = prefix or frame_prefix_label(line, kind)
     record_ingest_health(
         ts,
         effective_prefix,

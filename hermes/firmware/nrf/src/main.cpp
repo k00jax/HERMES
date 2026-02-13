@@ -94,6 +94,8 @@ struct EspTelemetry {
   int micerr = 0;
   int wifist = 0;
   int camaddr = -1;
+  char ip[32] = "0.0.0.0";
+  char ssid[64] = "";
 };
 
 static EspTelemetry espTelemetry;
@@ -228,6 +230,13 @@ static uint32_t airRisingCooldownUntilMs = 0;
 static uint32_t airFallingCooldownUntilMs = 0;
 static uint32_t lightDropCooldownUntilMs = 0;
 static uint32_t noiseSpikeCooldownUntilMs = 0;
+static bool espNetSeen = false;
+static uint32_t lastEspNetEmitMs = 0;
+static bool espNetCacheValid = false;
+static int lastEspNetWifist = 0;
+static int lastEspNetRssi = RSSI_NOT_CONNECTED;
+static uint32_t lastEspNetNtp = 0;
+static char lastEspNetIp[32] = "0.0.0.0";
 
 static bool btnRawState = true;
 static bool btnStableState = true;
@@ -293,6 +302,7 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_NTP) == 0) {
     espTelemetry.ntp = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+    espNetSeen = true;
     return true;
   }
   if (strcmp(key, KEY_CAMOK) == 0) {
@@ -313,10 +323,25 @@ static bool parseKeyValue(char *pair) {
   }
   if (strcmp(key, KEY_WIFIST) == 0) {
     espTelemetry.wifist = static_cast<int>(strtol(value, nullptr, 10));
+    espNetSeen = true;
     return true;
   }
   if (strcmp(key, KEY_CAMADDR) == 0) {
     espTelemetry.camaddr = static_cast<int>(strtol(value, nullptr, 10));
+    return true;
+  }
+
+  if (strcmp(key, "ip") == 0) {
+    strncpy(espTelemetry.ip, value, sizeof(espTelemetry.ip) - 1);
+    espTelemetry.ip[sizeof(espTelemetry.ip) - 1] = '\0';
+    espNetSeen = true;
+    return true;
+  }
+
+  if (strcmp(key, "ssid") == 0) {
+    strncpy(espTelemetry.ssid, value, sizeof(espTelemetry.ssid) - 1);
+    espTelemetry.ssid[sizeof(espTelemetry.ssid) - 1] = '\0';
+    espNetSeen = true;
     return true;
   }
 
@@ -356,6 +381,46 @@ static void storeSensLine(const char *line) {
   lastSensLine[sizeof(lastSensLine) - 1] = '\0';
 }
 
+static bool lineHasWifiFields(const char *line) {
+  return strstr(line, "wifist=") || strstr(line, "rssi=") || strstr(line, "ntp=") || strstr(line, "ip=") || strstr(line, "ssid=");
+}
+
+static void maybeEmitEspNet(uint32_t now) {
+  if (!espNetSeen) {
+    return;
+  }
+
+  const bool changed =
+      (!espNetCacheValid)
+      || (espTelemetry.wifist != lastEspNetWifist)
+      || (espTelemetry.rssi != lastEspNetRssi)
+      || (espTelemetry.ntp != lastEspNetNtp)
+      || (strncmp(espTelemetry.ip, lastEspNetIp, sizeof(lastEspNetIp)) != 0);
+
+  if (!changed && (now - lastEspNetEmitMs) < 5000) {
+    return;
+  }
+
+  char pairs[128];
+  snprintf(
+      pairs,
+      sizeof(pairs),
+      "NET,wifist=%d,rssi=%d,ntp=%lu,ip=%s",
+      espTelemetry.wifist,
+      espTelemetry.rssi,
+      static_cast<unsigned long>(espTelemetry.ntp),
+      espTelemetry.ip);
+  emitFrame("ESP", pairs);
+
+  lastEspNetEmitMs = now;
+  espNetCacheValid = true;
+  lastEspNetWifist = espTelemetry.wifist;
+  lastEspNetRssi = espTelemetry.rssi;
+  lastEspNetNtp = espTelemetry.ntp;
+  strncpy(lastEspNetIp, espTelemetry.ip, sizeof(lastEspNetIp) - 1);
+  lastEspNetIp[sizeof(lastEspNetIp) - 1] = '\0';
+}
+
 static uint32_t getAgeMs(uint32_t now) {
   if (lastLineMs == 0) {
     return 0xFFFFFFFF;
@@ -392,10 +457,15 @@ static void handleSerial1() {
       rxBuffer[rxLen] = '\0';
       if (rxLen > 0) {
         if (strncmp(rxBuffer, SENS_PREFIX, strlen(SENS_PREFIX)) == 0) {
+          const bool hasWifi = lineHasWifiFields(rxBuffer);
           storeSensLine(rxBuffer);
           if (parseTelemetryLine(rxBuffer)) {
-            lastLineMs = millis();
+            const uint32_t now = millis();
+            lastLineMs = now;
             linesOk++;
+            if (hasWifi) {
+              maybeEmitEspNet(now);
+            }
           } else {
             parseFail++;
           }
