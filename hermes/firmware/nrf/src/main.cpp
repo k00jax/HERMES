@@ -205,6 +205,8 @@ static uint32_t lastSensorMs = 0;
 static uint32_t lastDisplayMs = 0;
 static uint32_t lastHeartbeatMs = 0;
 static uint32_t lastSampleMs = 0;
+static uint32_t bootCounter = 0;
+static uint32_t resetReasonBits = 0;
 
 static uint32_t hostEpochBase = 0;
 static uint32_t hostEpochBaseMs = 0;
@@ -468,6 +470,16 @@ static void sanitizeToken(char *buffer) {
 static void buildInfo(char *buffer, size_t size) {
   snprintf(buffer, size, "%s_%s", __DATE__, __TIME__);
   sanitizeToken(buffer);
+}
+
+static void initBootDiagnostics() {
+  resetReasonBits = NRF_POWER->RESETREAS;
+  NRF_POWER->RESETREAS = resetReasonBits;
+
+  uint8_t retainedBoot = static_cast<uint8_t>(NRF_POWER->GPREGRET & 0xFF);
+  retainedBoot = static_cast<uint8_t>(retainedBoot + 1);
+  NRF_POWER->GPREGRET = retainedBoot;
+  bootCounter = retainedBoot;
 }
 
 static void emitFrame(const char *kind, const char *pairs) {
@@ -1063,6 +1075,58 @@ static void exportUsbLine(uint32_t now) {
 #endif
 }
 
+static void emitSummaryFrames(uint32_t now) {
+  (void)now;
+
+  char lightBuf[16];
+  char sceneBuf[16];
+  char rliBuf[16];
+  char dliBuf[16];
+  formatFloat(lightBuf, sizeof(lightBuf), espTelemetry.light, 2);
+  formatFloat(sceneBuf, sizeof(sceneBuf), espTelemetry.scene, 2);
+  formatFloat(rliBuf, sizeof(rliBuf), rocLight, 2);
+  formatFloat(dliBuf, sizeof(dliBuf), deltaLight, 2);
+
+  char lightPairs[128];
+  snprintf(
+      lightPairs,
+      sizeof(lightPairs),
+      "light=%s,scene=%s,roc=%s,delta=%s",
+      lightBuf,
+      sceneBuf,
+      rliBuf,
+      dliBuf);
+  emitFrame("LIGHT", lightPairs);
+
+  char micBuf[16];
+  char micPkBuf[16];
+  char micNfBuf[16];
+  char rmicBuf[16];
+  char dmicBuf[16];
+  formatFloat(micBuf, sizeof(micBuf), localMicRms, 3);
+  formatFloat(micPkBuf, sizeof(micPkBuf), localMicPeak, 3);
+  formatFloat(micNfBuf, sizeof(micNfBuf), localMicNoise, 3);
+  formatFloat(rmicBuf, sizeof(rmicBuf), rocMic, 2);
+  formatFloat(dmicBuf, sizeof(dmicBuf), deltaMic, 2);
+
+  const int spikeFlag = (!isnan(deltaMic) && deltaMic > MIC_SPIKE_DELTA) ? 1 : 0;
+  const int sustainFlag = (!isnan(deltaMic) && deltaMic > MIC_SUSTAIN_DELTA) ? 1 : 0;
+
+  char micPairs[196];
+  snprintf(
+      micPairs,
+      sizeof(micPairs),
+      "mic_rms=%s,mic_peak=%s,noise_floor=%s,roc=%s,delta=%s,spike=%d,sustain=%d",
+      micBuf,
+      micPkBuf,
+      micNfBuf,
+      rmicBuf,
+      dmicBuf,
+      spikeFlag,
+      sustainFlag);
+  emitFrame("MIC", micPairs);
+}
+
 static void updateDerivedEvents(uint32_t now);
 
 static void pushSample(float tC, float rh, float eco2, float tvoc, float light, float scene, float mic) {
@@ -1117,6 +1181,7 @@ static void updateHistory(uint32_t now) {
   updateDerivedEvents(now);
   pushSample(t, rh, eco2, tvoc, light, espTelemetry.scene, mic);
 
+  emitSummaryFrames(now);
   exportUsbLine(now);
 }
 
@@ -1990,13 +2055,41 @@ static void drawUserOverviewPage(uint32_t now) {
 }
 
 static void drawUserAirTrendsPage(uint32_t now) {
+  // Stale-context guard and context age badge
+  const uint32_t STALE_MS = 10 * 60 * 1000; // 10 minutes
+  uint32_t ctx_age_ms = now - hostContext.ctx_set_ms;
+  bool context_stale = ctx_age_ms > STALE_MS || !hostContext.ctx_valid;
+
   displayEnv.clearDisplay();
   displayEnv.setTextSize(1);
   displayEnv.setTextColor(SSD1306_WHITE);
   displayEnv.setCursor(0, 0);
   displayEnv.print("CO2");
-  drawContextDelta(displayEnv, hostContext.eco2_d60, hostContext.ctx_valid);
+  // Only show overlay if context is not stale
+  if (!context_stale) {
+    drawContextDelta(displayEnv, hostContext.eco2_d60, true);
+  } else {
+    // Optionally show a stale badge
+    displayEnv.setCursor(SCREEN_WIDTH - 36, 0);
+    displayEnv.print("STALE");
+  }
   drawSparkline(0, 16, SCREEN_WIDTH, 48, histEco2, histCount, histIndex, displayEnv);
+  // Context age badge
+  displayEnv.setTextSize(1);
+  displayEnv.setCursor(0, 56);
+  if (!context_stale && hostContext.ctx_set_ms > 0) {
+    if (ctx_age_ms < 60000) {
+      displayEnv.print("ctx: <1m");
+    } else if (ctx_age_ms < 3600000) {
+      uint8_t min = ctx_age_ms / 60000;
+      if (min > 99) min = 99;
+      displayEnv.print("ctx: ");
+      displayEnv.print(min);
+      displayEnv.print("m");
+    } else {
+      displayEnv.print("ctx: >1h");
+    }
+  }
   drawCornerFlags(displayEnv, now);
   displayEnv.display();
 
@@ -2005,8 +2098,28 @@ static void drawUserAirTrendsPage(uint32_t now) {
   displayEsp.setTextColor(SSD1306_WHITE);
   displayEsp.setCursor(0, 0);
   displayEsp.print("TVOC");
-  drawContextDelta(displayEsp, hostContext.tvoc_d60, hostContext.ctx_valid);
+  if (!context_stale) {
+    drawContextDelta(displayEsp, hostContext.tvoc_d60, true);
+  } else {
+    displayEsp.setCursor(SCREEN_WIDTH - 36, 0);
+    displayEsp.print("STALE");
+  }
   drawSparkline(0, 16, SCREEN_WIDTH, 48, histTvoc, histCount, histIndex, displayEsp);
+  displayEsp.setTextSize(1);
+  displayEsp.setCursor(0, 56);
+  if (!context_stale && hostContext.ctx_set_ms > 0) {
+    if (ctx_age_ms < 60000) {
+      displayEsp.print("ctx: <1m");
+    } else if (ctx_age_ms < 3600000) {
+      uint8_t min = ctx_age_ms / 60000;
+      if (min > 99) min = 99;
+      displayEsp.print("ctx: ");
+      displayEsp.print(min);
+      displayEsp.print("m");
+    } else {
+      displayEsp.print("ctx: >1h");
+    }
+  }
   drawCornerFlags(displayEsp, now);
   displayEsp.display();
 }
@@ -2433,6 +2546,7 @@ static void heartbeat(uint32_t now) {
 void setup() {
   HERMES_SERIAL.begin(UART_BAUD);
   while (!HERMES_SERIAL) { delay(10); }
+  initBootDiagnostics();
   delay(1500);
   emitProtoFrame();
   HERMES_SERIAL.flush();
@@ -2476,13 +2590,16 @@ void loop() {
   if (now - lastHB >= 1000) {
     lastHB = now;
     hbSeq++;
-    char hbPairs[64];
+    char hbPairs[128];
     snprintf(
         hbPairs,
         sizeof(hbPairs),
-        "tick=%lu,seq=%lu",
+        "tick=%lu,seq=%lu,uptime_s=%lu,boot=%lu,reset_reason=0x%08lx",
         static_cast<unsigned long>(now),
-        static_cast<unsigned long>(hbSeq));
+        static_cast<unsigned long>(hbSeq),
+        static_cast<unsigned long>(now / 1000),
+        static_cast<unsigned long>(bootCounter),
+        static_cast<unsigned long>(resetReasonBits));
     emitFrame("HB", hbPairs);
   }
   handleSerial1();

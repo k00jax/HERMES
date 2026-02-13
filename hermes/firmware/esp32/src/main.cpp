@@ -3,6 +3,7 @@
 #include <Wire.h>
 
 #include "esp_camera.h"
+#include "cam_pins.h"
 #if __has_include(<ESP_I2S.h>)
 #include <ESP_I2S.h>
 #define HAS_ESP_I2S 1
@@ -32,6 +33,10 @@
 #endif
 
 #include "hermes_protocol.h"
+
+#ifndef CAMERA_PROBE_MODE
+#define CAMERA_PROBE_MODE 1
+#endif
 
 #define ENABLE_ESP_CMD 1
 #define ENABLE_CAMERA 0
@@ -88,6 +93,118 @@ static void waitForSerial(uint32_t timeoutMs) {
   while (!Serial && (millis() - start) < timeoutMs) {
     delay(10);
   }
+}
+
+static void runCameraProbe() {
+  Serial.println("[camera_probe] start");
+  Serial.print("[camera_probe] chip.model=");
+  Serial.println(ESP.getChipModel());
+  Serial.print("[camera_probe] chip.revision=");
+  Serial.println(ESP.getChipRevision());
+  Serial.print("[camera_probe] chip.cores=");
+  Serial.println(ESP.getChipCores());
+  Serial.print("[camera_probe] sdk=");
+  Serial.println(ESP.getSdkVersion());
+
+  const bool psram_ok = psramFound();
+  const uint32_t psram_size = ESP.getPsramSize();
+  const uint32_t free_psram = ESP.getFreePsram();
+  const uint32_t free_heap = ESP.getFreeHeap();
+
+  Serial.print("[camera_probe] psramFound()=");
+  Serial.println(psram_ok ? 1 : 0);
+  Serial.print("[camera_probe] ESP.getPsramSize()=");
+  Serial.println(static_cast<unsigned long>(psram_size));
+  Serial.print("[camera_probe] ESP.getFreePsram()=");
+  Serial.println(static_cast<unsigned long>(free_psram));
+  Serial.print("[camera_probe] ESP.getFreeHeap()=");
+  Serial.println(static_cast<unsigned long>(free_heap));
+
+  Serial.print("[camera_probe] pins.sccb_sda=");
+  Serial.println(CAM_PIN_SIOD);
+  Serial.print("[camera_probe] pins.sccb_scl=");
+  Serial.println(CAM_PIN_SIOC);
+  Serial.print("[camera_probe] pins.xclk=");
+  Serial.println(CAM_PIN_XCLK);
+
+  Wire.begin(CAM_PIN_SIOD, CAM_PIN_SIOC);
+  Wire.setClock(100000);
+  Wire.beginTransmission(CAM_SCCB_ADDR);
+  const uint8_t sccb_rc = Wire.endTransmission();
+  Serial.print("[camera_probe] sccb.addr=0x");
+  if (CAM_SCCB_ADDR < 16) {
+    Serial.print('0');
+  }
+  Serial.println(CAM_SCCB_ADDR, HEX);
+  Serial.print("[camera_probe] sccb.endTransmission_rc=");
+  Serial.println(static_cast<unsigned long>(sccb_rc));
+  if (sccb_rc == 0) {
+    Serial.println("[camera_probe] SCCB OK");
+  } else {
+    Serial.println("[camera_probe] SCCB FAIL");
+    Serial.println("[camera_probe] stop: physical seating/orientation or wrong camera pins");
+    return;
+  }
+
+  camera_config_t config = {};
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = CAM_PIN_D0;
+  config.pin_d1 = CAM_PIN_D1;
+  config.pin_d2 = CAM_PIN_D2;
+  config.pin_d3 = CAM_PIN_D3;
+  config.pin_d4 = CAM_PIN_D4;
+  config.pin_d5 = CAM_PIN_D5;
+  config.pin_d6 = CAM_PIN_D6;
+  config.pin_d7 = CAM_PIN_D7;
+  config.pin_xclk = CAM_PIN_XCLK;
+  config.pin_pclk = CAM_PIN_PCLK;
+  config.pin_vsync = CAM_PIN_VSYNC;
+  config.pin_href = CAM_PIN_HREF;
+  config.pin_sccb_sda = CAM_PIN_SIOD;
+  config.pin_sccb_scl = CAM_PIN_SIOC;
+  config.pin_pwdn = CAM_PIN_PWDN;
+  config.pin_reset = CAM_PIN_RESET;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+
+  const esp_err_t cam_init_rc = esp_camera_init(&config);
+  Serial.print("[camera_probe] esp_camera_init rc=0x");
+  Serial.println(static_cast<unsigned long>(cam_init_rc), HEX);
+  Serial.print("[camera_probe] esp_camera_init rc_dec=");
+  Serial.println(static_cast<long>(cam_init_rc));
+
+  if (cam_init_rc != ESP_OK) {
+    Serial.println("[camera_probe] camera init FAILED");
+    return;
+  }
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("[camera_probe] esp_camera_fb_get returned NULL");
+  } else {
+    Serial.print("[camera_probe] frame.len=");
+    Serial.println(static_cast<unsigned long>(fb->len));
+    Serial.print("[camera_probe] frame.width=");
+    Serial.println(static_cast<unsigned long>(fb->width));
+    Serial.print("[camera_probe] frame.height=");
+    Serial.println(static_cast<unsigned long>(fb->height));
+    Serial.print("[camera_probe] frame.format=");
+    Serial.println(static_cast<unsigned long>(fb->format));
+    esp_camera_fb_return(fb);
+  }
+
+  const esp_err_t cam_deinit_rc = esp_camera_deinit();
+  Serial.print("[camera_probe] esp_camera_deinit rc=0x");
+  Serial.println(static_cast<unsigned long>(cam_deinit_rc), HEX);
+  Serial.print("[camera_probe] esp_camera_deinit rc_dec=");
+  Serial.println(static_cast<long>(cam_deinit_rc));
+  Serial.println("[camera_probe] done");
 }
 
 static void scanCameraBus() {
@@ -559,6 +676,12 @@ static void sendTelemetryLine() {
 
 void setup() {
   Serial.begin(115200);
+#if CAMERA_PROBE_MODE
+  delay(50);
+  waitForSerial(1500);
+  runCameraProbe();
+  return;
+#endif
   Serial1.setPins(UART_RX_PIN, UART_TX_PIN);
   Serial1.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   delay(50);
@@ -571,6 +694,10 @@ void setup() {
 }
 
 void loop() {
+#if CAMERA_PROBE_MODE
+  delay(1000);
+  return;
+#endif
   const uint32_t now = millis();
   handleSerial1Commands();
   sampleCamera(now);
