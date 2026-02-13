@@ -7,6 +7,7 @@ SOCK_PATH = "/tmp/hermesd.sock"
 USAGE = """Usage:
   python3 client.py ping
   python3 client.py status
+    python3 client.py health
     python3 client.py oled-status
   python3 client.py send "OLED,PAGE,NEXT"
   python3 client.py stop
@@ -22,6 +23,8 @@ def main():
 
     if cmd == "OLED-STATUS":
         line = "SEND OLED,STATUS"
+    elif cmd == "HEALTH":
+        line = "HEALTH"
     elif cmd == "SEND":
         if not rest:
             print("ERR no payload")
