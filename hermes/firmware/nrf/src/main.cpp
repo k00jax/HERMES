@@ -2058,7 +2058,6 @@ static void drawUserAirTrendsPage(uint32_t now) {
   drawCornerFlags(displayEsp, now);
   displayEsp.display();
 }
-}
 
 static void drawUserEnvTrendsPage(uint32_t now) {
   displayEnv.clearDisplay();
