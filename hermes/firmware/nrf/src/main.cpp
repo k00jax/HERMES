@@ -1063,6 +1063,58 @@ static void exportUsbLine(uint32_t now) {
 #endif
 }
 
+static void emitSummaryFrames(uint32_t now) {
+  (void)now;
+
+  char lightBuf[16];
+  char sceneBuf[16];
+  char rliBuf[16];
+  char dliBuf[16];
+  formatFloat(lightBuf, sizeof(lightBuf), espTelemetry.light, 2);
+  formatFloat(sceneBuf, sizeof(sceneBuf), espTelemetry.scene, 2);
+  formatFloat(rliBuf, sizeof(rliBuf), rocLight, 2);
+  formatFloat(dliBuf, sizeof(dliBuf), deltaLight, 2);
+
+  char lightPairs[128];
+  snprintf(
+      lightPairs,
+      sizeof(lightPairs),
+      "light=%s,scene=%s,roc=%s,delta=%s",
+      lightBuf,
+      sceneBuf,
+      rliBuf,
+      dliBuf);
+  emitFrame("LIGHT", lightPairs);
+
+  char micBuf[16];
+  char micPkBuf[16];
+  char micNfBuf[16];
+  char rmicBuf[16];
+  char dmicBuf[16];
+  formatFloat(micBuf, sizeof(micBuf), localMicRms, 3);
+  formatFloat(micPkBuf, sizeof(micPkBuf), localMicPeak, 3);
+  formatFloat(micNfBuf, sizeof(micNfBuf), localMicNoise, 3);
+  formatFloat(rmicBuf, sizeof(rmicBuf), rocMic, 2);
+  formatFloat(dmicBuf, sizeof(dmicBuf), deltaMic, 2);
+
+  const int spikeFlag = (!isnan(deltaMic) && deltaMic > MIC_SPIKE_DELTA) ? 1 : 0;
+  const int sustainFlag = (!isnan(deltaMic) && deltaMic > MIC_SUSTAIN_DELTA) ? 1 : 0;
+
+  char micPairs[196];
+  snprintf(
+      micPairs,
+      sizeof(micPairs),
+      "mic_rms=%s,mic_peak=%s,noise_floor=%s,roc=%s,delta=%s,spike=%d,sustain=%d",
+      micBuf,
+      micPkBuf,
+      micNfBuf,
+      rmicBuf,
+      dmicBuf,
+      spikeFlag,
+      sustainFlag);
+  emitFrame("MIC", micPairs);
+}
+
 static void updateDerivedEvents(uint32_t now);
 
 static void pushSample(float tC, float rh, float eco2, float tvoc, float light, float scene, float mic) {
@@ -1117,6 +1169,7 @@ static void updateHistory(uint32_t now) {
   updateDerivedEvents(now);
   pushSample(t, rh, eco2, tvoc, light, espTelemetry.scene, mic);
 
+  emitSummaryFrames(now);
   exportUsbLine(now);
 }
 

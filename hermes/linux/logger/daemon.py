@@ -6,6 +6,8 @@ import datetime
 import threading
 import queue
 import socket
+import re
+from typing import Optional
 import serial
 try:
     from zoneinfo import ZoneInfo
@@ -30,6 +32,16 @@ RAW_CLEANUP_INTERVAL_SECS = 3600
 PARSE_FAIL_MAX_RAW_CHARS = 200
 PARSE_FAIL_SUMMARY_INTERVAL_SECS = 600
 PARSER_VERSION = "v1"
+HEALTH_WINDOW_SECS = 60
+FRAME_PREFIX_RE = re.compile(r"^[A-Z]{2,8},")
+
+EXPECTED_PREFIXES = {
+    "HB": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
+    "ENV": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
+    "AIR": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
+    "LIGHT": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
+    "MIC": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
+}
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -40,8 +52,22 @@ stats = {
     "last_error": "none",
     "serial_connected": False,
     "port": PREFERRED_PORT,
+    "last_seen_nrf": "never",
+    "last_seen_esp": "never",
 }
 stats_lock = threading.Lock()
+
+ingest_health = {
+    "window_start": time.time(),
+    "frame_counts_total": {},
+    "frame_counts_window": {},
+    "last_seen_by_prefix": {},
+    "window1m_start": time.time(),
+    "corrupt_lines_1m": 0,
+    "non_ascii_1m": 0,
+    "decode_repl_1m": 0,
+    "parse_fail_1m": 0,
+}
 
 parse_fail_stats = {
     "total": 0,
@@ -185,6 +211,33 @@ def init_db(conn: sqlite3.Connection):
         );
         """)
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS light (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            ts_local TEXT,
+            source TEXT NOT NULL,
+            light REAL,
+            scene REAL,
+            roc REAL,
+            delta REAL
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS mic_noise (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            ts_local TEXT,
+            source TEXT NOT NULL,
+            mic_rms REAL,
+            mic_peak REAL,
+            noise_floor REAL,
+            roc REAL,
+            delta REAL,
+            spike INTEGER,
+            sustain INTEGER
+        );
+        """)
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS parse_fail (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_utc TEXT NOT NULL,
@@ -203,6 +256,8 @@ def init_db(conn: sqlite3.Connection):
         ensure_column(conn, "env", "ts_local", "TEXT")
         ensure_column(conn, "air", "ts_local", "TEXT")
         ensure_column(conn, "acks", "ts_local", "TEXT")
+        ensure_column(conn, "light", "ts_local", "TEXT")
+        ensure_column(conn, "mic_noise", "ts_local", "TEXT")
         ensure_column(conn, "parse_fail", "ts_local", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_ts ON hb(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_local ON hb(ts_local);")
@@ -212,6 +267,10 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_air_local ON air(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_acks_ts ON acks(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_acks_local ON acks(ts_local);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_light_ts ON light(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_light_local ON light(ts_local);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mic_noise_ts ON mic_noise(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mic_noise_local ON mic_noise(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_ts ON oled_status(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_local ON oled_status(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_fail_ts ON parse_fail(ts_utc);")
@@ -268,7 +327,7 @@ def parse_oled_status(line: str):
             out[key] = None
     return out
 
-def parse_int(value: str):
+def parse_int(value: Optional[str]):
     if value is None:
         return None
     try:
@@ -276,7 +335,7 @@ def parse_int(value: str):
     except ValueError:
         return None
 
-def parse_float(value: str):
+def parse_float(value: Optional[str]):
     if value is None:
         return None
     try:
@@ -286,6 +345,119 @@ def parse_float(value: str):
 
 def bump_counter(counter: dict, key: str):
     counter[key] = counter.get(key, 0) + 1
+
+def looks_like_frame(line: str) -> bool:
+    return FRAME_PREFIX_RE.match(line) is not None
+
+def parse_ts_to_unix(ts: str):
+    try:
+        return datetime.datetime.fromisoformat(ts).timestamp()
+    except Exception:
+        return None
+
+def record_ingest_health(
+    ts: str,
+    prefix: str,
+    *,
+    corrupt: bool,
+    non_ascii_count: int,
+    decode_replacement_count: int,
+    parse_failed: bool,
+):
+    now_ts = time.time()
+
+    with stats_lock:
+        elapsed = now_ts - ingest_health["window_start"]
+        if elapsed >= 1.0:
+            ingest_health["window_start"] = now_ts
+            ingest_health["frame_counts_window"] = {}
+
+        elapsed_1m = now_ts - ingest_health["window1m_start"]
+        if elapsed_1m >= HEALTH_WINDOW_SECS:
+            ingest_health["window1m_start"] = now_ts
+            ingest_health["corrupt_lines_1m"] = 0
+            ingest_health["non_ascii_1m"] = 0
+            ingest_health["decode_repl_1m"] = 0
+            ingest_health["parse_fail_1m"] = 0
+
+        bump_counter(ingest_health["frame_counts_total"], prefix)
+        bump_counter(ingest_health["frame_counts_window"], prefix)
+        ingest_health["last_seen_by_prefix"][prefix] = ts
+        stats["last_seen_nrf"] = ts
+        if prefix in {"SENS", "LOG", "LIGHT"}:
+            stats["last_seen_esp"] = ts
+
+        if corrupt:
+            ingest_health["corrupt_lines_1m"] += 1
+        if non_ascii_count > 0:
+            ingest_health["non_ascii_1m"] += non_ascii_count
+        if decode_replacement_count > 0:
+            ingest_health["decode_repl_1m"] += decode_replacement_count
+        if parse_failed:
+            ingest_health["parse_fail_1m"] += 1
+
+def format_health_summary():
+    with stats_lock:
+        now_ts = time.time()
+        elapsed = max(now_ts - ingest_health["window_start"], 0.001)
+        window_counts = dict(ingest_health["frame_counts_window"])
+        last_seen = dict(ingest_health["last_seen_by_prefix"])
+        last_seen_nrf = stats.get("last_seen_nrf", "never")
+        last_seen_esp = stats.get("last_seen_esp", "never")
+        corrupt_lines_1m = ingest_health["corrupt_lines_1m"]
+        non_ascii_1m = ingest_health["non_ascii_1m"]
+        decode_repl_1m = ingest_health["decode_repl_1m"]
+        parse_fail_1m = ingest_health["parse_fail_1m"]
+
+    rates = []
+    for prefix, count in window_counts.items():
+        fps = count / elapsed
+        rates.append((prefix, fps))
+    rates.sort(key=lambda item: item[1], reverse=True)
+    fps_text = "|".join([f"{prefix}:{fps:.2f}" for prefix, fps in rates[:8]]) if rates else "none"
+
+    parse_total = parse_fail_stats.get("total", 0)
+    parse_by_prefix = parse_fail_stats.get("by_prefix_total", {})
+    parse_top = sorted(parse_by_prefix.items(), key=lambda item: item[1], reverse=True)[:5]
+    parse_text = "|".join([f"{prefix}:{count}" for prefix, count in parse_top]) if parse_top else "none"
+
+    seen_items = sorted(last_seen.items(), key=lambda item: item[0])[:8]
+    seen_text = "|".join([f"{prefix}:{ts}" for prefix, ts in seen_items]) if seen_items else "none"
+
+    freshness_tokens = []
+    for prefix, cfg in EXPECTED_PREFIXES.items():
+        ts = last_seen.get(prefix)
+        if not ts:
+            freshness_tokens.append(f"{prefix}:dead(age=never)")
+            continue
+        ts_unix = parse_ts_to_unix(ts)
+        if ts_unix is None:
+            freshness_tokens.append(f"{prefix}:unknown(age=bad_ts)")
+            continue
+        age = max(now_ts - ts_unix, 0.0)
+        if age >= cfg["dead_s"]:
+            state = "dead"
+        elif age >= cfg["stale_s"]:
+            state = "stale"
+        else:
+            state = "ok"
+        freshness_tokens.append(f"{prefix}:{state}(age={age:.1f}s)")
+    freshness_text = "|".join(freshness_tokens)
+
+    return (
+        "OK "
+        f"freshness={freshness_text} "
+        f"fps={fps_text} "
+        f"corrupt_lines_1m={corrupt_lines_1m} "
+        f"non_ascii_1m={non_ascii_1m} "
+        f"decode_repl_1m={decode_repl_1m} "
+        f"parse_fail_1m={parse_fail_1m} "
+        f"parse_fail_total={parse_total} "
+        f"parse_fail_by_prefix={parse_text} "
+        f"last_seen_nrf={last_seen_nrf} "
+        f"last_seen_esp={last_seen_esp} "
+        f"last_seen_prefix={seen_text}"
+    )
 
 def record_parse_fail(conn: sqlite3.Connection, ts: str, ts_local: str, line: str, reason: str, prefix: str):
     raw = line[:PARSE_FAIL_MAX_RAW_CHARS]
@@ -364,6 +536,41 @@ def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: 
             (ts, ts_local, "nrf", ack_kind, ack_op),
         )
         return
+    if kind == "LIGHT":
+        light = parse_float(kvs.get("light"))
+        scene = parse_float(kvs.get("scene"))
+        roc = parse_float(kvs.get("roc"))
+        delta = parse_float(kvs.get("delta"))
+        if light is None and scene is None and roc is None and delta is None:
+            return
+        conn.execute(
+            "INSERT INTO light (ts_utc, ts_local, source, light, scene, roc, delta) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, ts_local, "nrf", light, scene, roc, delta),
+        )
+        return
+    if kind == "MIC":
+        mic_rms = parse_float(kvs.get("mic_rms"))
+        mic_peak = parse_float(kvs.get("mic_peak"))
+        noise_floor = parse_float(kvs.get("noise_floor"))
+        roc = parse_float(kvs.get("roc"))
+        delta = parse_float(kvs.get("delta"))
+        spike = parse_int(kvs.get("spike"))
+        sustain = parse_int(kvs.get("sustain"))
+        if (
+            mic_rms is None
+            and mic_peak is None
+            and noise_floor is None
+            and roc is None
+            and delta is None
+            and spike is None
+            and sustain is None
+        ):
+            return
+        conn.execute(
+            "INSERT INTO mic_noise (ts_utc, ts_local, source, mic_rms, mic_peak, noise_floor, roc, delta, spike, sustain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, ts_local, "nrf", mic_rms, mic_peak, noise_floor, roc, delta, spike, sustain),
+        )
+        return
 
 def classify_parse_failure(line: str):
     kind, kvs = parse_kv_pairs(line)
@@ -421,6 +628,60 @@ def classify_parse_failure(line: str):
             return "missing_fields", prefix
         return None, prefix
 
+    if prefix == "LIGHT":
+        light_raw = kvs.get("light")
+        scene_raw = kvs.get("scene")
+        roc_raw = kvs.get("roc")
+        delta_raw = kvs.get("delta")
+        light = parse_float(light_raw)
+        scene = parse_float(scene_raw)
+        roc = parse_float(roc_raw)
+        delta = parse_float(delta_raw)
+        if light_raw is None and scene_raw is None and roc_raw is None and delta_raw is None:
+            return "missing_fields", prefix
+        if light_raw is not None and light is None:
+            return "bad_float", prefix
+        if scene_raw is not None and scene is None:
+            return "bad_float", prefix
+        if roc_raw is not None and roc is None:
+            return "bad_float", prefix
+        if delta_raw is not None and delta is None:
+            return "bad_float", prefix
+        return None, prefix
+
+    if prefix == "MIC":
+        rms_raw = kvs.get("mic_rms")
+        peak_raw = kvs.get("mic_peak")
+        floor_raw = kvs.get("noise_floor")
+        roc_raw = kvs.get("roc")
+        delta_raw = kvs.get("delta")
+        spike_raw = kvs.get("spike")
+        sustain_raw = kvs.get("sustain")
+        rms = parse_float(rms_raw)
+        peak = parse_float(peak_raw)
+        floor = parse_float(floor_raw)
+        roc = parse_float(roc_raw)
+        delta = parse_float(delta_raw)
+        spike = parse_int(spike_raw)
+        sustain = parse_int(sustain_raw)
+        if all(raw is None for raw in [rms_raw, peak_raw, floor_raw, roc_raw, delta_raw, spike_raw, sustain_raw]):
+            return "missing_fields", prefix
+        if rms_raw is not None and rms is None:
+            return "bad_float", prefix
+        if peak_raw is not None and peak is None:
+            return "bad_float", prefix
+        if floor_raw is not None and floor is None:
+            return "bad_float", prefix
+        if roc_raw is not None and roc is None:
+            return "bad_float", prefix
+        if delta_raw is not None and delta is None:
+            return "bad_float", prefix
+        if spike_raw is not None and spike is None:
+            return "bad_int", prefix
+        if sustain_raw is not None and sustain is None:
+            return "bad_int", prefix
+        return None, prefix
+
     kind_num, kvs_num = parse_line(line)
     if kind_num and kvs_num:
         return None, prefix
@@ -439,7 +700,7 @@ def snapshot_stats():
 def log_info(message: str):
     print(message, flush=True)
 
-def resolve_serial_port(preferred: str) -> str:
+def resolve_serial_port(preferred: Optional[str]) -> str:
     if preferred and os.path.exists(preferred):
         return preferred
 
@@ -454,7 +715,7 @@ def resolve_serial_port(preferred: str) -> str:
     if acms:
         return acms[0]
 
-    return preferred
+    return preferred or PREFERRED_PORT
 
 PORT = resolve_serial_port(PREFERRED_PORT)
 
@@ -466,12 +727,37 @@ def handle_line(conn: sqlite3.Connection, line: str):
     dt = utc_now()
     ts = dt.isoformat()
     ts_local = local_now().isoformat()
+    non_ascii_count = sum(1 for c in line if ord(c) > 127)
+    decode_replacement_count = line.count("\ufffd")
+    corrupt = not looks_like_frame(line)
+
     with open(raw_path(dt), "a", encoding="utf-8") as f:
         f.write(f"{ts}\t{line}\n")
+
     conn.execute(
         "INSERT INTO raw_lines (ts_utc, ts_local, source, line) VALUES (?, ?, ?, ?)",
         (ts, ts_local, "nrf", line),
     )
+
+    if corrupt:
+        record_parse_fail(conn, ts, ts_local, line, "corrupt_prefix", "CORRUPT")
+        record_ingest_health(
+            ts,
+            "CORRUPT",
+            corrupt=True,
+            non_ascii_count=non_ascii_count,
+            decode_replacement_count=decode_replacement_count,
+            parse_failed=True,
+        )
+        maybe_log_parse_fail_summary(time.time())
+        conn.commit()
+        with stats_lock:
+            stats["lines_in"] += 1
+            stats["last_line_ts"] = ts
+            if stats["lines_in"] % 50 == 0:
+                log_info(f"[hermesd] lines_in={stats['lines_in']}")
+        return
+
     kind, kvs = parse_line(line)
     if kind and kvs:
         conn.executemany(
@@ -500,6 +786,15 @@ def handle_line(conn: sqlite3.Connection, line: str):
     reason, prefix = classify_parse_failure(line)
     if reason:
         record_parse_fail(conn, ts, ts_local, line, reason, prefix or "")
+    effective_prefix = prefix or (kind if kind else "UNKNOWN")
+    record_ingest_health(
+        ts,
+        effective_prefix,
+        corrupt=False,
+        non_ascii_count=non_ascii_count,
+        decode_replacement_count=decode_replacement_count,
+        parse_failed=bool(reason),
+    )
     maybe_log_parse_fail_summary(time.time())
     conn.commit()
     with stats_lock:
@@ -585,9 +880,13 @@ def handle_command(cmd_line: str, out_q: queue.Queue):
             f"baud={BAUD} "
             f"lines_in={snap['lines_in']} "
             f"last_line_ts={snap['last_line_ts']} "
+            f"last_seen_nrf={snap['last_seen_nrf']} "
+            f"last_seen_esp={snap['last_seen_esp']} "
             f"last_error={snap['last_error']}",
             False,
         )
+    if cmd == "HEALTH":
+        return format_health_summary(), False
     if cmd == "SEND":
         if not arg:
             return "ERR no payload", False
