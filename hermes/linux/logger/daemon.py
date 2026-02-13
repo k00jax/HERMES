@@ -7,6 +7,7 @@ import threading
 import queue
 import socket
 import re
+import fcntl
 from typing import Optional
 import serial
 try:
@@ -42,6 +43,9 @@ EXPECTED_PREFIXES = {
     "LIGHT": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
     "MIC": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
 }
+
+LOCK_PATH = "/tmp/hermesd.lock"
+lock_handle = None
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -177,7 +181,10 @@ def init_db(conn: sqlite3.Connection):
             ts_local TEXT,
             source TEXT NOT NULL,
             tick_ms INTEGER,
-            seq INTEGER
+            seq INTEGER,
+            uptime_s INTEGER,
+            boot INTEGER,
+            reset_reason TEXT
         );
         """)
         conn.execute("""
@@ -253,6 +260,9 @@ def init_db(conn: sqlite3.Connection):
         ensure_column(conn, "metrics", "ts_local", "TEXT")
         ensure_column(conn, "oled_status", "ts_local", "TEXT")
         ensure_column(conn, "hb", "ts_local", "TEXT")
+        ensure_column(conn, "hb", "uptime_s", "INTEGER")
+        ensure_column(conn, "hb", "boot", "INTEGER")
+        ensure_column(conn, "hb", "reset_reason", "TEXT")
         ensure_column(conn, "env", "ts_local", "TEXT")
         ensure_column(conn, "air", "ts_local", "TEXT")
         ensure_column(conn, "acks", "ts_local", "TEXT")
@@ -425,14 +435,21 @@ def format_health_summary():
     seen_text = "|".join([f"{prefix}:{ts}" for prefix, ts in seen_items]) if seen_items else "none"
 
     freshness_tokens = []
+    expected_fps_tokens = []
     for prefix, cfg in EXPECTED_PREFIXES.items():
         ts = last_seen.get(prefix)
+        fps_for_prefix = window_counts.get(prefix, 0) / elapsed
+        expected_fps_tokens.append(f"{prefix}:{fps_for_prefix:.2f}")
         if not ts:
-            freshness_tokens.append(f"{prefix}:dead(age=never)")
+            freshness_tokens.append(
+                f"{prefix}:dead(age=never,exp={cfg['period_s']:.1f}s,stale={cfg['stale_s']:.1f}s)"
+            )
             continue
         ts_unix = parse_ts_to_unix(ts)
         if ts_unix is None:
-            freshness_tokens.append(f"{prefix}:unknown(age=bad_ts)")
+            freshness_tokens.append(
+                f"{prefix}:unknown(age=bad_ts,exp={cfg['period_s']:.1f}s,stale={cfg['stale_s']:.1f}s)"
+            )
             continue
         age = max(now_ts - ts_unix, 0.0)
         if age >= cfg["dead_s"]:
@@ -441,12 +458,16 @@ def format_health_summary():
             state = "stale"
         else:
             state = "ok"
-        freshness_tokens.append(f"{prefix}:{state}(age={age:.1f}s)")
+        freshness_tokens.append(
+            f"{prefix}:{state}(age={age:.1f}s,exp={cfg['period_s']:.1f}s,stale={cfg['stale_s']:.1f}s)"
+        )
     freshness_text = "|".join(freshness_tokens)
+    expected_fps_text = "|".join(expected_fps_tokens)
 
     return (
         "OK "
         f"freshness={freshness_text} "
+        f"fps_expected={expected_fps_text} "
         f"fps={fps_text} "
         f"corrupt_lines_1m={corrupt_lines_1m} "
         f"non_ascii_1m={non_ascii_1m} "
@@ -499,11 +520,14 @@ def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: 
     if kind == "HB":
         tick = parse_int(kvs.get("tick"))
         seq = parse_int(kvs.get("seq"))
-        if tick is None and seq is None:
+        uptime_s = parse_int(kvs.get("uptime_s"))
+        boot = parse_int(kvs.get("boot"))
+        reset_reason = kvs.get("reset_reason")
+        if tick is None and seq is None and uptime_s is None and boot is None and not reset_reason:
             return
         conn.execute(
-            "INSERT INTO hb (ts_utc, ts_local, source, tick_ms, seq) VALUES (?, ?, ?, ?, ?)",
-            (ts, ts_local, "nrf", tick, seq),
+            "INSERT INTO hb (ts_utc, ts_local, source, tick_ms, seq, uptime_s, boot, reset_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, ts_local, "nrf", tick, seq, uptime_s, boot, reset_reason),
         )
         return
     if kind == "ENV":
@@ -585,13 +609,22 @@ def classify_parse_failure(line: str):
     if prefix == "HB":
         tick_raw = kvs.get("tick")
         seq_raw = kvs.get("seq")
+        uptime_raw = kvs.get("uptime_s")
+        boot_raw = kvs.get("boot")
+        reset_reason_raw = kvs.get("reset_reason")
         tick = parse_int(tick_raw)
         seq = parse_int(seq_raw)
-        if tick_raw is None and seq_raw is None:
+        uptime = parse_int(uptime_raw)
+        boot = parse_int(boot_raw)
+        if tick_raw is None and seq_raw is None and uptime_raw is None and boot_raw is None and not reset_reason_raw:
             return "missing_fields", prefix
         if tick_raw is not None and tick is None:
             return "bad_int", prefix
         if seq_raw is not None and seq is None:
+            return "bad_int", prefix
+        if uptime_raw is not None and uptime is None:
+            return "bad_int", prefix
+        if boot_raw is not None and boot is None:
             return "bad_int", prefix
         return None, prefix
 
@@ -722,6 +755,33 @@ PORT = resolve_serial_port(PREFERRED_PORT)
 def ensure_socket_unlinked():
     if os.path.exists(SOCK_PATH):
         os.unlink(SOCK_PATH)
+
+def acquire_singleton_lock():
+    global lock_handle
+    lock_handle = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"[hermesd] another instance is already running (lock: {LOCK_PATH})", flush=True)
+        raise SystemExit(1)
+    lock_handle.seek(0)
+    lock_handle.truncate(0)
+    lock_handle.write(f"{os.getpid()}\n")
+    lock_handle.flush()
+
+def release_singleton_lock():
+    global lock_handle
+    if not lock_handle:
+        return
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        lock_handle.close()
+    except Exception:
+        pass
+    lock_handle = None
 
 def handle_line(conn: sqlite3.Connection, line: str):
     dt = utc_now()
@@ -943,33 +1003,37 @@ def socket_worker(shutdown: threading.Event, out_q: queue.Queue):
             pass
 
 def main():
-    log_info(f"[hermesd] starting. port={PREFERRED_PORT} baud={BAUD} db={DB_PATH}")
-    shutdown = threading.Event()
-    out_q = queue.Queue()
-
-    serial_thread = threading.Thread(
-        target=serial_worker,
-        args=(shutdown, out_q),
-        daemon=True,
-    )
-    socket_thread = threading.Thread(
-        target=socket_worker,
-        args=(shutdown, out_q),
-        daemon=True,
-    )
-
-    serial_thread.start()
-    socket_thread.start()
-
+    acquire_singleton_lock()
     try:
-        while not shutdown.is_set():
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        shutdown.set()
+        log_info(f"[hermesd] starting. port={PREFERRED_PORT} baud={BAUD} db={DB_PATH}")
+        shutdown = threading.Event()
+        out_q = queue.Queue()
 
-    serial_thread.join(timeout=2)
-    socket_thread.join(timeout=2)
-    log_info("[hermesd] stopped")
+        serial_thread = threading.Thread(
+            target=serial_worker,
+            args=(shutdown, out_q),
+            daemon=True,
+        )
+        socket_thread = threading.Thread(
+            target=socket_worker,
+            args=(shutdown, out_q),
+            daemon=True,
+        )
+
+        serial_thread.start()
+        socket_thread.start()
+
+        try:
+            while not shutdown.is_set():
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            shutdown.set()
+
+        serial_thread.join(timeout=2)
+        socket_thread.join(timeout=2)
+        log_info("[hermesd] stopped")
+    finally:
+        release_singleton_lock()
 
 if __name__ == "__main__":
     main()

@@ -205,6 +205,8 @@ static uint32_t lastSensorMs = 0;
 static uint32_t lastDisplayMs = 0;
 static uint32_t lastHeartbeatMs = 0;
 static uint32_t lastSampleMs = 0;
+static uint32_t bootCounter = 0;
+static uint32_t resetReasonBits = 0;
 
 static uint32_t hostEpochBase = 0;
 static uint32_t hostEpochBaseMs = 0;
@@ -468,6 +470,16 @@ static void sanitizeToken(char *buffer) {
 static void buildInfo(char *buffer, size_t size) {
   snprintf(buffer, size, "%s_%s", __DATE__, __TIME__);
   sanitizeToken(buffer);
+}
+
+static void initBootDiagnostics() {
+  resetReasonBits = NRF_POWER->RESETREAS;
+  NRF_POWER->RESETREAS = resetReasonBits;
+
+  uint8_t retainedBoot = static_cast<uint8_t>(NRF_POWER->GPREGRET & 0xFF);
+  retainedBoot = static_cast<uint8_t>(retainedBoot + 1);
+  NRF_POWER->GPREGRET = retainedBoot;
+  bootCounter = retainedBoot;
 }
 
 static void emitFrame(const char *kind, const char *pairs) {
@@ -2534,6 +2546,7 @@ static void heartbeat(uint32_t now) {
 void setup() {
   HERMES_SERIAL.begin(UART_BAUD);
   while (!HERMES_SERIAL) { delay(10); }
+  initBootDiagnostics();
   delay(1500);
   emitProtoFrame();
   HERMES_SERIAL.flush();
@@ -2577,13 +2590,16 @@ void loop() {
   if (now - lastHB >= 1000) {
     lastHB = now;
     hbSeq++;
-    char hbPairs[64];
+    char hbPairs[128];
     snprintf(
         hbPairs,
         sizeof(hbPairs),
-        "tick=%lu,seq=%lu",
+        "tick=%lu,seq=%lu,uptime_s=%lu,boot=%lu,reset_reason=0x%08lx",
         static_cast<unsigned long>(now),
-        static_cast<unsigned long>(hbSeq));
+        static_cast<unsigned long>(hbSeq),
+        static_cast<unsigned long>(now / 1000),
+        static_cast<unsigned long>(bootCounter),
+        static_cast<unsigned long>(resetReasonBits));
     emitFrame("HB", hbPairs);
   }
   handleSerial1();
