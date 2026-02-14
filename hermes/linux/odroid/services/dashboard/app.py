@@ -34,6 +34,8 @@ BASE_DIR = Path("/home/odroid/hermes-src/hermes")
 CLIENT_PATH = BASE_DIR / "linux/logger/client.py"
 DOCTOR_PATH = BASE_DIR / "tools/hermes-doctor.sh"
 DB_PATH = Path("/home/odroid/hermes-data/db/hermes.sqlite3")
+DB_TIMEOUT_SECS = float(os.environ.get("HERMES_DB_TIMEOUT_SECS", "2.0"))
+MAX_CACHE_KEYS = int(os.environ.get("HERMES_CHART_CACHE_KEYS", "64"))
 
 TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
 FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "ESP,NET")
@@ -112,6 +114,13 @@ def downsample_points(points: List[Dict[str, object]], max_points: int = 300) ->
     return points[::stride]
 
 
+def open_db() -> sqlite3.Connection:
+  conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECS)
+  conn.execute("PRAGMA journal_mode=WAL;")
+  conn.execute("PRAGMA synchronous=NORMAL;")
+  return conn
+
+
 def query_series(series: str, minutes: int) -> List[Dict[str, object]]:
     cfg = SERIES_MAP.get(series)
     if not cfg:
@@ -128,19 +137,25 @@ def query_series(series: str, minutes: int) -> List[Dict[str, object]]:
     )
 
     points: List[Dict[str, object]] = []
-    with sqlite3.connect(DB_PATH) as conn:
+    try:
+      with open_db() as conn:
         rows = conn.execute(sql, (cutoff,)).fetchall()
-        for ts_raw, value in rows:
-            try:
-                fv = float(value)
-            except (TypeError, ValueError):
-                continue
-            if math.isnan(fv):
-                continue
-            ts_text = str(ts_raw)
-            if ts_text.endswith("+00:00"):
-                ts_text = ts_text[:-6] + "Z"
-            points.append({"t": ts_text, "v": fv})
+    except sqlite3.OperationalError as exc:
+      if "locked" in str(exc).lower():
+        return []
+      raise
+
+    for ts_raw, value in rows:
+      try:
+        fv = float(value)
+      except (TypeError, ValueError):
+        continue
+      if math.isnan(fv):
+        continue
+      ts_text = str(ts_raw)
+      if ts_text.endswith("+00:00"):
+        ts_text = ts_text[:-6] + "Z"
+      points.append({"t": ts_text, "v": fv})
 
     return downsample_points(points, max_points=300)
 
@@ -218,9 +233,14 @@ def api_latest(table: str, limit: int = Query(20, ge=1, le=200)) -> Dict[str, ob
     if not DB_PATH.exists():
         raise HTTPException(status_code=404, detail="db missing")
 
-    with sqlite3.connect(DB_PATH) as conn:
+    try:
+      with open_db() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    except sqlite3.OperationalError as exc:
+      if "locked" in str(exc).lower():
+        return {"table": table, "limit": limit, "rows": []}
+      raise
 
     return {
         "table": table,
@@ -239,26 +259,46 @@ def api_diag() -> PlainTextResponse:
 @APP.get("/api/ts/{series}")
 def api_ts(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Dict[str, object]:
     points = query_series(series, minutes)
-    return {"series": series, "minutes": minutes, "points": points}
+    vals = [p["v"] for p in points if isinstance(p.get("v"), (int, float))]
+    stats = None
+    if vals:
+        stats = {
+            "last": float(vals[-1]),
+            "min": float(min(vals)),
+            "max": float(max(vals)),
+            "count": int(len(vals)),
+        }
+    return {"series": series, "minutes": minutes, "points": points, "stats": stats}
 
 
 @APP.get("/chart/{series}.png")
 def chart_png(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Response:
     if series not in SERIES_MAP:
-      raise HTTPException(status_code=404, detail="series not allowed")
+        raise HTTPException(status_code=404, detail="series not allowed")
+
+    if minutes <= 10:
+        minutes = 5
+    elif minutes <= 90:
+        minutes = 60
+    else:
+        minutes = 240
 
     cache_key = f"{series}:{minutes}"
     now = time.time()
     with chart_cache_lock:
-      cached = chart_cache.get(cache_key)
-      if cached and (now - cached[0]) < CHART_CACHE_TTL_SECS:
-        return Response(content=cached[1], media_type="image/png", headers={"Cache-Control": "no-store"})
+        cached = chart_cache.get(cache_key)
+        if cached and (now - cached[0]) < CHART_CACHE_TTL_SECS:
+            return Response(content=cached[1], media_type="image/png", headers={"Cache-Control": "no-store"})
 
     points = query_series(series, minutes)
     payload = render_sparkline_png(series, minutes, points)
 
     with chart_cache_lock:
-      chart_cache[cache_key] = (now, payload)
+        chart_cache[cache_key] = (now, payload)
+        if len(chart_cache) > MAX_CACHE_KEYS:
+            oldest = sorted(chart_cache.items(), key=lambda kv: kv[1][0])[: max(1, len(chart_cache) - MAX_CACHE_KEYS)]
+            for k, _ in oldest:
+                chart_cache.pop(k, None)
 
     return Response(content=payload, media_type="image/png", headers={"Cache-Control": "no-store"})
 
@@ -283,6 +323,18 @@ HTML_PAGE = """
     table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
     th, td { border-bottom: 1px solid #2a3440; padding: 4px 6px; text-align: left; }
     th { color: #9fb3c8; }
+    .table-wrap { overflow-x: auto; border-radius: 8px; }
+    .table-wrap table { min-width: 900px; table-layout: fixed; }
+    th, td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .col-id { width: 72px; }
+    .col-ts_utc, .col-ts_local { width: 170px; }
+    .col-source { width: 90px; }
+    .col-seq { width: 80px; }
+    .col-tick_ms { width: 110px; }
+    .col-uptime_s { width: 110px; }
+    .col-boot { width: 70px; }
+    .col-reset_reason { width: 140px; }
     .table-card { margin-bottom: 12px; }
     button { background: #1f5f99; color: white; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
     pre { white-space: pre-wrap; font-size: 12px; background: #111820; border: 1px solid #273342; border-radius: 8px; padding: 10px; }
@@ -294,6 +346,12 @@ HTML_PAGE = """
     .trend-card { min-width: 220px; flex: 1 1 260px; }
     .trend-value { font-size: 18px; font-weight: 700; margin: 4px 0 6px 0; }
     .trend-img { width: 100%; border-radius: 8px; border: 1px solid #26313d; display: block; }
+    .trend-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .trend-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+    .badge { font-size: 11px; color: #9fb3c8; border: 1px solid #26313d; padding: 2px 6px; border-radius: 999px; background: #111820; }
+    .seg { display: inline-flex; border: 1px solid #26313d; border-radius: 999px; overflow: hidden; }
+    .seg button { background: #111820; color: #9fb3c8; border: 0; padding: 6px 10px; cursor: pointer; }
+    .seg button.active { background: #1f5f99; color: #fff; }
   </style>
 </head>
 <body>
@@ -308,6 +366,18 @@ HTML_PAGE = """
   </div>
 
   <div class=\"row\" id=\"freshness\"></div>
+
+  <div class=\"row\">
+    <div class=\"card\">
+      <b>Trend window</b>
+      <div class=\"muted small\">Affects sparklines and badges</div>
+      <div style=\"margin-top:8px\" class=\"seg\">
+        <button id=\"win-5\" onclick=\"setTrendMinutes(5)\">5m</button>
+        <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
+        <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
+      </div>
+    </div>
+  </div>
 
   <div class=\"row\" id=\"trends\"></div>
 
@@ -330,6 +400,31 @@ let statusController = null;
 let tableController = null;
 let trendController = null;
 let lastUpdatedMs = 0;
+let trendMinutes = 60;
+
+function setTrendMinutes(m) {
+  trendMinutes = m;
+  document.getElementById('win-5').classList.toggle('active', m === 5);
+  document.getElementById('win-60').classList.toggle('active', m === 60);
+  document.getElementById('win-240').classList.toggle('active', m === 240);
+  pollTrends();
+}
+
+function renderBadges(seriesKey, stats, decimals, unit) {
+  const el = document.getElementById('trend-badges-' + seriesKey);
+  if (!el) return;
+  if (!stats) {
+    el.innerHTML = '<span class="badge">no data</span>';
+    return;
+  }
+  const last = formatMetric(stats.last, decimals);
+  const minv = formatMetric(stats.min, decimals);
+  const maxv = formatMetric(stats.max, decimals);
+  el.innerHTML =
+    '<span class="badge">min ' + minv + unit + '</span>' +
+    '<span class="badge">max ' + maxv + unit + '</span>' +
+    '<span class="badge">last ' + last + unit + '</span>';
+}
 
 function clsFor(s) {
   if (s === 'ok') return 'ok';
@@ -453,7 +548,10 @@ function buildTableCard(tableName) {
   table.appendChild(thead);
   table.appendChild(tbody);
   table.style.display = 'none';
-  card.appendChild(table);
+  const wrap = document.createElement('div');
+  wrap.className = 'table-wrap';
+  wrap.appendChild(table);
+  card.appendChild(wrap);
 
   return {
     card,
@@ -485,7 +583,10 @@ function initTrends() {
     const card = document.createElement('div');
     card.className = 'card trend-card';
     card.innerHTML =
-      '<div><b>' + trend.title + '</b></div>' +
+      '<div class="trend-top">' +
+        '<div><b>' + trend.title + '</b></div>' +
+        '<div id="trend-badges-' + trend.key + '" class="trend-badges"></div>' +
+      '</div>' +
       '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
       '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />';
     root.appendChild(card);
@@ -500,6 +601,7 @@ function updateTableHead(state, keys) {
   state.headRow.innerHTML = '';
   for (const k of keys) {
     const th = document.createElement('th');
+    th.className = 'col-' + k;
     th.textContent = k;
     state.headRow.appendChild(th);
   }
@@ -511,6 +613,7 @@ function ensureRowCell(tr, key) {
   }
   if (!tr._cells[key]) {
     const td = document.createElement('td');
+    td.className = 'col-' + key;
     tr._cells[key] = td;
     tr.appendChild(td);
   }
@@ -664,7 +767,7 @@ async function pollTrends() {
   trendController = controller;
   try {
     const results = await Promise.all(
-      trendSeries.map((trend) => fetchJson('/api/ts/' + trend.key + '?minutes=60', controller).then((data) => [trend, data]))
+      trendSeries.map((trend) => fetchJson('/api/ts/' + trend.key + '?minutes=' + trendMinutes, controller).then((data) => [trend, data]))
     );
 
     const cacheBust = Date.now();
@@ -673,9 +776,10 @@ async function pollTrends() {
       const latest = points.length ? points[points.length - 1].v : null;
       const valueEl = document.getElementById('trend-value-' + trend.key);
       valueEl.textContent = latest === null ? 'n/a' : (formatMetric(latest, trend.decimals) + ' ' + trend.unit);
+      renderBadges(trend.key, data.stats || null, trend.decimals, ' ' + trend.unit);
 
       const imgEl = document.getElementById('trend-img-' + trend.key);
-      imgEl.src = '/chart/' + trend.key + '.png?minutes=60&ts=' + cacheBust;
+      imgEl.src = '/chart/' + trend.key + '.png?minutes=' + trendMinutes + '&ts=' + cacheBust;
     }
     setLastUpdatedNow();
   } catch (err) {
@@ -702,10 +806,10 @@ async function downloadDiag() {
 
 (async () => {
   initTrends();
+  setTrendMinutes(60);
   initTables();
   await pollStatus();
   await pollTables();
-  await pollTrends();
   setInterval(pollStatus, 1000);
   setInterval(pollTables, 3000);
   setInterval(pollTrends, 7000);
