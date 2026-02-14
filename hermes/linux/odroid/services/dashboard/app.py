@@ -404,7 +404,13 @@ HTML_PAGE = """
   <h3>Raw health</h3>
   <pre id=\"rawHealth\">loading...</pre>
 
-<script>
+<script src="/app.js"></script>
+</body>
+</html>
+"""
+
+
+JS_BUNDLE = r"""
 const tables = ['hb','env','air','light','mic_noise','esp_net'];
 const tableLabels = {
   hb: 'Heartbeat',
@@ -970,10 +976,12 @@ async function downloadDiag() {
   setInterval(refreshRelativeTimes, 1000);
   setInterval(refreshLastUpdatedLabel, 1000);
 })();
-</script>
-</body>
-</html>
 """
+
+
+@APP.get("/app.js")
+def app_js() -> Response:
+    return Response(JS_BUNDLE, media_type="application/javascript")
 
 
 @APP.get("/", response_class=HTMLResponse)
