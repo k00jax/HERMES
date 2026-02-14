@@ -315,16 +315,29 @@ HTML_PAGE = """
     h1 { margin: 0 0 4px 0; }
     .row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
     .card { background: #151c24; border: 1px solid #26313d; border-radius: 10px; padding: 10px 12px; }
+    .tables-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(320px, 1fr));
+      gap: 12px;
+      align-items: start;
+      grid-auto-rows: min-content;
+    }
+    @media (max-width: 1100px) {
+      .tables-grid { grid-template-columns: repeat(2, minmax(280px, 1fr)); }
+    }
+    @media (max-width: 700px) {
+      .tables-grid { grid-template-columns: 1fr; }
+    }
     .status { min-width: 240px; }
     .tile { width: 110px; text-align: center; }
     .ok { background: #173a1f; border-color: #2f7d40; }
     .stale { background: #3e3317; border-color: #92762f; }
     .dead, .unknown { background: #3d1a1a; border-color: #8c2f2f; }
-    table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+    table { width: auto; border-collapse: collapse; margin-top: 6px; font-size: 11px; }
     th, td { border-bottom: 1px solid #2a3440; padding: 4px 6px; text-align: left; }
     th { color: #9fb3c8; }
     .table-wrap { overflow-x: auto; border-radius: 8px; }
-    .table-wrap table { min-width: 900px; table-layout: fixed; }
+    .table-wrap table { min-width: 820px; table-layout: fixed; }
     th, td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     .col-id { width: 72px; }
@@ -335,7 +348,7 @@ HTML_PAGE = """
     .col-uptime_s { width: 110px; }
     .col-boot { width: 70px; }
     .col-reset_reason { width: 140px; }
-    .table-card { margin-bottom: 12px; }
+    .table-card { margin-bottom: 0; min-width: 320px; }
     button { background: #1f5f99; color: white; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
     pre { white-space: pre-wrap; font-size: 12px; background: #111820; border: 1px solid #273342; border-radius: 8px; padding: 10px; }
     .muted { color: #8ea1b3; }
@@ -381,13 +394,21 @@ HTML_PAGE = """
 
   <div class=\"row\" id=\"trends\"></div>
 
-  <div id=\"tables\"></div>
+  <div id=\"tables\" class=\"tables-grid\"></div>
 
   <h3>Raw health</h3>
   <pre id=\"rawHealth\">loading...</pre>
 
 <script>
 const tables = ['hb','env','air','light','mic_noise','esp_net'];
+const tableLabels = {
+  hb: 'Heartbeat',
+  env: 'Environment',
+  air: 'Air Quality',
+  light: 'Light',
+  mic_noise: 'Microphone',
+  esp_net: 'Wi-Fi',
+};
 const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET'];
 const trendSeries = [
   { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0 },
@@ -527,13 +548,115 @@ function flashCell(cell) {
   setTimeout(() => cell.classList.remove('changed'), 500);
 }
 
+function stringifyTsvValue(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  let text;
+  if (typeof value === 'object') {
+    try {
+      text = JSON.stringify(value);
+    } catch (_err) {
+      text = String(value);
+    }
+  } else {
+    text = String(value);
+  }
+  return text.replaceAll('\t', ' ').replaceAll('\n', ' ').replaceAll('\r', ' ');
+}
+
+async function copyTableRows(tableName) {
+  const state = tableState[tableName];
+  if (!state) return;
+
+  const setCopyBtnText = (text, ms) => {
+    if (!state.copyBtn) return;
+    state.copyBtn.textContent = text;
+    setTimeout(() => {
+      if (state.copyBtn) {
+        state.copyBtn.textContent = 'Copy';
+      }
+    }, ms);
+  };
+
+  const entries = Array.from(state.rowData.entries());
+  entries.sort((a, b) => Number(b[0]) - Number(a[0]));
+  const newestEntries = entries.slice(0, 20);
+  const rows = newestEntries.map(([, row]) => row);
+
+  const keys = (state && state.keys && state.keys.length)
+    ? state.keys
+    : (rows.length ? Object.keys(rows[0]) : []);
+  if (!keys.length) {
+    setCopyBtnText('Copy failed', 1500);
+    return;
+  }
+
+  const lines = [keys.join('\t')];
+  for (const row of rows) {
+    lines.push(keys.map((key) => stringifyTsvValue(row[key])).join('\t'));
+  }
+  const tsv = lines.join('\n');
+
+  let copied = false;
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(tsv);
+      copied = true;
+    }
+  } catch (_err) {
+  }
+
+  if (!copied) {
+    const area = document.createElement('textarea');
+    area.value = tsv;
+    area.setAttribute('readonly', 'readonly');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    area.style.pointerEvents = 'none';
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    copied = document.execCommand('copy');
+    area.remove();
+  }
+
+  if (copied) {
+    setCopyBtnText('Copied', 1000);
+  } else {
+    setCopyBtnText('Copy failed', 1500);
+  }
+}
+
 function buildTableCard(tableName) {
   const card = document.createElement('div');
   card.className = 'card table-card';
 
+  const header = document.createElement('div');
+  header.style.display = 'flex';
+  header.style.alignItems = 'center';
+  header.style.justifyContent = 'space-between';
+  header.style.gap = '10px';
+
+  const titleWrap = document.createElement('div');
+  const label = (tableLabels[tableName] || tableName);
   const title = document.createElement('b');
-  title.textContent = tableName + ' (last 0)';
-  card.appendChild(title);
+  title.textContent = label + ' (last 0)';
+  const sub = document.createElement('span');
+  sub.className = 'muted small';
+  sub.textContent = '(' + tableName + ')';
+  titleWrap.appendChild(title);
+  titleWrap.appendChild(document.createTextNode(' '));
+  titleWrap.appendChild(sub);
+
+  const copyBtn = document.createElement('button');
+  copyBtn.textContent = 'Copy';
+  copyBtn.style.padding = '6px 10px';
+  copyBtn.onclick = () => copyTableRows(tableName);
+
+  header.appendChild(titleWrap);
+  header.appendChild(copyBtn);
+  card.appendChild(header);
 
   const noRows = document.createElement('div');
   noRows.textContent = 'no rows';
@@ -560,6 +683,7 @@ function buildTableCard(tableName) {
     table,
     headRow,
     tbody,
+    copyBtn,
     keys: [],
     rowEls: new Map(),
     rowData: new Map(),
@@ -635,7 +759,8 @@ function updateRow(tr, oldRow, newRow, keys) {
 
 function applyTableRows(tableName, rows) {
   const state = tableState[tableName];
-  state.title.textContent = tableName + ' (last ' + rows.length + ')';
+  const label = (tableLabels[tableName] || tableName);
+  state.title.textContent = label + ' (last ' + rows.length + ')';
   if (!rows.length) {
     state.maxId = null;
     state.rowEls.clear();
