@@ -6,6 +6,7 @@ HEALTH_CMD=(python3 /home/odroid/hermes-src/hermes/linux/logger/client.py health
 DB_PATH="/home/odroid/hermes-data/db/hermes.sqlite3"
 CLIENT_PATH="/home/odroid/hermes-src/hermes/linux/logger/client.py"
 STATE_FILE="/home/odroid/hermes-data/watchdog_led_state"
+LOCK_FILE="/tmp/hermes-nrf.lock"
 
 current_led_state="UNKNOWN"
 if [[ -f "$STATE_FILE" ]]; then
@@ -37,14 +38,19 @@ send_led_alert() {
     return
   fi
 
-  if printf '%s\n' "$frame" | timeout 2s tee /dev/hermes-nrf >/dev/null 2>&1; then
+  if ! timeout 2s flock -n "$LOCK_FILE" -c true >/dev/null 2>&1; then
+    echo "[watchdog] send_fail=lock_busy"
+    return
+  fi
+
+  if timeout 2s flock -w 1 "$LOCK_FILE" sh -c 'printf "%s\n" "$1" > /dev/hermes-nrf' _ "$frame"; then
     echo "[watchdog] sent=${frame}"
     current_led_state="$state"
     persist_led_state "$state"
     return
   fi
 
-  echo "[watchdog] send_fail=${frame}"
+  echo "[watchdog] send_fail=${frame},reason=write_fail"
 }
 
 health_output=""

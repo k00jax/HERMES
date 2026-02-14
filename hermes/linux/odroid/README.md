@@ -46,6 +46,31 @@ systemctl status hermes-logger.service
 sudo journalctl -u hermes-logger.service -n 50
 ```
 
+## Dashboard API + UI (systemd)
+
+Install and enable the local dashboard service:
+
+```bash
+python3 -m pip install --user fastapi
+sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-dashboard.service
+```
+
+Check status and API:
+
+```bash
+systemctl status hermes-dashboard.service
+curl -sS http://127.0.0.1:8000/api/status
+curl -sS http://127.0.0.1:8000/api/health
+```
+
+Open UI:
+
+```bash
+http://<odroid-ip>:8000/
+```
+
 ## ESP32 Wi-Fi Credentials (Odroid)
 
 Create local Wi-Fi credentials for ESP32 station mode:

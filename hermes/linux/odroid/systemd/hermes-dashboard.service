@@ -1,0 +1,16 @@
+[Unit]
+Description=HERMES Dashboard API/UI
+After=network.target hermes-logger.service
+
+[Service]
+Type=simple
+User=odroid
+Environment=HOME=/home/odroid
+Environment=HERMES_DASHBOARD_CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
+WorkingDirectory=/home/odroid/hermes-src/hermes
+ExecStart=/usr/bin/python3 -m uvicorn app:APP --host 0.0.0.0 --port 8000 --app-dir /home/odroid/hermes-src/hermes/linux/odroid/services/dashboard
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

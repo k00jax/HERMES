@@ -8,6 +8,7 @@ import queue
 import socket
 import re
 import fcntl
+import sys
 from typing import Optional
 import serial
 from serial.tools import list_ports
@@ -49,6 +50,8 @@ EXPECTED_PREFIXES = {
 
 LOCK_PATH = "/tmp/hermesd.lock"
 lock_handle = None
+NRF_LOCK_PATH = "/tmp/hermes-nrf.lock"
+nrf_lock_handle = None
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -859,6 +862,33 @@ def release_singleton_lock():
         pass
     lock_handle = None
 
+def acquire_nrf_lock():
+    global nrf_lock_handle
+    nrf_lock_handle = open(NRF_LOCK_PATH, "w")
+    try:
+        fcntl.flock(nrf_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"[hermesd] nrf serial lock busy (lock: {NRF_LOCK_PATH})", flush=True)
+        sys.exit(2)
+    nrf_lock_handle.seek(0)
+    nrf_lock_handle.truncate(0)
+    nrf_lock_handle.write(f"{os.getpid()}\n")
+    nrf_lock_handle.flush()
+
+def release_nrf_lock():
+    global nrf_lock_handle
+    if not nrf_lock_handle:
+        return
+    try:
+        fcntl.flock(nrf_lock_handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        nrf_lock_handle.close()
+    except Exception:
+        pass
+    nrf_lock_handle = None
+
 def handle_line(conn: sqlite3.Connection, line: str):
     dt = utc_now()
     ts = dt.isoformat()
@@ -1098,6 +1128,7 @@ def socket_worker(shutdown: threading.Event, out_q: queue.Queue):
 
 def main():
     acquire_singleton_lock()
+    acquire_nrf_lock()
     try:
         log_info(f"[hermesd] starting. port={PREFERRED_PORT} baud={BAUD} db={DB_PATH}")
         shutdown = threading.Event()
@@ -1127,6 +1158,7 @@ def main():
         socket_thread.join(timeout=2)
         log_info("[hermesd] stopped")
     finally:
+        release_nrf_lock()
         release_singleton_lock()
 
 if __name__ == "__main__":
