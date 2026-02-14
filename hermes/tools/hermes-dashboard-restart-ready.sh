@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SERVICE="hermes-dashboard.service"
-URL="${HERMES_DASHBOARD_HEALTH_URL:-http://100.93.105.81:8000/healthz}"
+URL="${HERMES_DASHBOARD_HEALTH_URL:-http://127.0.0.1:8000/healthz}"
 TRIES=30
 SLEEP_SECS=0.3
 

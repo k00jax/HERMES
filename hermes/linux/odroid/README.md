@@ -52,10 +52,15 @@ Install and enable the local dashboard service:
 
 ```bash
 python3 -m pip install --user fastapi
+sudo rm -f /etc/systemd/system/hermes-dashboard.service.d/override.conf
 sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-dashboard.service
 ```
+
+Notes:
+- Remove any old `override.conf` first; stale `ExecStart` overrides can drop `--app-dir` and cause `Error loading ASGI app. Could not import module "app"`.
+- The canonical unit file lives at `linux/odroid/systemd/hermes-dashboard.service`.
 
 Check status and API:
 
@@ -63,6 +68,7 @@ Check status and API:
 systemctl status hermes-dashboard.service
 curl -sS http://127.0.0.1:8000/api/status
 curl -sS http://127.0.0.1:8000/api/health
+curl -sS http://100.93.105.81:8000/healthz
 ```
 
 Open UI:
