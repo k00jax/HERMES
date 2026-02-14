@@ -872,7 +872,7 @@ function updateRow(tr, oldRow, newRow, keys) {
   }
 }
 
-function applyTableRows(tableName, rows) {
+function applyTableRows(tableName, rows, force = false) {
   const state = tableState[tableName];
   const label = (tableLabels[tableName] || tableName);
   state.title.textContent = label + ' (last ' + rows.length + ')';
@@ -888,7 +888,7 @@ function applyTableRows(tableName, rows) {
   }
 
   const newestId = rows[0].id ?? null;
-  if (state.maxId !== null && newestId === state.maxId) {
+  if (!force && state.maxId !== null && newestId === state.maxId) {
     return;
   }
 
@@ -939,7 +939,7 @@ async function refreshOneTable(tableName) {
   }
   try {
     const data = await fetchOneTable(tableName);
-    applyTableRows(tableName, data.rows || []);
+    applyTableRows(tableName, data.rows || [], true);
     refreshRelativeTimes();
     setLastUpdatedNow();
   } catch (err) {
