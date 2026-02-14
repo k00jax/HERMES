@@ -1,0 +1,10 @@
+[Unit]
+Description=HERMES dashboard health watchdog
+After=network.target hermes-dashboard.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/odroid/hermes-src/hermes/linux/odroid/watchdog/hermes-dashboard-watchdog.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=8

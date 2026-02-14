@@ -370,6 +370,11 @@ HTML_PAGE = """
 <body>
   <h1>HERMES Dashboard</h1>
   <div id="lastUpdated" class="muted small">Last updated: never</div>
+  <div id="dbg" class="muted small" style="margin-top:6px;">
+    dbg: <span id="dbg-js">booting</span> |
+    origin: <span id="dbg-origin">?</span> |
+    last fetch: <span id="dbg-fetch">none</span>
+  </div>
   <div class=\"row\">
     <div class=\"card status\"><b>Daemon</b><div id=\"daemon\">loading...</div></div>
     <div class=\"card status\"><b>Port</b><div id=\"port\">-</div></div>
@@ -422,6 +427,20 @@ let tableController = null;
 let trendController = null;
 let lastUpdatedMs = 0;
 let trendMinutes = 60;
+
+function dbgSet(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = String(text);
+}
+
+dbgSet('dbg-js', 'alive');
+dbgSet('dbg-origin', window.location.origin);
+window.addEventListener('error', (e) => {
+  dbgSet('dbg-fetch', 'JS error: ' + (e.message || 'unknown'));
+});
+window.addEventListener('unhandledrejection', (e) => {
+  dbgSet('dbg-fetch', 'Promise reject: ' + (e.reason ? (e.reason.message || e.reason) : 'unknown'));
+});
 
 function setTrendMinutes(m) {
   trendMinutes = m;
@@ -810,11 +829,21 @@ function applyTableRows(tableName, rows) {
 }
 
 async function fetchJson(url, controller) {
-  const resp = await fetch(url, { signal: controller.signal });
-  if (!resp.ok) {
-    throw new Error('fetch failed: ' + resp.status + ' ' + url);
+  try {
+    const resp = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+    if (!resp.ok) {
+      const msg = 'HTTP ' + resp.status + ' ' + url;
+      dbgSet('dbg-fetch', msg);
+      throw new Error(msg);
+    }
+    dbgSet('dbg-fetch', 'OK ' + url);
+    return await resp.json();
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      dbgSet('dbg-fetch', 'ERR ' + url + ' :: ' + (err && err.message ? err.message : err));
+    }
+    throw err;
   }
-  return await resp.json();
 }
 
 async function pollStatus() {

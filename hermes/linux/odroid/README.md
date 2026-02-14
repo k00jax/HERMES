@@ -71,6 +71,28 @@ Open UI:
 http://<odroid-ip>:8000/
 ```
 
+## Dashboard Health Watchdog (systemd timer)
+
+Checks `/healthz` every 10 seconds, requires 3 consecutive failures before restart,
+and enforces a 120-second restart cooldown to avoid flapping.
+
+Install and enable:
+
+```bash
+sudo chmod +x /home/odroid/hermes-src/hermes/linux/odroid/watchdog/hermes-dashboard-watchdog.sh
+sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-dashboard-watchdog.service /etc/systemd/system/
+sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-dashboard-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-dashboard-watchdog.timer
+```
+
+Check status:
+
+```bash
+systemctl status hermes-dashboard-watchdog.timer
+journalctl -u hermes-dashboard-watchdog.service -n 50
+```
+
 ## ESP32 Wi-Fi Credentials (Odroid)
 
 Create local Wi-Fi credentials for ESP32 station mode:
