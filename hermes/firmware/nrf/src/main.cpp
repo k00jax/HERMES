@@ -40,6 +40,8 @@ static const uint32_t FOCUS_MODE_DURATION_MS = 5 * 60 * 1000;
 static const uint32_t LED_FAST_PERIOD_MS = 200;
 static const uint32_t LED_SLOW_PERIOD_MS = 1000;
 static const uint32_t LED_DOUBLE_PERIOD_MS = 2000;
+static const uint32_t ALERT_FLASH_STEP_MS = 100;
+static const uint32_t ALERT_FLASH_CYCLE_MS = 3500;
 static const float MIC_SPIKE_DELTA = 0.10f;
 static const float MIC_SUSTAIN_DELTA = 0.05f;
 static const uint32_t MIC_SUSTAIN_MS = 3000;
@@ -170,6 +172,7 @@ static bool focusMode = false;
 static uint32_t focusModeUntilMs = 0;
 static bool debugMode = false;
 static bool usbExportEnabled = false;
+static bool staleAlertLedEnabled = false;
 
 static char lastSensLine[320] = "SENS,<none>";
 static uint32_t linesOk = 0;
@@ -804,6 +807,31 @@ static void handleLine(char *line, uint32_t now) {
       return;
     }
     emitAck("TIME");
+    return;
+  }
+
+  if (strcasecmp(token, "ALERT") == 0) {
+    char *alertToken = strtok_r(nullptr, ",", &savePtr);
+    char *stateToken = strtok_r(nullptr, ",", &savePtr);
+    if (!alertToken || !stateToken) {
+      emitNack("ALERT", "missing_arg");
+      return;
+    }
+    if (strcasecmp(alertToken, "STALE") != 0) {
+      emitNack("ALERT", "unknown_arg");
+      return;
+    }
+    if (strcasecmp(stateToken, "ON") == 0) {
+      staleAlertLedEnabled = true;
+      emitAck("ALERT");
+      return;
+    }
+    if (strcasecmp(stateToken, "OFF") == 0) {
+      staleAlertLedEnabled = false;
+      emitAck("ALERT");
+      return;
+    }
+    emitNack("ALERT", "unknown_arg");
     return;
   }
 
@@ -2586,8 +2614,16 @@ static void updateLed(uint32_t now) {
     ledOn = true;
   }
 
+  bool debugLedOn = usbExportEnabled;
+  if (staleAlertLedEnabled) {
+    const uint32_t phase = now % ALERT_FLASH_CYCLE_MS;
+    debugLedOn = (phase < ALERT_FLASH_STEP_MS)
+        || (phase >= (2 * ALERT_FLASH_STEP_MS) && phase < (3 * ALERT_FLASH_STEP_MS))
+        || (phase >= (4 * ALERT_FLASH_STEP_MS) && phase < (5 * ALERT_FLASH_STEP_MS));
+  }
+
   digitalWrite(STATUS_LED_PIN, ledOn ? HIGH : LOW);
-  digitalWrite(DEBUG_LED_PIN, usbExportEnabled ? HIGH : LOW);
+  digitalWrite(DEBUG_LED_PIN, debugLedOn ? HIGH : LOW);
 }
 
 static void updateDisplays(uint32_t now) {

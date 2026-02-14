@@ -36,6 +36,8 @@ Supported commands:
 - `OLED,STACK,DEBUG` -> toggles to debug stack, `ACK,kind=OLED,op=STACK`
 - `OLED,PAGE,NEXT` -> next page, `ACK,kind=OLED,op=PAGE`
 - `OLED,PAGE,PREV` -> previous page, `ACK,kind=OLED,op=PAGE`
+- `OLED,ALERT,STALE,ON` -> enables D3 stale alert pattern (3 quick flashes, 3s off), `ACK,kind=OLED,op=ALERT`
+- `OLED,ALERT,STALE,OFF` -> disables stale alert pattern, `ACK,kind=OLED,op=ALERT`
 
 Errors:
 

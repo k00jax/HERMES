@@ -1,0 +1,12 @@
+[Unit]
+Description=HERMES stale stream watchdog
+
+[Service]
+Type=oneshot
+User=odroid
+Environment=HOME=/home/odroid
+WorkingDirectory=/home/odroid/hermes-src/hermes
+ExecStart=/home/odroid/hermes-src/hermes/linux/odroid/watchdog/hermes-watchdog.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=5
