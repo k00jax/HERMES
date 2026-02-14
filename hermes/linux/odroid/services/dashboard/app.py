@@ -174,16 +174,55 @@ def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, objec
       ys = [float(item["v"]) for item in points if item.get("v") is not None]
 
       if ys:
-        y_mid = sum(ys) / len(ys)
-        max_dev = max(abs(v - y_mid) for v in ys)
+        if cfg["stepped"]:
+          lo = min(ys) - 0.5
+          hi = max(ys) + 0.5
+          if lo == hi:
+            lo -= 0.5
+            hi += 0.5
+          ax.set_ylim(lo, hi)
+        else:
+          min_span_total_by_series = {
+            "env_temp": 0.6,
+            "env_hum": 4.0,
+            "air_eco2": 60.0,
+            "air_tvoc": 40.0,
+            "esp_rssi": 10.0,
+          }
+          robust_q_by_series = {
+            "esp_rssi": 0.90,
+          }
 
-        if max_dev == 0:
-          max_dev = max(abs(y_mid) * 0.02, 0.1)
+          center = sum(ys) / len(ys)
+          abs_devs = sorted(abs(v - center) for v in ys)
+          q = float(robust_q_by_series.get(series, 0.95))
+          q = min(max(q, 0.0), 1.0)
+          q_index = int((len(abs_devs) - 1) * q)
+          q_index = min(max(q_index, 0), len(abs_devs) - 1)
+          robust_dev = abs_devs[q_index]
 
-        pad = max_dev * 0.08
-        half_span = max_dev + pad
+          pad = 0.10
+          half_span = robust_dev * (1.0 + pad)
+          min_span_total = float(min_span_total_by_series.get(series, 0.2))
+          half_span = max(half_span, min_span_total / 2.0)
+          half_span = max(half_span, 1e-6)
 
-        ax.set_ylim(y_mid - half_span, y_mid + half_span)
+          lo = center - half_span
+          hi = center + half_span
+          y_min = min(ys)
+          y_max = max(ys)
+
+          if y_min < lo or y_max > hi:
+            full_range = max(1e-9, y_max - y_min)
+            pad2 = full_range * 0.10
+            lo = min(lo, y_min - pad2)
+            hi = max(hi, y_max + pad2)
+
+          if lo == hi:
+            lo -= 0.5
+            hi += 0.5
+
+          ax.set_ylim(lo, hi)
 
       ax.plot(
         x,
@@ -444,6 +483,7 @@ const trendSeries = [
   { key: 'esp_rssi', title: 'RSSI', unit: 'dBm', decimals: 0 },
 ];
 const tableState = {};
+const tableRowLimit = {};
 let statusController = null;
 let tableController = null;
 let trendController = null;
@@ -620,10 +660,14 @@ async function copyTableRows(tableName) {
     }, ms);
   };
 
-  const entries = Array.from(state.rowData.entries());
-  entries.sort((a, b) => Number(b[0]) - Number(a[0]));
-  const newestEntries = entries.slice(0, 20);
-  const rows = newestEntries.map(([, row]) => row);
+  const rows = [];
+  const displayKeys = Array.isArray(state.displayKeys) ? state.displayKeys : [];
+  for (const key of displayKeys) {
+    const row = state.rowData.get(key);
+    if (row) {
+      rows.push(row);
+    }
+  }
 
   const keys = (state && state.keys && state.keys.length)
     ? state.keys
@@ -690,13 +734,41 @@ function buildTableCard(tableName) {
   titleWrap.appendChild(document.createTextNode(' '));
   titleWrap.appendChild(sub);
 
+  const actions = document.createElement('div');
+  actions.style.display = 'flex';
+  actions.style.alignItems = 'center';
+  actions.style.gap = '8px';
+
+  const rowsLabel = document.createElement('span');
+  rowsLabel.className = 'muted small';
+  rowsLabel.textContent = 'Rows';
+
+  const rowsSelect = document.createElement('select');
+  rowsSelect.style.padding = '5px 8px';
+  [20, 50, 200].forEach((n) => {
+    const opt = document.createElement('option');
+    opt.value = String(n);
+    opt.textContent = String(n);
+    rowsSelect.appendChild(opt);
+  });
+  rowsSelect.value = String(tableRowLimit[tableName] || 20);
+
   const copyBtn = document.createElement('button');
   copyBtn.textContent = 'Copy';
   copyBtn.style.padding = '6px 10px';
   copyBtn.onclick = () => copyTableRows(tableName);
 
+  rowsSelect.onchange = () => {
+    const parsed = Number.parseInt(rowsSelect.value, 10);
+    tableRowLimit[tableName] = [20, 50, 200].includes(parsed) ? parsed : 20;
+    refreshOneTable(tableName);
+  };
+
   header.appendChild(titleWrap);
-  header.appendChild(copyBtn);
+  actions.appendChild(rowsLabel);
+  actions.appendChild(rowsSelect);
+  actions.appendChild(copyBtn);
+  header.appendChild(actions);
   card.appendChild(header);
 
   const noRows = document.createElement('div');
@@ -728,6 +800,7 @@ function buildTableCard(tableName) {
     keys: [],
     rowEls: new Map(),
     rowData: new Map(),
+    displayKeys: [],
     maxId: null,
   };
 }
@@ -735,6 +808,7 @@ function buildTableCard(tableName) {
 function initTables() {
   const root = document.getElementById('tables');
   for (const t of tables) {
+    tableRowLimit[t] = 20;
     const state = buildTableCard(t);
     tableState[t] = state;
     root.appendChild(state.card);
@@ -804,6 +878,7 @@ function applyTableRows(tableName, rows) {
   state.title.textContent = label + ' (last ' + rows.length + ')';
   if (!rows.length) {
     state.maxId = null;
+    state.displayKeys = [];
     state.rowEls.clear();
     state.rowData.clear();
     state.tbody.innerHTML = '';
@@ -823,8 +898,10 @@ function applyTableRows(tableName, rows) {
   state.noRows.style.display = 'none';
 
   const seen = new Set();
+  const displayKeys = [];
   for (const row of rows) {
     const id = row.id;
+    displayKeys.push(id);
     seen.add(id);
     let tr = state.rowEls.get(id);
     if (!tr) {
@@ -847,7 +924,29 @@ function applyTableRows(tableName, rows) {
     state.rowData.delete(id);
   }
 
+  state.displayKeys = displayKeys;
   state.maxId = newestId;
+}
+
+function fetchOneTable(tableName, controller = null) {
+  const limit = tableRowLimit[tableName] || 20;
+  return fetchJson('/api/latest/' + tableName + '?limit=' + limit, controller || new AbortController());
+}
+
+async function refreshOneTable(tableName) {
+  if (document.visibilityState === 'hidden') {
+    return;
+  }
+  try {
+    const data = await fetchOneTable(tableName);
+    applyTableRows(tableName, data.rows || []);
+    refreshRelativeTimes();
+    setLastUpdatedNow();
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      console.error(err);
+    }
+  }
 }
 
 async function fetchJson(url, controller) {
@@ -913,7 +1012,7 @@ async function pollTables() {
   tableController = controller;
   try {
     const results = await Promise.all(
-      tables.map((t) => fetchJson('/api/latest/' + t + '?limit=20', controller).then((data) => [t, data]))
+      tables.map((t) => fetchOneTable(t, controller).then((data) => [t, data]))
     );
 
     for (const [tableName, data] of results) {
