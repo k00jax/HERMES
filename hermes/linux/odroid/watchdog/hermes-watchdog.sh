@@ -5,10 +5,46 @@ set -u
 HEALTH_CMD=(python3 /home/odroid/hermes-src/hermes/linux/logger/client.py health)
 DB_PATH="/home/odroid/hermes-data/db/hermes.sqlite3"
 CLIENT_PATH="/home/odroid/hermes-src/hermes/linux/logger/client.py"
+STATE_FILE="/home/odroid/hermes-data/watchdog_led_state"
+
+current_led_state="UNKNOWN"
+if [[ -f "$STATE_FILE" ]]; then
+  current_led_state="$(head -n 1 "$STATE_FILE" 2>/dev/null || echo "UNKNOWN")"
+fi
+
+persist_led_state() {
+  local state="$1"
+  mkdir -p "$(dirname "$STATE_FILE")"
+  printf '%s\n' "$state" > "$STATE_FILE"
+}
 
 send_led_alert() {
   local state="$1"
-  timeout 2s python3 "$CLIENT_PATH" send "OLED,ALERT,STALE,${state}" >/dev/null 2>&1 || true
+  local frame="OLED,ALERT,STALE,${state}"
+  if [[ "$state" == "$current_led_state" ]]; then
+    return
+  fi
+
+  if timeout 2s python3 "$CLIENT_PATH" send "$frame" >/dev/null 2>&1; then
+    echo "[watchdog] sent=${frame}"
+    current_led_state="$state"
+    persist_led_state "$state"
+    return
+  fi
+
+  if timeout 2s systemctl is-active --quiet hermes-logger.service; then
+    echo "[watchdog] send_fail=${frame},reason=logger_active"
+    return
+  fi
+
+  if printf '%s\n' "$frame" | timeout 2s tee /dev/hermes-nrf >/dev/null 2>&1; then
+    echo "[watchdog] sent=${frame}"
+    current_led_state="$state"
+    persist_led_state "$state"
+    return
+  fi
+
+  echo "[watchdog] send_fail=${frame}"
 }
 
 health_output=""
