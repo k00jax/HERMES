@@ -52,6 +52,7 @@ SERIES_MAP = {
 CHART_CACHE_TTL_SECS = 5.0
 chart_cache: Dict[str, tuple] = {}
 chart_cache_lock = threading.Lock()
+chart_render_lock = threading.Lock()
 
 
 def run_cmd(args: List[str], timeout_sec: float) -> Dict[str, object]:
@@ -161,39 +162,54 @@ def query_series(series: str, minutes: int) -> List[Dict[str, object]]:
 
 
 def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, object]]) -> bytes:
-    cfg = SERIES_MAP[series]
+  cfg = SERIES_MAP[series]
+  with chart_render_lock:
     fig, ax = plt.subplots(figsize=(4.6, 1.4), dpi=110)
     fig.patch.set_facecolor("#151c24")
     ax.set_facecolor("#151c24")
 
     if points:
-        x = list(range(len(points)))
-        y = [float(item["v"]) for item in points]
-        ax.plot(
-            x,
-            y,
-            color=cfg["color"],
-            linewidth=1.8,
-            drawstyle="steps-post" if cfg["stepped"] else "default",
-        )
-        ax.fill_between(x, y, color=cfg["color"], alpha=0.13)
-        last_v = y[-1]
-        min_v = min(y)
-        max_v = max(y)
-        ax.text(0.01, 0.98, cfg["label"], transform=ax.transAxes, va="top", ha="left", color="#9fb3c8", fontsize=8)
-        ax.text(0.99, 0.98, f"last {last_v:.1f}", transform=ax.transAxes, va="top", ha="right", color="#e8eef5", fontsize=8)
-        ax.text(0.99, 0.03, f"min {min_v:.1f}  max {max_v:.1f}  {minutes}m", transform=ax.transAxes, va="bottom", ha="right", color="#8ea1b3", fontsize=7)
+      x = list(range(len(points)))
+      y = [float(item["v"]) for item in points]
+      ys = [float(item["v"]) for item in points if item.get("v") is not None]
+
+      if ys:
+        y_mid = sum(ys) / len(ys)
+        max_dev = max(abs(v - y_mid) for v in ys)
+
+        if max_dev == 0:
+          max_dev = max(abs(y_mid) * 0.02, 0.1)
+
+        pad = max_dev * 0.08
+        half_span = max_dev + pad
+
+        ax.set_ylim(y_mid - half_span, y_mid + half_span)
+
+      ax.plot(
+        x,
+        y,
+        color=cfg["color"],
+        linewidth=1.8,
+        drawstyle="steps-post" if cfg["stepped"] else "default",
+      )
+      ax.fill_between(x, y, color=cfg["color"], alpha=0.13)
+      last_v = y[-1]
+      min_v = min(y)
+      max_v = max(y)
+      ax.text(0.01, 0.98, cfg["label"], transform=ax.transAxes, va="top", ha="left", color="#9fb3c8", fontsize=8)
+      ax.text(0.99, 0.98, f"last {last_v:.1f}", transform=ax.transAxes, va="top", ha="right", color="#e8eef5", fontsize=8)
+      ax.text(0.99, 0.03, f"min {min_v:.1f}  max {max_v:.1f}  {minutes}m", transform=ax.transAxes, va="bottom", ha="right", color="#8ea1b3", fontsize=7)
     else:
-        ax.text(0.5, 0.5, f"{cfg['label']}\nno data", transform=ax.transAxes, va="center", ha="center", color="#8ea1b3", fontsize=9)
+      ax.text(0.5, 0.5, f"{cfg['label']}\nno data", transform=ax.transAxes, va="center", ha="center", color="#8ea1b3", fontsize=9)
 
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
-        spine.set_visible(False)
+      spine.set_visible(False)
 
     fig.tight_layout(pad=0.2)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor=fig.get_facecolor())
     plt.close(fig)
     return buf.getvalue()
 
