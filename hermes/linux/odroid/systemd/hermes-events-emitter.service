@@ -1,0 +1,12 @@
+[Unit]
+Description=HERMES events/anomaly emitter
+After=network.target hermes-logger.service
+
+[Service]
+Type=oneshot
+User=odroid
+WorkingDirectory=/home/odroid/hermes-src/hermes
+ExecStart=/usr/bin/python3 -u /home/odroid/hermes-src/hermes/linux/odroid/events/hermes_events_emitter.py
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=8

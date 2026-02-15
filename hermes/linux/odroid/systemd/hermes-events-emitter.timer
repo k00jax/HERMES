@@ -1,0 +1,11 @@
+[Unit]
+Description=Run HERMES events/anomaly emitter every 10 seconds
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=10
+AccuracySec=1
+Unit=hermes-events-emitter.service
+
+[Install]
+WantedBy=timers.target

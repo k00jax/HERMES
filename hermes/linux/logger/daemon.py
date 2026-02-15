@@ -273,6 +273,19 @@ def init_db(conn: sqlite3.Connection):
             parser_version TEXT
         );
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            ts_local TEXT,
+            kind TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            source TEXT,
+            message TEXT NOT NULL,
+            data_json TEXT,
+            dedupe_key TEXT
+        );
+        """)
         ensure_column(conn, "raw_lines", "ts_local", "TEXT")
         ensure_column(conn, "metrics", "ts_local", "TEXT")
         ensure_column(conn, "oled_status", "ts_local", "TEXT")
@@ -287,6 +300,13 @@ def init_db(conn: sqlite3.Connection):
         ensure_column(conn, "mic_noise", "ts_local", "TEXT")
         ensure_column(conn, "esp_net", "ts_local", "TEXT")
         ensure_column(conn, "parse_fail", "ts_local", "TEXT")
+        ensure_column(conn, "events", "ts_local", "TEXT")
+        ensure_column(conn, "events", "kind", "TEXT")
+        ensure_column(conn, "events", "severity", "TEXT")
+        ensure_column(conn, "events", "source", "TEXT")
+        ensure_column(conn, "events", "message", "TEXT")
+        ensure_column(conn, "events", "data_json", "TEXT")
+        ensure_column(conn, "events", "dedupe_key", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_ts ON hb(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hb_local ON hb(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_env_ts ON env(ts_utc);")
@@ -305,6 +325,10 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_local ON oled_status(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_fail_ts ON parse_fail(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_fail_local ON parse_fail(ts_local);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_dedupe ON events(dedupe_key);")
         conn.commit()
 
 def parse_line(line: str):

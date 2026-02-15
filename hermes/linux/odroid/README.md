@@ -70,11 +70,34 @@ curl -sS http://127.0.0.1:8000/api/status
 curl -sS http://127.0.0.1:8000/api/health
 curl -sS http://127.0.0.1:8000/readyz
 curl -sS http://127.0.0.1:8000/metrics
+curl -sS http://127.0.0.1:8000/api/events/latest?limit=20
 curl -sS http://100.93.105.81:8000/healthz
 ```
 
 Readiness checks (`/readyz`) include DB readability, logger status, and per-table ingest freshness.
 The watchdog should target localhost readiness (`http://127.0.0.1:8000/readyz`) so local restart logic is independent of Tailnet state.
+
+## Events/Anomaly Emitter (systemd timer)
+
+Builds high-signal `events` rows (`stale_detected`, `stale_recovered`, `reboot_detected`) from recent telemetry every 10 seconds.
+
+Install and enable:
+
+```bash
+sudo chmod +x /home/odroid/hermes-src/hermes/linux/odroid/events/hermes_events_emitter.py
+sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-events-emitter.service /etc/systemd/system/
+sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-events-emitter.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-events-emitter.timer
+```
+
+Check status:
+
+```bash
+systemctl status hermes-events-emitter.timer
+journalctl -u hermes-events-emitter.service -n 50
+curl -sS "http://127.0.0.1:8000/api/events/latest?limit=20"
+```
 
 Open UI:
 

@@ -7,6 +7,7 @@ CURL_TIMEOUT_SECS="${HERMES_DASHBOARD_CURL_TIMEOUT_SECS:-2}"
 FAIL_THRESHOLD="${HERMES_DASHBOARD_FAIL_THRESHOLD:-3}"
 RESTART_COOLDOWN_SECS="${HERMES_DASHBOARD_RESTART_COOLDOWN_SECS:-120}"
 STATE_DIR="${HERMES_DASHBOARD_WATCHDOG_STATE_DIR:-/home/odroid/hermes-data/dashboard-watchdog}"
+DB_PATH="${HERMES_DB_PATH:-/home/odroid/hermes-data/db/hermes.sqlite3}"
 FAIL_COUNT_FILE="$STATE_DIR/fail_count"
 LAST_RESTART_FILE="$STATE_DIR/last_restart_epoch"
 RESTART_COUNT_FILE="$STATE_DIR/restart_count"
@@ -31,6 +32,60 @@ write_num_file() {
   local path="$1"
   local value="$2"
   printf '%s\n' "$value" > "$path"
+}
+
+emit_dashboard_restart_event() {
+  local reason="$1"
+  local restart_total="$2"
+  local message
+  message="dashboard restarted by watchdog reason=${reason} cooldown_s=${RESTART_COOLDOWN_SECS}"
+  timeout 3s python3 - "$DB_PATH" "$reason" "$restart_total" "$RESTART_COOLDOWN_SECS" "$message" <<'PY' >/dev/null 2>&1 || true
+import datetime
+import json
+import sqlite3
+import sys
+
+db_path, reason, restart_total, cooldown_s, message = sys.argv[1:]
+
+conn = sqlite3.connect(db_path, timeout=2.0)
+try:
+    conn.execute("PRAGMA busy_timeout=2000;")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts_utc TEXT NOT NULL,
+          ts_local TEXT,
+          kind TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          source TEXT,
+          message TEXT NOT NULL,
+          data_json TEXT,
+          dedupe_key TEXT
+        );
+        """
+    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO events (ts_utc, ts_local, kind, severity, source, message, data_json, dedupe_key)
+        VALUES (?, ?, 'dashboard_restart', 'warn', 'dashboard', ?, ?, NULL)
+        """,
+        (
+            now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            datetime.datetime.now().astimezone().replace(microsecond=0).isoformat(),
+            message,
+            json.dumps({
+                "reason": reason,
+                "restart_count": int(restart_total),
+                "cooldown_s": int(cooldown_s),
+            }, separators=(",", ":")),
+        ),
+    )
+    conn.commit()
+finally:
+    conn.close()
+PY
 }
 
 fail_count="$(read_num_file "$FAIL_COUNT_FILE" 0)"
@@ -101,6 +156,7 @@ if systemctl restart hermes-dashboard.service; then
   write_num_file "$LAST_RESTART_FILE" "$now_epoch"
   write_num_file "$FAIL_COUNT_FILE" 0
   write_num_file "$RESTART_COUNT_FILE" "$restart_count"
+  emit_dashboard_restart_event "$ready_reason" "$restart_count"
   echo "[dashboard-watchdog] restarted hermes-dashboard.service reason=$ready_reason restart_count=$restart_count"
   exit 0
 fi

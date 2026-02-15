@@ -176,6 +176,41 @@ def get_watchdog_restart_count() -> int:
   return int(text) if text.isdigit() else 0
 
 
+def ensure_events_table(conn: sqlite3.Connection) -> None:
+  conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts_utc TEXT NOT NULL,
+      ts_local TEXT,
+      kind TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      source TEXT,
+      message TEXT NOT NULL,
+      data_json TEXT,
+      dedupe_key TEXT
+    );
+    """
+  )
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_utc);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_events_dedupe ON events(dedupe_key);")
+
+
+def event_row_to_dict(row: sqlite3.Row) -> Dict[str, object]:
+  item = dict(row)
+  raw = item.get("data_json")
+  if isinstance(raw, str) and raw.strip():
+    try:
+      item["data"] = json.loads(raw)
+    except Exception:
+      item["data"] = raw
+  else:
+    item["data"] = None
+  return item
+
+
 def build_ready_state() -> Dict[str, object]:
   failures: List[str] = []
   table_age_seconds: Dict[str, float] = {table: -1.0 for table in TABLES}
@@ -416,6 +451,69 @@ def api_latest(table: str, limit: int = Query(20, ge=1, le=200)) -> Dict[str, ob
     }
 
 
+@APP.get("/api/events/latest")
+def api_events_latest(
+    limit: int = Query(50, ge=1, le=200),
+    severity: str = Query(""),
+    kind: str = Query(""),
+) -> Dict[str, object]:
+    try:
+      with open_db() as conn:
+        ensure_events_table(conn)
+        conn.row_factory = sqlite3.Row
+        where: List[str] = []
+        params: List[object] = []
+        if severity.strip():
+          where.append("severity = ?")
+          params.append(severity.strip())
+        if kind.strip():
+          where.append("kind = ?")
+          params.append(kind.strip())
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        sql = (
+          "SELECT id, ts_utc, ts_local, kind, severity, source, message, data_json, dedupe_key "
+          f"FROM events{where_sql} ORDER BY id DESC LIMIT ?"
+        )
+        rows = conn.execute(sql, (*params, limit)).fetchall()
+    except sqlite3.OperationalError as exc:
+      if "locked" in str(exc).lower():
+        return {"limit": limit, "rows": []}
+      raise
+    return {"limit": limit, "rows": [event_row_to_dict(row) for row in rows]}
+
+
+@APP.get("/api/events")
+def api_events_since(
+    since_id: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+    severity: str = Query(""),
+    kind: str = Query(""),
+) -> Dict[str, object]:
+    try:
+      with open_db() as conn:
+        ensure_events_table(conn)
+        conn.row_factory = sqlite3.Row
+        where: List[str] = ["id > ?"]
+        params: List[object] = [since_id]
+        if severity.strip():
+          where.append("severity = ?")
+          params.append(severity.strip())
+        if kind.strip():
+          where.append("kind = ?")
+          params.append(kind.strip())
+        where_sql = " WHERE " + " AND ".join(where)
+        sql = (
+          "SELECT id, ts_utc, ts_local, kind, severity, source, message, data_json, dedupe_key "
+          f"FROM events{where_sql} ORDER BY id ASC LIMIT ?"
+        )
+        rows = conn.execute(sql, (*params, limit)).fetchall()
+    except sqlite3.OperationalError as exc:
+      if "locked" in str(exc).lower():
+        return {"since_id": since_id, "rows": []}
+      raise
+    return {"since_id": since_id, "rows": [event_row_to_dict(row) for row in rows]}
+
+
 @APP.get("/api/diag", response_class=PlainTextResponse)
 def api_diag() -> PlainTextResponse:
     cmd = run_cmd(["bash", str(DOCTOR_PATH)], timeout_sec=15)
@@ -532,10 +630,22 @@ HTML_PAGE = """
     .seg { display: inline-flex; border: 1px solid #26313d; border-radius: 999px; overflow: hidden; }
     .seg button { background: #111820; color: #9fb3c8; border: 0; padding: 6px 10px; cursor: pointer; }
     .seg button.active { background: #1f5f99; color: #fff; }
+    .hidden { display: none !important; }
+    .banner { margin: 10px 0 12px 0; padding: 8px 12px; border-radius: 8px; border: 1px solid #8c2f2f; background: #3d1a1a; color: #ffd9d9; font-weight: 600; }
+    .stale-card { border-color: #92762f !important; background: #3e3317 !important; }
+    .dead-card { border-color: #8c2f2f !important; background: #3d1a1a !important; }
+    .trend-img.stale { opacity: 0.38; filter: grayscale(45%); }
+    .events-card { width: 100%; }
+    .events-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+    .events-table th, .events-table td { border-bottom: 1px solid #2a3440; padding: 6px 8px; text-align: left; }
+    .sev-info { color: #9fb3c8; }
+    .sev-warn { color: #ffd27f; }
+    .sev-crit { color: #ff8a8a; }
   </style>
 </head>
 <body>
   <h1>HERMES Dashboard</h1>
+  <div id="readyBanner" class="banner hidden">NOT READY</div>
   <div id="lastUpdated" class="muted small">Last updated: never</div>
   <div id="dbg" class="muted small" style="margin-top:6px;">
     dbg: <span id="dbg-js">booting</span> |
@@ -566,6 +676,48 @@ HTML_PAGE = """
 
   <div class=\"row\" id=\"trends\"></div>
 
+  <div class=\"row\">
+    <div class=\"card events-card\">
+      <div style=\"display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;\">
+        <div>
+          <b>Events</b>
+          <span class=\"muted small\">(last 50)</span>
+        </div>
+        <div style=\"display:flex; align-items:center; gap:8px;\">
+          <span class=\"muted small\">Severity</span>
+          <select id=\"events-severity\" style=\"padding:5px 8px;\">
+            <option value=\"\">all</option>
+            <option value=\"info\">info</option>
+            <option value=\"warn\">warn</option>
+            <option value=\"crit\">crit</option>
+          </select>
+          <span class=\"muted small\">Kind</span>
+          <select id=\"events-kind\" style=\"padding:5px 8px;\">
+            <option value=\"\">all</option>
+            <option value=\"stale_detected\">stale_detected</option>
+            <option value=\"stale_recovered\">stale_recovered</option>
+            <option value=\"reboot_detected\">reboot_detected</option>
+            <option value=\"dashboard_restart\">dashboard_restart</option>
+          </select>
+        </div>
+      </div>
+      <table class=\"events-table\">
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Severity</th>
+            <th>Kind</th>
+            <th>Source</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody id=\"events-body\">
+          <tr><td colspan=\"5\" class=\"muted\">loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <div id=\"tables\" class=\"tables-grid\"></div>
 
   <h3>Raw health</h3>
@@ -589,18 +741,57 @@ const tableLabels = {
 };
 const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET'];
 const trendSeries = [
-  { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0 },
-  { key: 'env_temp', title: 'Temp', unit: '°C', decimals: 1 },
-  { key: 'env_hum', title: 'Humidity', unit: '%', decimals: 1 },
-  { key: 'esp_rssi', title: 'RSSI', unit: 'dBm', decimals: 0 },
+  { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0, table: 'air' },
+  { key: 'env_temp', title: 'Temp', unit: '°C', decimals: 1, table: 'env' },
+  { key: 'env_hum', title: 'Humidity', unit: '%', decimals: 1, table: 'env' },
+  { key: 'esp_rssi', title: 'RSSI', unit: 'dBm', decimals: 0, table: 'esp_net' },
 ];
 const tableState = {};
 const tableRowLimit = {};
+const eventsState = { limit: 50, severity: '', kind: '' };
+let latestReady = null;
 let statusController = null;
 let tableController = null;
 let trendController = null;
+let readyController = null;
+let eventsController = null;
 let lastUpdatedMs = 0;
 let trendMinutes = 60;
+
+function formatAgeShort(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s < 0) return 'n/a';
+  if (s < 60) return Math.floor(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  return Math.floor(s / 3600) + 'h';
+}
+
+function tableIsStale(tableName) {
+  if (!latestReady || !latestReady.table_age_seconds) return false;
+  const age = Number(latestReady.table_age_seconds[tableName]);
+  const threshold = Number(latestReady.stale_threshold_seconds || 0);
+  if (!Number.isFinite(age) || age < 0) return true;
+  return age > threshold;
+}
+
+function firstReadyFailure() {
+  if (!latestReady || !Array.isArray(latestReady.failures) || !latestReady.failures.length) {
+    return 'unknown';
+  }
+  return String(latestReady.failures[0]);
+}
+
+function updateReadyBanner() {
+  const banner = document.getElementById('readyBanner');
+  if (!banner) return;
+  const ready = !!(latestReady && latestReady.ready);
+  if (ready) {
+    banner.classList.add('hidden');
+    return;
+  }
+  banner.textContent = 'NOT READY: ' + firstReadyFailure();
+  banner.classList.remove('hidden');
+}
 
 function dbgSet(id, text) {
   const el = document.getElementById(id);
@@ -627,8 +818,14 @@ function setTrendMinutes(m) {
 function renderBadges(seriesKey, stats, decimals, unit) {
   const el = document.getElementById('trend-badges-' + seriesKey);
   if (!el) return;
-  if (!stats) {
-    el.innerHTML = '<span class="badge">no data</span>';
+  const trend = trendSeries.find((item) => item.key === seriesKey);
+  const staleByReady = trend ? tableIsStale(trend.table) : false;
+  const stale = staleByReady || !stats;
+  if (stale) {
+    const age = trend && latestReady && latestReady.table_age_seconds
+      ? latestReady.table_age_seconds[trend.table]
+      : -1;
+    el.innerHTML = '<span class="badge">STALE ' + formatAgeShort(age) + '</span>';
     return;
   }
   const last = formatMetric(stats.last, decimals);
@@ -842,7 +1039,12 @@ function buildTableCard(tableName) {
   const sub = document.createElement('span');
   sub.className = 'muted small';
   sub.textContent = '(' + tableName + ')';
+  const staleBadge = document.createElement('span');
+  staleBadge.className = 'badge';
+  staleBadge.style.marginLeft = '8px';
+  staleBadge.textContent = 'OK n/a';
   titleWrap.appendChild(title);
+  titleWrap.appendChild(staleBadge);
   titleWrap.appendChild(document.createTextNode(' '));
   titleWrap.appendChild(sub);
 
@@ -870,6 +1072,41 @@ function buildTableCard(tableName) {
   copyBtn.style.padding = '6px 10px';
   copyBtn.onclick = () => copyTableRows(tableName);
 
+  const exportBtn = document.createElement('button');
+  exportBtn.textContent = 'Export JSON';
+  exportBtn.style.padding = '6px 10px';
+  exportBtn.onclick = () => exportTableJson(tableName);
+
+  const freezeBadge = document.createElement('span');
+  freezeBadge.className = 'badge hidden';
+  freezeBadge.textContent = 'FROZEN';
+
+  const freezeWrap = document.createElement('label');
+  freezeWrap.className = 'muted small';
+  freezeWrap.style.display = 'inline-flex';
+  freezeWrap.style.alignItems = 'center';
+  freezeWrap.style.gap = '5px';
+  const freezeToggle = document.createElement('input');
+  freezeToggle.type = 'checkbox';
+  freezeToggle.onchange = () => {
+    const state = tableState[tableName];
+    state.frozen = !!freezeToggle.checked;
+    freezeBadge.classList.toggle('hidden', !state.frozen);
+  };
+  freezeWrap.appendChild(freezeToggle);
+  freezeWrap.appendChild(document.createTextNode('Freeze'));
+
+  const searchInput = document.createElement('input');
+  searchInput.type = 'text';
+  searchInput.placeholder = 'Search';
+  searchInput.style.padding = '5px 8px';
+  searchInput.style.minWidth = '120px';
+  searchInput.oninput = () => {
+    const state = tableState[tableName];
+    state.searchTerm = searchInput.value.trim().toLowerCase();
+    renderTableRows(tableName, state.allRows || [], true);
+  };
+
   rowsSelect.onchange = () => {
     const parsed = Number.parseInt(rowsSelect.value, 10);
     tableRowLimit[tableName] = [20, 50, 200].includes(parsed) ? parsed : 20;
@@ -879,7 +1116,11 @@ function buildTableCard(tableName) {
   header.appendChild(titleWrap);
   actions.appendChild(rowsLabel);
   actions.appendChild(rowsSelect);
+  actions.appendChild(searchInput);
+  actions.appendChild(freezeWrap);
+  actions.appendChild(freezeBadge);
   actions.appendChild(copyBtn);
+  actions.appendChild(exportBtn);
   header.appendChild(actions);
   card.appendChild(header);
 
@@ -904,17 +1145,49 @@ function buildTableCard(tableName) {
   return {
     card,
     title,
+    staleBadge,
+    freezeBadge,
+    searchInput,
+    freezeToggle,
     noRows,
     table,
     headRow,
     tbody,
     copyBtn,
+    exportBtn,
     keys: [],
     rowEls: new Map(),
     rowData: new Map(),
+    allRows: [],
     displayKeys: [],
     maxId: null,
+    frozen: false,
+    searchTerm: '',
   };
+}
+
+function updateTableStaleBadge(tableName) {
+  const state = tableState[tableName];
+  if (!state) return;
+  if (!latestReady || !latestReady.table_age_seconds) {
+    state.staleBadge.textContent = 'OK n/a';
+    state.card.classList.remove('stale-card');
+    return;
+  }
+  const age = Number(latestReady.table_age_seconds[tableName]);
+  const stale = tableIsStale(tableName);
+  state.staleBadge.textContent = (stale ? 'STALE ' : 'OK ') + formatAgeShort(age);
+  state.card.classList.toggle('stale-card', stale);
+}
+
+function rowMatchesSearch(row, searchTerm) {
+  if (!searchTerm) return true;
+  for (const value of Object.values(row || {})) {
+    if (String(value ?? '').toLowerCase().includes(searchTerm)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function initTables() {
@@ -941,6 +1214,48 @@ function initTrends() {
       '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
       '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />';
     root.appendChild(card);
+  }
+}
+
+function initEvents() {
+  const severityEl = document.getElementById('events-severity');
+  const kindEl = document.getElementById('events-kind');
+  if (severityEl) {
+    severityEl.onchange = () => {
+      eventsState.severity = severityEl.value || '';
+      pollEvents();
+    };
+  }
+  if (kindEl) {
+    kindEl.onchange = () => {
+      eventsState.kind = kindEl.value || '';
+      pollEvents();
+    };
+  }
+}
+
+function renderEvents(rows) {
+  const body = document.getElementById('events-body');
+  if (!body) return;
+  body.innerHTML = '';
+  if (!rows || !rows.length) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="5" class="muted">no events</td>';
+    body.appendChild(tr);
+    return;
+  }
+  for (const event of rows) {
+    const tr = document.createElement('tr');
+    const whenText = event.ts_local || event.ts_utc || '';
+    const sev = String(event.severity || 'info').toLowerCase();
+    const sevClass = sev === 'crit' ? 'sev-crit' : (sev === 'warn' ? 'sev-warn' : 'sev-info');
+    tr.innerHTML =
+      '<td>' + escapeHtml(formatDateTime(whenText)) + '</td>' +
+      '<td class="' + sevClass + '">' + escapeHtml(sev) + '</td>' +
+      '<td>' + escapeHtml(event.kind || '') + '</td>' +
+      '<td>' + escapeHtml(event.source || '') + '</td>' +
+      '<td>' + escapeHtml(event.message || '') + '</td>';
+    body.appendChild(tr);
   }
 }
 
@@ -984,9 +1299,12 @@ function updateRow(tr, oldRow, newRow, keys) {
   }
 }
 
-function applyTableRows(tableName, rows, force = false) {
+function renderTableRows(tableName, rows, force = false) {
   const state = tableState[tableName];
   const label = (tableLabels[tableName] || tableName);
+  state.allRows = Array.isArray(rows) ? [...rows] : [];
+  const filteredRows = (state.allRows || []).filter((row) => rowMatchesSearch(row, state.searchTerm));
+  rows = filteredRows;
   state.title.textContent = label + ' (last ' + rows.length + ')';
   if (!rows.length) {
     state.maxId = null;
@@ -1040,6 +1358,11 @@ function applyTableRows(tableName, rows, force = false) {
   state.maxId = newestId;
 }
 
+function applyTableRows(tableName, rows, force = false) {
+  renderTableRows(tableName, rows, force);
+  updateTableStaleBadge(tableName);
+}
+
 function fetchOneTable(tableName, controller = null) {
   const limit = tableRowLimit[tableName] || 20;
   return fetchJson('/api/latest/' + tableName + '?limit=' + limit, controller || new AbortController());
@@ -1047,6 +1370,9 @@ function fetchOneTable(tableName, controller = null) {
 
 async function refreshOneTable(tableName) {
   if (document.visibilityState === 'hidden') {
+    return;
+  }
+  if (tableState[tableName] && tableState[tableName].frozen) {
     return;
   }
   try {
@@ -1123,8 +1449,12 @@ async function pollTables() {
   const controller = new AbortController();
   tableController = controller;
   try {
+    const activeTables = tables.filter((t) => !(tableState[t] && tableState[t].frozen));
+    if (!activeTables.length) {
+      return;
+    }
     const results = await Promise.all(
-      tables.map((t) => fetchOneTable(t, controller).then((data) => [t, data]))
+      activeTables.map((t) => fetchOneTable(t, controller).then((data) => [t, data]))
     );
 
     for (const [tableName, data] of results) {
@@ -1162,10 +1492,18 @@ async function pollTrends() {
       const points = data.points || [];
       const latest = points.length ? points[points.length - 1].v : null;
       const valueEl = document.getElementById('trend-value-' + trend.key);
+      const stale = tableIsStale(trend.table) || !points.length || !data.stats;
       valueEl.textContent = latest === null ? 'n/a' : (formatMetric(latest, trend.decimals) + ' ' + trend.unit);
       renderBadges(trend.key, data.stats || null, trend.decimals, ' ' + trend.unit);
 
       const imgEl = document.getElementById('trend-img-' + trend.key);
+      const card = imgEl ? imgEl.closest('.trend-card') : null;
+      if (imgEl) {
+        imgEl.classList.toggle('stale', stale);
+      }
+      if (card) {
+        card.classList.toggle('stale-card', stale);
+      }
       imgEl.src = '/chart/' + trend.key + '.png?minutes=' + trendMinutes + '&ts=' + cacheBust;
     }
     setLastUpdatedNow();
@@ -1191,15 +1529,90 @@ async function downloadDiag() {
   URL.revokeObjectURL(a.href);
 }
 
+async function exportTableJson(tableName) {
+  const state = tableState[tableName];
+  if (!state) return;
+  const rows = [];
+  const displayKeys = Array.isArray(state.displayKeys) ? state.displayKeys : [];
+  for (const key of displayKeys) {
+    const row = state.rowData.get(key);
+    if (row) rows.push(row);
+  }
+  const blob = new Blob([JSON.stringify(rows, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = tableName + '-rows.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function pollReady() {
+  if (document.visibilityState === 'hidden') {
+    return;
+  }
+  if (readyController) {
+    readyController.abort();
+  }
+  const controller = new AbortController();
+  readyController = controller;
+  try {
+    latestReady = await fetchJson('/api/ready', controller);
+    updateReadyBanner();
+    for (const tableName of tables) {
+      updateTableStaleBadge(tableName);
+    }
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      console.error(err);
+    }
+  } finally {
+    if (readyController === controller) {
+      readyController = null;
+    }
+  }
+}
+
+async function pollEvents() {
+  if (document.visibilityState === 'hidden') {
+    return;
+  }
+  if (eventsController) {
+    eventsController.abort();
+  }
+  const controller = new AbortController();
+  eventsController = controller;
+  try {
+    const params = new URLSearchParams();
+    params.set('limit', String(eventsState.limit));
+    if (eventsState.severity) params.set('severity', eventsState.severity);
+    if (eventsState.kind) params.set('kind', eventsState.kind);
+    const data = await fetchJson('/api/events/latest?' + params.toString(), controller);
+    renderEvents(data.rows || []);
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      console.error(err);
+    }
+  } finally {
+    if (eventsController === controller) {
+      eventsController = null;
+    }
+  }
+}
+
 (async () => {
+  initEvents();
   initTrends();
   setTrendMinutes(60);
   initTables();
+  await pollReady();
   await pollStatus();
   await pollTables();
+  await pollEvents();
   setInterval(pollStatus, 1000);
+  setInterval(pollReady, 3000);
   setInterval(pollTables, 3000);
   setInterval(pollTrends, 7000);
+  setInterval(pollEvents, 4000);
   setInterval(refreshRelativeTimes, 1000);
   setInterval(refreshLastUpdatedLabel, 1000);
 })();
@@ -1226,6 +1639,12 @@ def readyz() -> JSONResponse:
     state = build_ready_state()
     status = 200 if bool(state.get("ready")) else 503
     return JSONResponse(content=state, status_code=status)
+
+
+@APP.get("/api/ready")
+def api_ready() -> JSONResponse:
+  state = build_ready_state()
+  return JSONResponse(content=state, status_code=200)
 
 
 @APP.get("/metrics", response_class=PlainTextResponse)
