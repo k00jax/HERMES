@@ -3,13 +3,23 @@ import datetime
 import json
 import os
 import sqlite3
+import statistics
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 DB_PATH = Path(os.environ.get("HERMES_DB_PATH", "/home/odroid/hermes-data/db/hermes.sqlite3"))
 STATE_PATH = Path(os.environ.get("HERMES_EVENTS_STATE_PATH", "/home/odroid/hermes-data/events-emitter/state.json"))
 READY_MAX_AGE_SECS = int(os.environ.get("HERMES_READY_MAX_AGE_SECS", "180"))
 EVENT_DEDUPE_COOLDOWN_SECS = int(os.environ.get("HERMES_EVENTS_DEDUPE_COOLDOWN_SECS", "120"))
+WIFI_CONSECUTIVE_SAMPLES = max(1, int(os.environ.get("HERMES_WIFI_CONSECUTIVE_SAMPLES", "3")))
+WIFI_EVENT_COOLDOWN_SECS = int(os.environ.get("HERMES_WIFI_EVENT_COOLDOWN_SECS", "60"))
+AIR_SPIKE_WINDOW_SIZE = max(20, min(50, int(os.environ.get("HERMES_AIR_SPIKE_WINDOW_SIZE", "30"))))
+AIR_SPIKE_MIN_POINTS = max(8, int(os.environ.get("HERMES_AIR_SPIKE_MIN_POINTS", "16")))
+AIR_SPIKE_MAD_K_WARN = float(os.environ.get("HERMES_AIR_SPIKE_MAD_K_WARN", "6.0"))
+AIR_SPIKE_MAD_K_CRIT = float(os.environ.get("HERMES_AIR_SPIKE_MAD_K_CRIT", "10.0"))
+AIR_SPIKE_PCT_WARN = float(os.environ.get("HERMES_AIR_SPIKE_PCT_WARN", "0.35"))
+AIR_SPIKE_PCT_CRIT = float(os.environ.get("HERMES_AIR_SPIKE_PCT_CRIT", "0.80"))
+AIR_SPIKE_COOLDOWN_SECS = int(os.environ.get("HERMES_AIR_SPIKE_COOLDOWN_SECS", "60"))
 
 TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
 
@@ -65,11 +75,22 @@ def ensure_events_table(conn: sqlite3.Connection) -> None:
 
 def load_state() -> Dict[str, object]:
     if not STATE_PATH.exists():
-        return {"stale": {}, "hb": {"id": None, "uptime_s": None, "boot": None}}
+        return {
+            "stale": {},
+            "hb": {"id": None, "uptime_s": None, "boot": None},
+            "wifi": {"status": "unknown"},
+        }
     try:
-        return json.loads(STATE_PATH.read_text())
+        state = json.loads(STATE_PATH.read_text())
     except Exception:
-        return {"stale": {}, "hb": {"id": None, "uptime_s": None, "boot": None}}
+        state = {
+            "stale": {},
+            "hb": {"id": None, "uptime_s": None, "boot": None},
+            "wifi": {"status": "unknown"},
+        }
+    if not isinstance(state.get("wifi"), dict):
+        state["wifi"] = {"status": "unknown"}
+    return state
 
 
 def save_state(state: Dict[str, object]) -> None:
@@ -146,6 +167,87 @@ def coerce_int(v: object) -> Optional[int]:
         return None
 
 
+def valid_rssi(rssi: Optional[int]) -> bool:
+    return rssi is not None and rssi != 0
+
+
+def wifi_sample_connected(wifist: Optional[int], rssi: Optional[int]) -> bool:
+    return (wifist == 1) and valid_rssi(rssi)
+
+
+def trailing_count(samples: List[bool], target: bool) -> int:
+    count = 0
+    for item in reversed(samples):
+        if item != target:
+            break
+        count += 1
+    return count
+
+
+def median_and_mad(values: List[float]) -> Optional[Dict[str, float]]:
+    if not values:
+        return None
+    median_v = float(statistics.median(values))
+    deviations = [abs(v - median_v) for v in values]
+    mad_v = float(statistics.median(deviations)) if deviations else 0.0
+    return {"median": median_v, "mad": mad_v}
+
+
+def detect_air_spike(
+    conn: sqlite3.Connection,
+    *,
+    metric: str,
+    value: Optional[float],
+    values_window: List[float],
+    unit: str,
+) -> None:
+    if value is None or len(values_window) < AIR_SPIKE_MIN_POINTS:
+        return
+
+    stats = median_and_mad(values_window)
+    if not stats:
+        return
+
+    baseline = stats["median"]
+    mad = max(stats["mad"], max(1.0, abs(baseline) * 0.01))
+    delta = float(value - baseline)
+    pct = (delta / abs(baseline)) if abs(baseline) > 1e-9 else 0.0
+
+    warn_threshold = baseline + AIR_SPIKE_MAD_K_WARN * mad
+    crit_threshold = baseline + AIR_SPIKE_MAD_K_CRIT * mad
+    warn_hit = (value > warn_threshold) or (pct > AIR_SPIKE_PCT_WARN)
+    crit_hit = (value > crit_threshold) or (pct > AIR_SPIKE_PCT_CRIT)
+
+    if not warn_hit:
+        return
+
+    severity = "crit" if crit_hit else "warn"
+    message = (
+        f"{metric} spike value={value:.1f}{unit} baseline={baseline:.1f}{unit} "
+        f"mad={mad:.1f}{unit} delta={delta:.1f}{unit} ({pct * 100:.0f}%)"
+    )
+    emit_event(
+        conn,
+        kind="air_spike",
+        severity=severity,
+        source="air",
+        message=message,
+        data={
+            "metric": metric,
+            "value": float(value),
+            "baseline": baseline,
+            "mad": mad,
+            "delta": delta,
+            "delta_percent": pct,
+            "window_size": len(values_window),
+            "warn_threshold": warn_threshold,
+            "crit_threshold": crit_threshold,
+        },
+        dedupe_key=f"air_spike:{metric}",
+        cooldown_secs=AIR_SPIKE_COOLDOWN_SECS,
+    )
+
+
 def run_once() -> int:
     if not DB_PATH.exists():
         return 0
@@ -153,6 +255,7 @@ def run_once() -> int:
     state = load_state()
     stale_state = state.setdefault("stale", {})
     hb_state = state.setdefault("hb", {"id": None, "uptime_s": None, "boot": None})
+    wifi_state = state.setdefault("wifi", {"status": "unknown"})
 
     conn = sqlite3.connect(DB_PATH, timeout=2.0)
     conn.execute("PRAGMA busy_timeout=2000;")
@@ -231,6 +334,98 @@ def run_once() -> int:
             hb_state["id"] = hb_id
             hb_state["uptime_s"] = uptime_s
             hb_state["boot"] = boot
+
+        wifi_rows = conn.execute(
+            "SELECT id, wifist, rssi FROM esp_net ORDER BY id DESC LIMIT ?",
+            (max(WIFI_CONSECUTIVE_SAMPLES + 1, 4),),
+        ).fetchall()
+        if wifi_rows:
+            samples = list(reversed(wifi_rows))
+            connected_flags = [wifi_sample_connected(coerce_int(row[1]), coerce_int(row[2])) for row in samples]
+            current_status = str(wifi_state.get("status") or "unknown")
+            trailing_good = trailing_count(connected_flags, True)
+            trailing_bad = trailing_count(connected_flags, False)
+
+            immediate_drop = False
+            if len(connected_flags) >= 2:
+                immediate_drop = connected_flags[-2] and (not connected_flags[-1])
+
+            if (immediate_drop or trailing_bad >= WIFI_CONSECUTIVE_SAMPLES) and current_status != "disconnected":
+                last = samples[-1]
+                emit_event(
+                    conn,
+                    kind="wifi_drop",
+                    severity="warn",
+                    source="esp",
+                    message=(
+                        f"wifi drop wifist={coerce_int(last[1])} rssi={coerce_int(last[2])} "
+                        f"bad_streak={trailing_bad}"
+                    ),
+                    data={
+                        "wifist": coerce_int(last[1]),
+                        "rssi": coerce_int(last[2]),
+                        "bad_streak": trailing_bad,
+                        "consecutive_required": WIFI_CONSECUTIVE_SAMPLES,
+                        "immediate_transition": immediate_drop,
+                    },
+                    dedupe_key="wifi:drop",
+                    cooldown_secs=WIFI_EVENT_COOLDOWN_SECS,
+                )
+                current_status = "disconnected"
+
+            if trailing_good >= WIFI_CONSECUTIVE_SAMPLES and current_status == "disconnected":
+                last = samples[-1]
+                emit_event(
+                    conn,
+                    kind="wifi_recovered",
+                    severity="info",
+                    source="esp",
+                    message=(
+                        f"wifi recovered wifist={coerce_int(last[1])} rssi={coerce_int(last[2])} "
+                        f"good_streak={trailing_good}"
+                    ),
+                    data={
+                        "wifist": coerce_int(last[1]),
+                        "rssi": coerce_int(last[2]),
+                        "good_streak": trailing_good,
+                        "consecutive_required": WIFI_CONSECUTIVE_SAMPLES,
+                    },
+                    dedupe_key="wifi:recovered",
+                    cooldown_secs=WIFI_EVENT_COOLDOWN_SECS,
+                )
+                current_status = "connected"
+
+            if trailing_good >= WIFI_CONSECUTIVE_SAMPLES:
+                current_status = "connected"
+            elif trailing_bad >= WIFI_CONSECUTIVE_SAMPLES:
+                current_status = "disconnected"
+            wifi_state["status"] = current_status
+
+        air_rows = conn.execute(
+            "SELECT eco2_ppm, tvoc_ppb FROM air ORDER BY id DESC LIMIT ?",
+            (AIR_SPIKE_WINDOW_SIZE,),
+        ).fetchall()
+        if air_rows:
+            values_asc = list(reversed(air_rows))
+            eco2_values = [float(row[0]) for row in values_asc if row[0] is not None]
+            tvoc_values = [float(row[1]) for row in values_asc if row[1] is not None]
+
+            if len(eco2_values) >= AIR_SPIKE_MIN_POINTS:
+                detect_air_spike(
+                    conn,
+                    metric="eco2",
+                    value=eco2_values[-1],
+                    values_window=eco2_values[:-1],
+                    unit="ppm",
+                )
+            if len(tvoc_values) >= AIR_SPIKE_MIN_POINTS:
+                detect_air_spike(
+                    conn,
+                    metric="tvoc",
+                    value=tvoc_values[-1],
+                    values_window=tvoc_values[:-1],
+                    unit="ppb",
+                )
 
         conn.commit()
     finally:

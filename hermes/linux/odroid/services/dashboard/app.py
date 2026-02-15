@@ -641,6 +641,7 @@ HTML_PAGE = """
     .sev-info { color: #9fb3c8; }
     .sev-warn { color: #ffd27f; }
     .sev-crit { color: #ff8a8a; }
+      .event-summary { margin-top: 6px; font-size: 12px; color: #9fb3c8; }
   </style>
 </head>
 <body>
@@ -682,6 +683,7 @@ HTML_PAGE = """
         <div>
           <b>Events</b>
           <span class=\"muted small\">(last 50)</span>
+          <div id="events-last" class="event-summary">Last event: loading...</div>
         </div>
         <div style=\"display:flex; align-items:center; gap:8px;\">
           <span class=\"muted small\">Severity</span>
@@ -698,9 +700,13 @@ HTML_PAGE = """
             <option value=\"stale_recovered\">stale_recovered</option>
             <option value=\"reboot_detected\">reboot_detected</option>
             <option value=\"dashboard_restart\">dashboard_restart</option>
+            <option value="wifi_drop">wifi_drop</option>
+            <option value="wifi_recovered">wifi_recovered</option>
+            <option value="air_spike">air_spike</option>
           </select>
         </div>
       </div>
+      <div id="events-sticky" class="banner hidden">ALERT</div>
       <table class=\"events-table\">
         <thead>
           <tr>
@@ -748,7 +754,19 @@ const trendSeries = [
 ];
 const tableState = {};
 const tableRowLimit = {};
-const eventsState = { limit: 50, severity: '', kind: '' };
+const eventsState = {
+  limit: 50,
+  severity: '',
+  kind: '',
+  sticky: {
+    active: false,
+    eventId: 0,
+    kind: '',
+    message: '',
+    ts: '',
+    clearedThroughId: 0,
+  },
+};
 let latestReady = null;
 let statusController = null;
 let tableController = null;
@@ -1234,6 +1252,90 @@ function initEvents() {
   }
 }
 
+function isRecoveredKind(kind) {
+  const value = String(kind || '').toLowerCase();
+  return value.endsWith('_recovered');
+}
+
+function isAlertEvent(event) {
+  if (!event) return false;
+  const kind = String(event.kind || '').toLowerCase();
+  const sev = String(event.severity || '').toLowerCase();
+  if (isRecoveredKind(kind)) return false;
+  return sev === 'warn' || sev === 'crit';
+}
+
+function updateLastEventSummary(rows) {
+  const el = document.getElementById('events-last');
+  if (!el) return;
+  if (!rows || !rows.length) {
+    el.textContent = 'Last event: none';
+    return;
+  }
+  const latest = rows[0];
+  const whenText = latest.ts_local || latest.ts_utc || '';
+  el.textContent = 'Last event: ' + String(latest.kind || 'unknown') + ' · ' + relativeAge(whenText);
+}
+
+function updateStickyEventBanner() {
+  const banner = document.getElementById('events-sticky');
+  if (!banner) return;
+  const sticky = eventsState.sticky;
+  if (!sticky.active) {
+    banner.classList.add('hidden');
+    return;
+  }
+  banner.textContent = 'ALERT: ' + sticky.kind + ' · ' + relativeAge(sticky.ts) + ' · ' + sticky.message;
+  banner.classList.remove('hidden');
+}
+
+function reconcileStickyEvent(rows) {
+  const sticky = eventsState.sticky;
+  if (!rows || !rows.length) {
+    updateStickyEventBanner();
+    return;
+  }
+
+  let newestId = 0;
+  for (const row of rows) {
+    const id = Number(row.id || 0);
+    if (id > newestId) newestId = id;
+  }
+
+  if (sticky.active) {
+    const recovered = rows.some((row) => {
+      const id = Number(row.id || 0);
+      return id > sticky.eventId && isRecoveredKind(row.kind);
+    });
+    if (recovered) {
+      sticky.active = false;
+      sticky.eventId = 0;
+      sticky.kind = '';
+      sticky.message = '';
+      sticky.ts = '';
+      sticky.clearedThroughId = Math.max(sticky.clearedThroughId, newestId);
+    }
+  }
+
+  const candidate = rows.find((row) => {
+    const id = Number(row.id || 0);
+    return id > sticky.clearedThroughId && isAlertEvent(row);
+  });
+
+  if (candidate) {
+    const candidateId = Number(candidate.id || 0);
+    if (!sticky.active || candidateId > sticky.eventId) {
+      sticky.active = true;
+      sticky.eventId = candidateId;
+      sticky.kind = String(candidate.kind || 'alert');
+      sticky.message = String(candidate.message || '').slice(0, 180);
+      sticky.ts = String(candidate.ts_local || candidate.ts_utc || '');
+    }
+  }
+
+  updateStickyEventBanner();
+}
+
 function renderEvents(rows) {
   const body = document.getElementById('events-body');
   if (!body) return;
@@ -1242,6 +1344,8 @@ function renderEvents(rows) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td colspan="5" class="muted">no events</td>';
     body.appendChild(tr);
+    updateLastEventSummary([]);
+    reconcileStickyEvent([]);
     return;
   }
   for (const event of rows) {
@@ -1257,6 +1361,8 @@ function renderEvents(rows) {
       '<td>' + escapeHtml(event.message || '') + '</td>';
     body.appendChild(tr);
   }
+  updateLastEventSummary(rows || []);
+  reconcileStickyEvent(rows || []);
 }
 
 function updateTableHead(state, keys) {
