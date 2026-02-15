@@ -761,6 +761,119 @@ def api_events_note(request: Request, payload: Dict[str, object] = Body(...)) ->
     return {"ok": True, "target_type": "id", "target_value": str(int(event_id)), "note": note}
 
 
+@APP.post("/api/events/ack_bulk")
+def api_events_ack_bulk(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
+    enforce_event_post_rate_limit(request)
+    ids_raw = payload.get("ids") or []
+    dedupe_raw = payload.get("dedupe_keys") or []
+
+    ids: List[int] = []
+    for value in ids_raw:
+      try:
+        ids.append(int(value))
+      except Exception:
+        continue
+    dedupe_keys = [str(value).strip() for value in dedupe_raw if str(value).strip()]
+
+    if not ids and not dedupe_keys:
+      raise HTTPException(status_code=400, detail="ids or dedupe_keys required")
+
+    ack_ts = now_utc_iso()
+    with open_db() as conn:
+      ensure_events_table(conn)
+      ensure_event_state_table(conn)
+      for event_id in sorted(set(ids)):
+        upsert_event_state(conn, target_type="id", target_value=str(event_id), ack_ts_utc=ack_ts)
+      for dedupe_key in sorted(set(dedupe_keys)):
+        upsert_event_state(conn, target_type="dedupe", target_value=dedupe_key, ack_ts_utc=ack_ts)
+      conn.commit()
+    return {"ok": True, "acked_ids": len(set(ids)), "acked_dedupe": len(set(dedupe_keys))}
+
+
+@APP.post("/api/events/snooze_bulk")
+def api_events_snooze_bulk(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
+    enforce_event_post_rate_limit(request)
+    ids_raw = payload.get("ids") or []
+    dedupe_raw = payload.get("dedupe_keys") or []
+    seconds_raw = payload.get("seconds", 1800)
+    try:
+      seconds = int(seconds_raw)
+    except Exception:
+      raise HTTPException(status_code=400, detail="seconds must be integer")
+    if seconds < 1 or seconds > 7 * 24 * 3600:
+      raise HTTPException(status_code=400, detail="seconds out of range")
+
+    ids: List[int] = []
+    for value in ids_raw:
+      try:
+        ids.append(int(value))
+      except Exception:
+        continue
+    dedupe_keys = [str(value).strip() for value in dedupe_raw if str(value).strip()]
+
+    if not ids and not dedupe_keys:
+      raise HTTPException(status_code=400, detail="ids or dedupe_keys required")
+
+    snooze_until = (
+      datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    with open_db() as conn:
+      ensure_events_table(conn)
+      ensure_event_state_table(conn)
+      for event_id in sorted(set(ids)):
+        upsert_event_state(conn, target_type="id", target_value=str(event_id), snooze_until_utc=snooze_until)
+      for dedupe_key in sorted(set(dedupe_keys)):
+        upsert_event_state(conn, target_type="dedupe", target_value=dedupe_key, snooze_until_utc=snooze_until)
+      conn.commit()
+    return {
+      "ok": True,
+      "snoozed_ids": len(set(ids)),
+      "snoozed_dedupe": len(set(dedupe_keys)),
+      "snooze_until_utc": snooze_until,
+    }
+
+
+@APP.post("/api/events/clear_snooze_kind")
+def api_events_clear_snooze_kind(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
+    enforce_event_post_rate_limit(request)
+    kind = str(payload.get("kind") or "").strip()
+    if not kind:
+      raise HTTPException(status_code=400, detail="kind required")
+
+    updated_ts = now_utc_iso()
+    cleared = 0
+    with open_db() as conn:
+      ensure_events_table(conn)
+      ensure_event_state_table(conn)
+
+      dedupe_rows = conn.execute(
+        "SELECT DISTINCT dedupe_key FROM events WHERE kind=? AND dedupe_key IS NOT NULL AND dedupe_key<>''",
+        (kind,),
+      ).fetchall()
+      dedupe_keys = [str(row[0]) for row in dedupe_rows if row and row[0]]
+      for dedupe_key in dedupe_keys:
+        cur = conn.execute(
+          "UPDATE event_state SET snooze_until_utc=NULL, updated_ts_utc=? WHERE target_type='dedupe' AND target_value=?",
+          (updated_ts, dedupe_key),
+        )
+        cleared += int(cur.rowcount or 0)
+
+      id_rows = conn.execute("SELECT id FROM events WHERE kind=?", (kind,)).fetchall()
+      ids = [str(int(row[0])) for row in id_rows if row and row[0] is not None]
+      if ids:
+        placeholders = ",".join(["?"] * len(ids))
+        cur = conn.execute(
+          f"UPDATE event_state SET snooze_until_utc=NULL, updated_ts_utc=? WHERE target_type='id' AND target_value IN ({placeholders})",
+          (updated_ts, *ids),
+        )
+        cleared += int(cur.rowcount or 0)
+
+      conn.commit()
+
+    return {"ok": True, "kind": kind, "cleared": cleared}
+
+
 @APP.get("/api/diag", response_class=PlainTextResponse)
 def api_diag() -> PlainTextResponse:
     cmd = run_cmd(["bash", str(DOCTOR_PATH)], timeout_sec=15)
@@ -961,6 +1074,9 @@ HTML_PAGE = """
             <option value="wifi_recovered">wifi_recovered</option>
             <option value="air_spike">air_spike</option>
           </select>
+          <button onclick=\"evtAckVisible()\">Ack all visible</button>
+          <button onclick=\"evtSnoozeVisible(1800)\">Snooze visible 30m</button>
+          <button onclick=\"evtClearKindSnoozes()\">Clear kind snoozes</button>
         </div>
       </div>
       <div id="events-sticky" class="banner hidden">ALERT</div>
@@ -1022,8 +1138,10 @@ const eventsState = {
     active: false,
     eventId: 0,
     kind: '',
+    severity: '',
     message: '',
     ts: '',
+    snoozeUntil: '',
     clearedThroughId: 0,
   },
 };
@@ -1592,6 +1710,46 @@ async function noteEvent(event) {
   await pollEvents();
 }
 
+function visibleEventRows() {
+  return Array.isArray(eventsState.rows) ? eventsState.rows : [];
+}
+
+function uniqueNums(values) {
+  return [...new Set((values || []).map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0))];
+}
+
+function uniqueStrings(values) {
+  return [...new Set((values || []).map((v) => String(v || '').trim()).filter((v) => v.length > 0))];
+}
+
+async function ackVisibleEvents() {
+  const rows = visibleEventRows();
+  const ids = uniqueNums(rows.map((row) => row.id));
+  const dedupeKeys = uniqueStrings(rows.map((row) => row.dedupe_key));
+  if (!ids.length && !dedupeKeys.length) return;
+  await postJson('/api/events/ack_bulk', { ids, dedupe_keys: dedupeKeys });
+  await pollEvents();
+}
+
+async function snoozeVisibleEvents(seconds) {
+  const rows = visibleEventRows();
+  const ids = uniqueNums(rows.map((row) => row.id));
+  const dedupeKeys = uniqueStrings(rows.map((row) => row.dedupe_key));
+  if (!ids.length && !dedupeKeys.length) return;
+  await postJson('/api/events/snooze_bulk', { ids, dedupe_keys: dedupeKeys, seconds: Number(seconds || 1800) });
+  await pollEvents();
+}
+
+async function clearKindSnoozes() {
+  const kind = String(eventsState.kind || '').trim();
+  if (!kind) {
+    alert('Pick a Kind filter first.');
+    return;
+  }
+  await postJson('/api/events/clear_snooze_kind', { kind });
+  await pollEvents();
+}
+
 function updateLastEventSummary(rows) {
   const el = document.getElementById('events-last');
   if (!el) return;
@@ -1612,7 +1770,13 @@ function updateStickyEventBanner() {
     banner.classList.add('hidden');
     return;
   }
-  banner.textContent = 'ALERT: ' + sticky.kind + ' · ' + relativeAge(sticky.ts) + ' · ' + sticky.message;
+  const sev = String(sticky.severity || '').toLowerCase();
+  const idPart = sticky.eventId ? ('id=' + String(sticky.eventId)) : 'id=?';
+  const agePart = sticky.ts ? relativeAge(sticky.ts) : 'unknown age';
+  const snoozePart = sticky.snoozeUntil
+    ? ('snoozed until ' + formatDateTime(sticky.snoozeUntil))
+    : 'not snoozed';
+  banner.textContent = 'Sticky: ' + sticky.kind + ' ' + sev + ', ' + idPart + ', ' + agePart + ', ' + snoozePart + ' — ' + sticky.message;
   banner.classList.remove('hidden');
 }
 
@@ -1623,8 +1787,10 @@ function reconcileStickyEvent(rows) {
     sticky.active = false;
     sticky.eventId = 0;
     sticky.kind = '';
+    sticky.severity = '';
     sticky.message = '';
     sticky.ts = '';
+    sticky.snoozeUntil = '';
     sticky.clearedThroughId = 0;
     updateStickyEventBanner();
     return;
@@ -1632,8 +1798,10 @@ function reconcileStickyEvent(rows) {
   sticky.active = true;
   sticky.eventId = Number(actionable.id || 0);
   sticky.kind = String(actionable.kind || 'alert');
+  sticky.severity = String(actionable.severity || 'warn');
   sticky.message = String(actionable.message || '').slice(0, 180);
   sticky.ts = String(actionable.ts_local || actionable.ts_utc || '');
+  sticky.snoozeUntil = String((actionable.state && actionable.state.snooze_until_utc) || '');
   updateStickyEventBanner();
 }
 
@@ -1709,6 +1877,33 @@ window.evtNote = async function evtNote(eventId) {
   } catch (err) {
     console.error(err);
     alert('Note failed: ' + (err && err.message ? err.message : err));
+  }
+};
+
+window.evtAckVisible = async function evtAckVisible() {
+  try {
+    await ackVisibleEvents();
+  } catch (err) {
+    console.error(err);
+    alert('Ack visible failed: ' + (err && err.message ? err.message : err));
+  }
+};
+
+window.evtSnoozeVisible = async function evtSnoozeVisible(seconds) {
+  try {
+    await snoozeVisibleEvents(Number(seconds || 1800));
+  } catch (err) {
+    console.error(err);
+    alert('Snooze visible failed: ' + (err && err.message ? err.message : err));
+  }
+};
+
+window.evtClearKindSnoozes = async function evtClearKindSnoozes() {
+  try {
+    await clearKindSnoozes();
+  } catch (err) {
+    console.error(err);
+    alert('Clear kind snoozes failed: ' + (err && err.message ? err.message : err));
   }
 };
 
