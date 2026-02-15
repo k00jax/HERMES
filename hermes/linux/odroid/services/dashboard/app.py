@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 from typing import Dict, List
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -26,7 +26,7 @@ if cors_origins_env.strip():
   APP.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in cors_origins_env.split(",") if o.strip()],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
   )
 
@@ -63,6 +63,10 @@ db_locked_count_lock = threading.Lock()
 READY_MAX_AGE_SECS = int(os.environ.get("HERMES_READY_MAX_AGE_SECS", "180"))
 WATCHDOG_STATE_DIR = Path(os.environ.get("HERMES_DASHBOARD_WATCHDOG_STATE_DIR", "/home/odroid/hermes-data/dashboard-watchdog"))
 WATCHDOG_RESTART_COUNT_FILE = WATCHDOG_STATE_DIR / "restart_count"
+EVENT_POSTS_PER_MIN = int(os.environ.get("HERMES_EVENTS_POSTS_PER_MIN", "30"))
+
+event_post_rate_lock = threading.Lock()
+event_post_rate: Dict[str, List[float]] = {}
 
 
 def run_cmd(args: List[str], timeout_sec: float) -> Dict[str, object]:
@@ -196,6 +200,168 @@ def ensure_events_table(conn: sqlite3.Connection) -> None:
   conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);")
   conn.execute("CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);")
   conn.execute("CREATE INDEX IF NOT EXISTS idx_events_dedupe ON events(dedupe_key);")
+
+
+def ensure_event_state_table(conn: sqlite3.Connection) -> None:
+  conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS event_state (
+      target_type TEXT NOT NULL,
+      target_value TEXT NOT NULL,
+      ack_ts_utc TEXT,
+      snooze_until_utc TEXT,
+      note TEXT,
+      updated_ts_utc TEXT NOT NULL,
+      PRIMARY KEY (target_type, target_value)
+    );
+    """
+  )
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_event_state_updated ON event_state(updated_ts_utc);")
+
+
+def now_utc_iso() -> str:
+  return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso_utc_maybe(raw: object):
+  if raw is None:
+    return None
+  text = str(raw).strip()
+  if not text:
+    return None
+  try:
+    return parse_iso8601_utc(text)
+  except Exception:
+    return None
+
+
+def normalize_event_state(row: sqlite3.Row = None) -> Dict[str, object]:
+  if row is None:
+    return {
+      "ack_ts_utc": None,
+      "snooze_until_utc": None,
+      "note": None,
+      "updated_ts_utc": None,
+      "acked": False,
+      "snoozed": False,
+    }
+  item = dict(row)
+  now = datetime.datetime.now(datetime.timezone.utc)
+  snooze_until = parse_iso_utc_maybe(item.get("snooze_until_utc"))
+  return {
+    "ack_ts_utc": item.get("ack_ts_utc"),
+    "snooze_until_utc": item.get("snooze_until_utc"),
+    "note": item.get("note"),
+    "updated_ts_utc": item.get("updated_ts_utc"),
+    "acked": bool(item.get("ack_ts_utc")),
+    "snoozed": bool(snooze_until and snooze_until > now),
+  }
+
+
+def upsert_event_state(
+    conn: sqlite3.Connection,
+    *,
+    target_type: str,
+    target_value: str,
+    ack_ts_utc: str = None,
+    snooze_until_utc: str = None,
+    note: str = None,
+) -> None:
+  ensure_event_state_table(conn)
+  updated_ts = now_utc_iso()
+  conn.execute(
+    """
+    INSERT INTO event_state (target_type, target_value, ack_ts_utc, snooze_until_utc, note, updated_ts_utc)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(target_type, target_value) DO UPDATE SET
+      ack_ts_utc = COALESCE(excluded.ack_ts_utc, event_state.ack_ts_utc),
+      snooze_until_utc = COALESCE(excluded.snooze_until_utc, event_state.snooze_until_utc),
+      note = CASE
+        WHEN excluded.note IS NOT NULL THEN excluded.note
+        ELSE event_state.note
+      END,
+      updated_ts_utc = excluded.updated_ts_utc
+    """,
+    (target_type, target_value, ack_ts_utc, snooze_until_utc, note, updated_ts),
+  )
+
+
+def resolve_event_states(conn: sqlite3.Connection, rows: List[sqlite3.Row]) -> Dict[str, Dict[str, object]]:
+  ensure_event_state_table(conn)
+  id_keys = {str(dict(r).get("id")) for r in rows if dict(r).get("id") is not None}
+  dedupe_keys = {str(dict(r).get("dedupe_key")) for r in rows if dict(r).get("dedupe_key")}
+
+  by_id_raw: Dict[str, Dict[str, object]] = {}
+  by_dedupe_raw: Dict[str, Dict[str, object]] = {}
+
+  if id_keys:
+    placeholders = ",".join(["?"] * len(id_keys))
+    state_rows = conn.execute(
+      f"SELECT target_type, target_value, ack_ts_utc, snooze_until_utc, note, updated_ts_utc FROM event_state WHERE target_type='id' AND target_value IN ({placeholders})",
+      tuple(sorted(id_keys)),
+    ).fetchall()
+    by_id_raw = {str(row["target_value"]): dict(row) for row in state_rows}
+
+  if dedupe_keys:
+    placeholders = ",".join(["?"] * len(dedupe_keys))
+    state_rows = conn.execute(
+      f"SELECT target_type, target_value, ack_ts_utc, snooze_until_utc, note, updated_ts_utc FROM event_state WHERE target_type='dedupe' AND target_value IN ({placeholders})",
+      tuple(sorted(dedupe_keys)),
+    ).fetchall()
+    by_dedupe_raw = {str(row["target_value"]): dict(row) for row in state_rows}
+
+  out: Dict[str, Dict[str, object]] = {}
+  for row in rows:
+    item = dict(row)
+    event_id = str(item.get("id"))
+    dedupe_key = str(item.get("dedupe_key")) if item.get("dedupe_key") else ""
+
+    dedupe_row = by_dedupe_raw.get(dedupe_key) if dedupe_key else None
+    id_row = by_id_raw.get(event_id)
+
+    merged_raw = {
+      "ack_ts_utc": dedupe_row.get("ack_ts_utc") if dedupe_row else None,
+      "snooze_until_utc": dedupe_row.get("snooze_until_utc") if dedupe_row else None,
+      "note": dedupe_row.get("note") if dedupe_row else None,
+      "updated_ts_utc": dedupe_row.get("updated_ts_utc") if dedupe_row else None,
+    }
+    if id_row:
+      for key in ("ack_ts_utc", "snooze_until_utc", "note", "updated_ts_utc"):
+        if id_row.get(key) is not None:
+          merged_raw[key] = id_row.get(key)
+
+    out[event_id] = normalize_event_state(merged_raw)
+  return out
+
+
+def apply_state_to_event_rows(conn: sqlite3.Connection, rows: List[sqlite3.Row]) -> List[Dict[str, object]]:
+  states = resolve_event_states(conn, rows)
+  output: List[Dict[str, object]] = []
+  for row in rows:
+    item = event_row_to_dict(row)
+    state = states.get(str(item.get("id")), normalize_event_state(None))
+    item["state"] = state
+    item["acked"] = bool(state.get("acked"))
+    item["snoozed"] = bool(state.get("snoozed"))
+    item["note"] = state.get("note")
+    output.append(item)
+  return output
+
+
+def enforce_event_post_rate_limit(request: Request) -> None:
+  if EVENT_POSTS_PER_MIN <= 0:
+    return
+  host = "unknown"
+  if request.client and request.client.host:
+    host = str(request.client.host)
+  now = time.time()
+  window_start = now - 60.0
+  with event_post_rate_lock:
+    arr = [ts for ts in event_post_rate.get(host, []) if ts >= window_start]
+    if len(arr) >= EVENT_POSTS_PER_MIN:
+      raise HTTPException(status_code=429, detail="rate limit exceeded")
+    arr.append(now)
+    event_post_rate[host] = arr
 
 
 def event_row_to_dict(row: sqlite3.Row) -> Dict[str, object]:
@@ -456,6 +622,7 @@ def api_events_latest(
     limit: int = Query(50, ge=1, le=200),
     severity: str = Query(""),
     kind: str = Query(""),
+  since_id: int = Query(0, ge=0),
 ) -> Dict[str, object]:
     try:
       with open_db() as conn:
@@ -463,6 +630,9 @@ def api_events_latest(
         conn.row_factory = sqlite3.Row
         where: List[str] = []
         params: List[object] = []
+        if since_id > 0:
+          where.append("id > ?")
+          params.append(since_id)
         if severity.strip():
           where.append("severity = ?")
           params.append(severity.strip())
@@ -475,11 +645,12 @@ def api_events_latest(
           f"FROM events{where_sql} ORDER BY id DESC LIMIT ?"
         )
         rows = conn.execute(sql, (*params, limit)).fetchall()
+        rows_out = apply_state_to_event_rows(conn, rows)
     except sqlite3.OperationalError as exc:
       if "locked" in str(exc).lower():
         return {"limit": limit, "rows": []}
       raise
-    return {"limit": limit, "rows": [event_row_to_dict(row) for row in rows]}
+    return {"limit": limit, "rows": rows_out}
 
 
 @APP.get("/api/events")
@@ -507,11 +678,87 @@ def api_events_since(
           f"FROM events{where_sql} ORDER BY id ASC LIMIT ?"
         )
         rows = conn.execute(sql, (*params, limit)).fetchall()
+        rows_out = apply_state_to_event_rows(conn, rows)
     except sqlite3.OperationalError as exc:
       if "locked" in str(exc).lower():
         return {"since_id": since_id, "rows": []}
       raise
-    return {"since_id": since_id, "rows": [event_row_to_dict(row) for row in rows]}
+    return {"since_id": since_id, "rows": rows_out}
+
+
+@APP.post("/api/events/ack")
+def api_events_ack(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
+    enforce_event_post_rate_limit(request)
+    event_id = payload.get("id")
+    dedupe_key = str(payload.get("dedupe_key") or "").strip()
+    if event_id is None and not dedupe_key:
+      raise HTTPException(status_code=400, detail="id or dedupe_key required")
+
+    with open_db() as conn:
+      ensure_events_table(conn)
+      ensure_event_state_table(conn)
+      target_type = "dedupe" if dedupe_key else "id"
+      target_value = dedupe_key if dedupe_key else str(int(event_id))
+      upsert_event_state(conn, target_type=target_type, target_value=target_value, ack_ts_utc=now_utc_iso())
+      conn.commit()
+    return {"ok": True, "target_type": target_type, "target_value": target_value}
+
+
+@APP.post("/api/events/snooze")
+def api_events_snooze(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
+    enforce_event_post_rate_limit(request)
+    dedupe_key = str(payload.get("dedupe_key") or "").strip()
+    event_id = payload.get("id")
+    seconds_raw = payload.get("seconds", 1800)
+    try:
+      seconds = int(seconds_raw)
+    except Exception:
+      raise HTTPException(status_code=400, detail="seconds must be integer")
+    if seconds < 1 or seconds > 7 * 24 * 3600:
+      raise HTTPException(status_code=400, detail="seconds out of range")
+    if not dedupe_key and event_id is None:
+      raise HTTPException(status_code=400, detail="dedupe_key or id required")
+
+    snooze_until = (
+      datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    with open_db() as conn:
+      ensure_events_table(conn)
+      ensure_event_state_table(conn)
+      target_type = "dedupe" if dedupe_key else "id"
+      target_value = dedupe_key if dedupe_key else str(int(event_id))
+      upsert_event_state(
+        conn,
+        target_type=target_type,
+        target_value=target_value,
+        snooze_until_utc=snooze_until,
+      )
+      conn.commit()
+    return {
+      "ok": True,
+      "target_type": target_type,
+      "target_value": target_value,
+      "snooze_until_utc": snooze_until,
+    }
+
+
+@APP.post("/api/events/note")
+def api_events_note(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
+    enforce_event_post_rate_limit(request)
+    event_id = payload.get("id")
+    if event_id is None:
+      raise HTTPException(status_code=400, detail="id required")
+    note = str(payload.get("note") or "").strip()
+    if len(note) > 400:
+      raise HTTPException(status_code=400, detail="note too long")
+
+    with open_db() as conn:
+      ensure_events_table(conn)
+      ensure_event_state_table(conn)
+      upsert_event_state(conn, target_type="id", target_value=str(int(event_id)), note=note)
+      conn.commit()
+    return {"ok": True, "target_type": "id", "target_value": str(int(event_id)), "note": note}
 
 
 @APP.get("/api/diag", response_class=PlainTextResponse)
@@ -580,6 +827,7 @@ HTML_PAGE = """
     h1 { margin: 0 0 4px 0; }
     .row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
     .card { background: #151c24; border: 1px solid #26313d; border-radius: 10px; padding: 10px 12px; }
+
     .tables-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(320px, 1fr));
@@ -587,9 +835,11 @@ HTML_PAGE = """
       align-items: start;
       grid-auto-rows: min-content;
     }
+
     @media (max-width: 1100px) {
       .tables-grid { grid-template-columns: repeat(2, minmax(280px, 1fr)); }
     }
+
     @media (max-width: 700px) {
       .tables-grid { grid-template-columns: 1fr; }
     }
@@ -641,7 +891,14 @@ HTML_PAGE = """
     .sev-info { color: #9fb3c8; }
     .sev-warn { color: #ffd27f; }
     .sev-crit { color: #ff8a8a; }
-      .event-summary { margin-top: 6px; font-size: 12px; color: #9fb3c8; }
+    .event-summary { margin-top: 6px; font-size: 12px; color: #9fb3c8; }
+    .chip-wrap { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+    .chip { font-size: 10px; border-radius: 999px; padding: 1px 6px; border: 1px solid #26313d; background: #111820; color: #9fb3c8; }
+    .chip-ack { border-color: #2f7d40; color: #9ed8aa; }
+    .chip-snooze { border-color: #92762f; color: #ffd27f; }
+    .chip-note { border-color: #4a5f80; color: #b9cbe3; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .event-actions { display: inline-flex; gap: 6px; }
+    .event-actions button { padding: 4px 8px; font-size: 11px; }
   </style>
 </head>
 <body>
@@ -715,10 +972,12 @@ HTML_PAGE = """
             <th>Kind</th>
             <th>Source</th>
             <th>Message</th>
+            <th>State</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody id=\"events-body\">
-          <tr><td colspan=\"5\" class=\"muted\">loading...</td></tr>
+          <tr><td colspan=\"7\" class=\"muted\">loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -758,6 +1017,7 @@ const eventsState = {
   limit: 50,
   severity: '',
   kind: '',
+  rows: [],
   sticky: {
     active: false,
     eventId: 0,
@@ -1220,6 +1480,7 @@ function initTables() {
 
 function initTrends() {
   const root = document.getElementById('trends');
+  if (!root) return;
   root.innerHTML = '';
   for (const trend of trendSeries) {
     const card = document.createElement('div');
@@ -1262,7 +1523,73 @@ function isAlertEvent(event) {
   const kind = String(event.kind || '').toLowerCase();
   const sev = String(event.severity || '').toLowerCase();
   if (isRecoveredKind(kind)) return false;
-  return sev === 'warn' || sev === 'crit';
+  if (!(sev === 'warn' || sev === 'crit')) return false;
+  const state = event.state || {};
+  if (state.acked) return false;
+  if (state.snoozed) return false;
+  return true;
+}
+
+function hasRecoveryAfter(event, rows) {
+  const id = Number(event && event.id ? event.id : 0);
+  if (!id) return false;
+  return (rows || []).some((row) => {
+    const rowId = Number(row && row.id ? row.id : 0);
+    return rowId > id && isRecoveredKind(row.kind);
+  });
+}
+
+function formatStateChips(event) {
+  const state = event && event.state ? event.state : {};
+  const chips = [];
+  if (state.acked) {
+    chips.push('<span class="chip chip-ack">Acked</span>');
+  }
+  if (state.snoozed) {
+    chips.push('<span class="chip chip-snooze">Snoozed</span>');
+  }
+  if (state.note) {
+    chips.push('<span class="chip chip-note" title="' + escapeHtml(state.note) + '">Note: ' + escapeHtml(state.note) + '</span>');
+  }
+  if (!chips.length) {
+    return '<span class="muted">-</span>';
+  }
+  return '<span class="chip-wrap">' + chips.join('') + '</span>';
+}
+
+async function postJson(url, payload) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error('HTTP ' + resp.status + ' ' + url + ' :: ' + txt.slice(0, 200));
+  }
+  return await resp.json();
+}
+
+async function ackEvent(event) {
+  const payload = event && event.id ? { id: event.id } : { dedupe_key: event.dedupe_key };
+  await postJson('/api/events/ack', payload);
+  await pollEvents();
+}
+
+async function snoozeEvent(event, seconds) {
+  const payload = event && event.dedupe_key
+    ? { dedupe_key: event.dedupe_key, seconds }
+    : { id: event.id, seconds };
+  await postJson('/api/events/snooze', payload);
+  await pollEvents();
+}
+
+async function noteEvent(event) {
+  const current = event && event.state && event.state.note ? String(event.state.note) : '';
+  const text = window.prompt('Note for event #' + String(event.id || '?'), current);
+  if (text === null) return;
+  await postJson('/api/events/note', { id: event.id, note: String(text).trim() });
+  await pollEvents();
 }
 
 function updateLastEventSummary(rows) {
@@ -1291,48 +1618,22 @@ function updateStickyEventBanner() {
 
 function reconcileStickyEvent(rows) {
   const sticky = eventsState.sticky;
-  if (!rows || !rows.length) {
+  const actionable = (rows || []).find((row) => isAlertEvent(row) && !hasRecoveryAfter(row, rows || []));
+  if (!actionable) {
+    sticky.active = false;
+    sticky.eventId = 0;
+    sticky.kind = '';
+    sticky.message = '';
+    sticky.ts = '';
+    sticky.clearedThroughId = 0;
     updateStickyEventBanner();
     return;
   }
-
-  let newestId = 0;
-  for (const row of rows) {
-    const id = Number(row.id || 0);
-    if (id > newestId) newestId = id;
-  }
-
-  if (sticky.active) {
-    const recovered = rows.some((row) => {
-      const id = Number(row.id || 0);
-      return id > sticky.eventId && isRecoveredKind(row.kind);
-    });
-    if (recovered) {
-      sticky.active = false;
-      sticky.eventId = 0;
-      sticky.kind = '';
-      sticky.message = '';
-      sticky.ts = '';
-      sticky.clearedThroughId = Math.max(sticky.clearedThroughId, newestId);
-    }
-  }
-
-  const candidate = rows.find((row) => {
-    const id = Number(row.id || 0);
-    return id > sticky.clearedThroughId && isAlertEvent(row);
-  });
-
-  if (candidate) {
-    const candidateId = Number(candidate.id || 0);
-    if (!sticky.active || candidateId > sticky.eventId) {
-      sticky.active = true;
-      sticky.eventId = candidateId;
-      sticky.kind = String(candidate.kind || 'alert');
-      sticky.message = String(candidate.message || '').slice(0, 180);
-      sticky.ts = String(candidate.ts_local || candidate.ts_utc || '');
-    }
-  }
-
+  sticky.active = true;
+  sticky.eventId = Number(actionable.id || 0);
+  sticky.kind = String(actionable.kind || 'alert');
+  sticky.message = String(actionable.message || '').slice(0, 180);
+  sticky.ts = String(actionable.ts_local || actionable.ts_utc || '');
   updateStickyEventBanner();
 }
 
@@ -1342,7 +1643,7 @@ function renderEvents(rows) {
   body.innerHTML = '';
   if (!rows || !rows.length) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td colspan="5" class="muted">no events</td>';
+    tr.innerHTML = '<td colspan="7" class="muted">no events</td>';
     body.appendChild(tr);
     updateLastEventSummary([]);
     reconcileStickyEvent([]);
@@ -1353,17 +1654,63 @@ function renderEvents(rows) {
     const whenText = event.ts_local || event.ts_utc || '';
     const sev = String(event.severity || 'info').toLowerCase();
     const sevClass = sev === 'crit' ? 'sev-crit' : (sev === 'warn' ? 'sev-warn' : 'sev-info');
+    const eventId = Number(event.id || 0);
+    const actionAck = 'evtAck(' + eventId + ')';
+    const actionSnooze = 'evtSnooze(' + eventId + ',1800)';
+    const actionNote = 'evtNote(' + eventId + ')';
     tr.innerHTML =
       '<td>' + escapeHtml(formatDateTime(whenText)) + '</td>' +
       '<td class="' + sevClass + '">' + escapeHtml(sev) + '</td>' +
       '<td>' + escapeHtml(event.kind || '') + '</td>' +
       '<td>' + escapeHtml(event.source || '') + '</td>' +
-      '<td>' + escapeHtml(event.message || '') + '</td>';
+      '<td>' + escapeHtml(event.message || '') + '</td>' +
+      '<td>' + formatStateChips(event) + '</td>' +
+      '<td><span class="event-actions">' +
+      '<button onclick="' + actionAck + '">Ack</button>' +
+      '<button onclick="' + actionSnooze + '">Snooze 30m</button>' +
+      '<button onclick="' + actionNote + '">Add note</button>' +
+      '</span></td>';
     body.appendChild(tr);
   }
   updateLastEventSummary(rows || []);
   reconcileStickyEvent(rows || []);
 }
+
+window.evtAck = async function evtAck(eventId) {
+  const rows = Array.isArray(eventsState.rows) ? eventsState.rows : [];
+  const event = rows.find((row) => Number(row.id || 0) === Number(eventId));
+  if (!event) return;
+  try {
+    await ackEvent(event);
+  } catch (err) {
+    console.error(err);
+    alert('Ack failed: ' + (err && err.message ? err.message : err));
+  }
+};
+
+window.evtSnooze = async function evtSnooze(eventId, seconds) {
+  const rows = Array.isArray(eventsState.rows) ? eventsState.rows : [];
+  const event = rows.find((row) => Number(row.id || 0) === Number(eventId));
+  if (!event) return;
+  try {
+    await snoozeEvent(event, Number(seconds || 1800));
+  } catch (err) {
+    console.error(err);
+    alert('Snooze failed: ' + (err && err.message ? err.message : err));
+  }
+};
+
+window.evtNote = async function evtNote(eventId) {
+  const rows = Array.isArray(eventsState.rows) ? eventsState.rows : [];
+  const event = rows.find((row) => Number(row.id || 0) === Number(eventId));
+  if (!event) return;
+  try {
+    await noteEvent(event);
+  } catch (err) {
+    console.error(err);
+    alert('Note failed: ' + (err && err.message ? err.message : err));
+  }
+};
 
 function updateTableHead(state, keys) {
   if (keysEqual(state.keys, keys)) {
@@ -1693,7 +2040,8 @@ async function pollEvents() {
     if (eventsState.severity) params.set('severity', eventsState.severity);
     if (eventsState.kind) params.set('kind', eventsState.kind);
     const data = await fetchJson('/api/events/latest?' + params.toString(), controller);
-    renderEvents(data.rows || []);
+    eventsState.rows = Array.isArray(data.rows) ? data.rows : [];
+    renderEvents(eventsState.rows);
   } catch (err) {
     if (!(err instanceof DOMException && err.name === 'AbortError')) {
       console.error(err);
