@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 import matplotlib
@@ -53,6 +53,16 @@ CHART_CACHE_TTL_SECS = 5.0
 chart_cache: Dict[str, tuple] = {}
 chart_cache_lock = threading.Lock()
 chart_render_lock = threading.Lock()
+chart_metrics_lock = threading.Lock()
+chart_render_ms_samples: List[float] = []
+CHART_RENDER_SAMPLES_MAX = int(os.environ.get("HERMES_CHART_RENDER_SAMPLES_MAX", "256"))
+
+db_locked_count = 0
+db_locked_count_lock = threading.Lock()
+
+READY_MAX_AGE_SECS = int(os.environ.get("HERMES_READY_MAX_AGE_SECS", "180"))
+WATCHDOG_STATE_DIR = Path(os.environ.get("HERMES_DASHBOARD_WATCHDOG_STATE_DIR", "/home/odroid/hermes-data/dashboard-watchdog"))
+WATCHDOG_RESTART_COUNT_FILE = WATCHDOG_STATE_DIR / "restart_count"
 
 
 def run_cmd(args: List[str], timeout_sec: float) -> Dict[str, object]:
@@ -122,6 +132,94 @@ def open_db() -> sqlite3.Connection:
   return conn
 
 
+def parse_iso8601_utc(raw: str) -> datetime.datetime:
+  text = raw.strip()
+  if text.endswith("Z"):
+    text = text[:-1] + "+00:00"
+  dt = datetime.datetime.fromisoformat(text)
+  if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=datetime.timezone.utc)
+  return dt.astimezone(datetime.timezone.utc)
+
+
+def current_table_ages(conn: sqlite3.Connection) -> Dict[str, float]:
+  now = datetime.datetime.now(datetime.timezone.utc)
+  ages: Dict[str, float] = {}
+  for table in TABLES:
+    row = conn.execute(f"SELECT ts_utc FROM {table} ORDER BY id DESC LIMIT 1").fetchone()
+    if not row or row[0] is None:
+      ages[table] = -1.0
+      continue
+    try:
+      ts = parse_iso8601_utc(str(row[0]))
+      ages[table] = max(0.0, (now - ts).total_seconds())
+    except Exception:
+      ages[table] = -1.0
+  return ages
+
+
+def get_chart_render_p95_ms() -> float:
+  with chart_metrics_lock:
+    if not chart_render_ms_samples:
+      return 0.0
+    values = sorted(chart_render_ms_samples)
+  idx = int((len(values) - 1) * 0.95)
+  idx = min(max(idx, 0), len(values) - 1)
+  return float(values[idx])
+
+
+def get_watchdog_restart_count() -> int:
+  try:
+    text = WATCHDOG_RESTART_COUNT_FILE.read_text().strip()
+  except Exception:
+    return 0
+  return int(text) if text.isdigit() else 0
+
+
+def build_ready_state() -> Dict[str, object]:
+  failures: List[str] = []
+  table_age_seconds: Dict[str, float] = {table: -1.0 for table in TABLES}
+  db_exists = DB_PATH.exists()
+  db_readable = False
+
+  if not db_exists:
+    failures.append("db_missing")
+  else:
+    try:
+      with open_db() as conn:
+        conn.execute("SELECT 1").fetchone()
+        table_age_seconds = current_table_ages(conn)
+        db_readable = True
+    except sqlite3.OperationalError as exc:
+      if "locked" in str(exc).lower():
+        failures.append("db_locked")
+      else:
+        failures.append("db_operational_error")
+    except Exception:
+      failures.append("db_unreadable")
+
+  for table, age in table_age_seconds.items():
+    if age < 0:
+      failures.append(f"stale_{table}:missing")
+      continue
+    if age > READY_MAX_AGE_SECS:
+      failures.append(f"stale_{table}:{int(age)}s")
+
+  status_cmd = run_cmd(["python3", str(CLIENT_PATH), "status"], timeout_sec=2)
+  if not status_cmd["ok"]:
+    failures.append("logger_status_failed")
+
+  return {
+    "ready": len(failures) == 0,
+    "failures": failures,
+    "db_exists": db_exists,
+    "db_readable": db_readable,
+    "logger_ok": bool(status_cmd["ok"]),
+    "table_age_seconds": table_age_seconds,
+    "stale_threshold_seconds": READY_MAX_AGE_SECS,
+  }
+
+
 def query_series(series: str, minutes: int) -> List[Dict[str, object]]:
     cfg = SERIES_MAP.get(series)
     if not cfg:
@@ -143,6 +241,9 @@ def query_series(series: str, minutes: int) -> List[Dict[str, object]]:
         rows = conn.execute(sql, (cutoff,)).fetchall()
     except sqlite3.OperationalError as exc:
       if "locked" in str(exc).lower():
+        global db_locked_count
+        with db_locked_count_lock:
+          db_locked_count += 1
         return []
       raise
 
@@ -163,10 +264,12 @@ def query_series(series: str, minutes: int) -> List[Dict[str, object]]:
 
 def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, object]]) -> bytes:
   cfg = SERIES_MAP[series]
-  with chart_render_lock:
-    fig, ax = plt.subplots(figsize=(4.6, 1.4), dpi=110)
-    fig.patch.set_facecolor("#151c24")
-    ax.set_facecolor("#151c24")
+  render_start = time.perf_counter()
+  try:
+    with chart_render_lock:
+      fig, ax = plt.subplots(figsize=(4.6, 1.4), dpi=110)
+      fig.patch.set_facecolor("#151c24")
+      ax.set_facecolor("#151c24")
 
     if points:
       x = list(range(len(points)))
@@ -246,11 +349,17 @@ def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, objec
     for spine in ax.spines.values():
       spine.set_visible(False)
 
-    fig.tight_layout(pad=0.2)
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor=fig.get_facecolor())
-    plt.close(fig)
-    return buf.getvalue()
+      fig.tight_layout(pad=0.2)
+      buf = io.BytesIO()
+      fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor=fig.get_facecolor())
+      plt.close(fig)
+      return buf.getvalue()
+  finally:
+    render_ms = (time.perf_counter() - render_start) * 1000.0
+    with chart_metrics_lock:
+      chart_render_ms_samples.append(render_ms)
+      if len(chart_render_ms_samples) > CHART_RENDER_SAMPLES_MAX:
+        del chart_render_ms_samples[: len(chart_render_ms_samples) - CHART_RENDER_SAMPLES_MAX]
 
 
 @APP.get("/api/status")
@@ -294,6 +403,9 @@ def api_latest(table: str, limit: int = Query(20, ge=1, le=200)) -> Dict[str, ob
         rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     except sqlite3.OperationalError as exc:
       if "locked" in str(exc).lower():
+        global db_locked_count
+        with db_locked_count_lock:
+          db_locked_count += 1
         return {"table": table, "limit": limit, "rows": []}
       raise
 
@@ -1107,3 +1219,43 @@ def index() -> HTMLResponse:
 @APP.get("/healthz")
 def healthz() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@APP.get("/readyz")
+def readyz() -> JSONResponse:
+    state = build_ready_state()
+    status = 200 if bool(state.get("ready")) else 503
+    return JSONResponse(content=state, status_code=status)
+
+
+@APP.get("/metrics", response_class=PlainTextResponse)
+def metrics() -> PlainTextResponse:
+    state = build_ready_state()
+    table_ages = state.get("table_age_seconds", {})
+    with db_locked_count_lock:
+        locked_total = int(db_locked_count)
+    chart_p95 = get_chart_render_p95_ms()
+    watchdog_restarts = get_watchdog_restart_count()
+
+    lines = [
+      "# HELP hermes_ready 1 if dashboard readiness checks pass, else 0",
+      "# TYPE hermes_ready gauge",
+      f"hermes_ready {1 if state.get('ready') else 0}",
+      "# HELP hermes_last_ingest_age_seconds Age of newest row per table in seconds; -1 means missing/unknown",
+      "# TYPE hermes_last_ingest_age_seconds gauge",
+    ]
+    for table in TABLES:
+      value = float(table_ages.get(table, -1.0))
+      lines.append(f'hermes_last_ingest_age_seconds{{table="{table}"}} {value:.3f}')
+    lines.extend([
+      "# HELP hermes_db_locked_total Count of sqlite locked events observed by dashboard queries",
+      "# TYPE hermes_db_locked_total counter",
+      f"hermes_db_locked_total {locked_total}",
+      "# HELP hermes_chart_render_ms_p95 Rolling p95 chart render latency in milliseconds",
+      "# TYPE hermes_chart_render_ms_p95 gauge",
+      f"hermes_chart_render_ms_p95 {chart_p95:.3f}",
+      "# HELP hermes_watchdog_restart_count Total dashboard restarts triggered by watchdog",
+      "# TYPE hermes_watchdog_restart_count counter",
+      f"hermes_watchdog_restart_count {watchdog_restarts}",
+    ])
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")

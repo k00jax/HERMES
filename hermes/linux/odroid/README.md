@@ -68,8 +68,13 @@ Check status and API:
 systemctl status hermes-dashboard.service
 curl -sS http://127.0.0.1:8000/api/status
 curl -sS http://127.0.0.1:8000/api/health
+curl -sS http://127.0.0.1:8000/readyz
+curl -sS http://127.0.0.1:8000/metrics
 curl -sS http://100.93.105.81:8000/healthz
 ```
+
+Readiness checks (`/readyz`) include DB readability, logger status, and per-table ingest freshness.
+The watchdog should target localhost readiness (`http://127.0.0.1:8000/readyz`) so local restart logic is independent of Tailnet state.
 
 Open UI:
 
