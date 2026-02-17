@@ -9,7 +9,7 @@ import time
 import datetime
 import threading
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
@@ -64,6 +64,10 @@ READY_MAX_AGE_SECS = int(os.environ.get("HERMES_READY_MAX_AGE_SECS", "180"))
 WATCHDOG_STATE_DIR = Path(os.environ.get("HERMES_DASHBOARD_WATCHDOG_STATE_DIR", "/home/odroid/hermes-data/dashboard-watchdog"))
 WATCHDOG_RESTART_COUNT_FILE = WATCHDOG_STATE_DIR / "restart_count"
 EVENT_POSTS_PER_MIN = int(os.environ.get("HERMES_EVENTS_POSTS_PER_MIN", "30"))
+WIFI_CONNECTED_STATES = {1, 3}
+RSSI_NOT_CONNECTED = 999
+RSSI_MIN_DBM = -120
+RSSI_MAX_DBM = 0
 
 event_post_rate_lock = threading.Lock()
 event_post_rate: Dict[str, List[float]] = {}
@@ -377,19 +381,77 @@ def event_row_to_dict(row: sqlite3.Row) -> Dict[str, object]:
   return item
 
 
+def valid_rssi_dbm(rssi: object) -> bool:
+  try:
+    value = int(rssi)
+  except Exception:
+    return False
+  if value == RSSI_NOT_CONNECTED:
+    return False
+  return RSSI_MIN_DBM <= value <= RSSI_MAX_DBM
+
+
+def wifi_state_from_row(row: Optional[sqlite3.Row]) -> Dict[str, object]:
+  if row is None:
+    return {
+      "present": False,
+      "connected": False,
+      "wifist": None,
+      "rssi": None,
+      "ip": None,
+      "valid_rssi": False,
+      "reason": "missing",
+    }
+  wifist = row["wifist"]
+  rssi = row["rssi"]
+  ip = row["ip"]
+  connected = False
+  try:
+    connected = int(wifist) in WIFI_CONNECTED_STATES
+  except Exception:
+    connected = False
+  valid_rssi = valid_rssi_dbm(rssi)
+  reason = "ok"
+  if not connected:
+    reason = "disconnected"
+  elif not valid_rssi:
+    reason = "bad_rssi"
+  return {
+    "present": True,
+    "connected": connected,
+    "wifist": wifist,
+    "rssi": rssi,
+    "ip": ip,
+    "valid_rssi": valid_rssi,
+    "reason": reason,
+  }
+
+
 def build_ready_state() -> Dict[str, object]:
   failures: List[str] = []
   table_age_seconds: Dict[str, float] = {table: -1.0 for table in TABLES}
   db_exists = DB_PATH.exists()
   db_readable = False
+  wifi_state: Dict[str, object] = {
+    "present": False,
+    "connected": False,
+    "wifist": None,
+    "rssi": None,
+    "ip": None,
+    "valid_rssi": False,
+    "reason": "missing",
+  }
 
   if not db_exists:
     failures.append("db_missing")
   else:
     try:
       with open_db() as conn:
+        conn.row_factory = sqlite3.Row
         conn.execute("SELECT 1").fetchone()
         table_age_seconds = current_table_ages(conn)
+        esp_row = conn.execute("SELECT wifist, rssi, ip FROM esp_net ORDER BY id DESC LIMIT 1").fetchone()
+        wifi_state = wifi_state_from_row(esp_row)
         db_readable = True
     except sqlite3.OperationalError as exc:
       if "locked" in str(exc).lower():
@@ -410,12 +472,21 @@ def build_ready_state() -> Dict[str, object]:
   if not status_cmd["ok"]:
     failures.append("logger_status_failed")
 
+  if not wifi_state.get("present"):
+    failures.append("wifi_missing")
+  else:
+    if not wifi_state.get("connected"):
+      failures.append(f"wifi_disconnected:wifist={wifi_state.get('wifist')}")
+    elif not wifi_state.get("valid_rssi"):
+      failures.append(f"wifi_bad_rssi:{wifi_state.get('rssi')}")
+
   return {
     "ready": len(failures) == 0,
     "failures": failures,
     "db_exists": db_exists,
     "db_readable": db_readable,
     "logger_ok": bool(status_cmd["ok"]),
+    "wifi": wifi_state,
     "table_age_seconds": table_age_seconds,
     "stale_threshold_seconds": READY_MAX_AGE_SECS,
   }
@@ -583,11 +654,21 @@ def api_status() -> Dict[str, object]:
 def api_health() -> Dict[str, object]:
     cmd = run_cmd(["python3", str(CLIENT_PATH), "health"], timeout_sec=2)
     raw = cmd["stdout"] or cmd["stderr"]
+    freshness = parse_freshness(raw if isinstance(raw, str) else "")
+    try:
+      with open_db() as conn:
+        conn.row_factory = sqlite3.Row
+        esp_row = conn.execute("SELECT wifist, rssi, ip FROM esp_net ORDER BY id DESC LIMIT 1").fetchone()
+        wifi_state = wifi_state_from_row(esp_row)
+      if not wifi_state.get("connected") or not wifi_state.get("valid_rssi"):
+        freshness["ESP,NET"] = "dead"
+    except Exception:
+      pass
     return {
         "ok": cmd["ok"],
         "code": cmd["code"],
         "raw": raw,
-        "freshness": parse_freshness(raw if isinstance(raw, str) else ""),
+        "freshness": freshness,
     }
 
 

@@ -48,6 +48,11 @@ EXPECTED_PREFIXES = {
     "ESP,NET": {"period_s": 5.0, "stale_s": 20.0, "dead_s": 60.0},
 }
 
+WIFI_CONNECTED_STATES = {1, 3}
+RSSI_NOT_CONNECTED = 999
+RSSI_MIN_DBM = -120
+RSSI_MAX_DBM = 0
+
 LOCK_PATH = "/tmp/hermesd.lock"
 lock_handle = None
 NRF_LOCK_PATH = "/tmp/hermes-nrf.lock"
@@ -404,6 +409,14 @@ def parse_float(value: Optional[str]):
     except ValueError:
         return None
 
+
+def valid_rssi_dbm(rssi: Optional[int]) -> bool:
+    if rssi is None:
+        return False
+    if rssi == RSSI_NOT_CONNECTED:
+        return False
+    return RSSI_MIN_DBM <= rssi <= RSSI_MAX_DBM
+
 def bump_counter(counter: dict, key: str):
     counter[key] = counter.get(key, 0) + 1
 
@@ -690,6 +703,8 @@ def classify_parse_failure(line: str):
             return "bad_int", "ESP,NET"
         if ntp_raw is not None and ntp is None:
             return "bad_int", "ESP,NET"
+        if wifist in WIFI_CONNECTED_STATES and not valid_rssi_dbm(rssi):
+            return "bad_range", "ESP,NET"
         return None, "ESP,NET"
 
     if prefix == "HB":

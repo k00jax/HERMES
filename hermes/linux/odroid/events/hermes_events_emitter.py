@@ -22,6 +22,10 @@ AIR_SPIKE_PCT_CRIT = float(os.environ.get("HERMES_AIR_SPIKE_PCT_CRIT", "0.80"))
 AIR_SPIKE_COOLDOWN_SECS = int(os.environ.get("HERMES_AIR_SPIKE_COOLDOWN_SECS", "60"))
 
 TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
+WIFI_CONNECTED_STATES = {1, 3}
+RSSI_NOT_CONNECTED = 999
+RSSI_MIN_DBM = -120
+RSSI_MAX_DBM = 0
 
 
 def now_utc() -> datetime.datetime:
@@ -168,11 +172,15 @@ def coerce_int(v: object) -> Optional[int]:
 
 
 def valid_rssi(rssi: Optional[int]) -> bool:
-    return rssi is not None and rssi != 0
+    if rssi is None:
+        return False
+    if rssi == RSSI_NOT_CONNECTED:
+        return False
+    return RSSI_MIN_DBM <= rssi <= RSSI_MAX_DBM
 
 
 def wifi_sample_connected(wifist: Optional[int], rssi: Optional[int]) -> bool:
-    return (wifist == 1) and valid_rssi(rssi)
+    return (wifist in WIFI_CONNECTED_STATES) and valid_rssi(rssi)
 
 
 def trailing_count(samples: List[bool], target: bool) -> int:
