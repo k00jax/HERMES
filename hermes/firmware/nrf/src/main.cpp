@@ -22,6 +22,11 @@ static void handleLine(char *line, uint32_t now);
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
 
+#define SR_DATA   D8
+#define SR_CLOCK  D9
+#define SR_LATCH  D10
+#define SHIFTREG_VALIDATION_TEST 1
+
 static const uint8_t OLED_ADDR_ENV = 0x3C;
 static const uint8_t OLED_ADDR_ESP = 0x3D;
 static const uint8_t SCREEN_WIDTH = 128;
@@ -2662,6 +2667,22 @@ static void heartbeat(uint32_t now) {
 void setup() {
   HERMES_SERIAL.begin(UART_BAUD);
   while (!HERMES_SERIAL) { delay(10); }
+#if SHIFTREG_VALIDATION_TEST
+  pinMode(SR_DATA, OUTPUT);
+  pinMode(SR_CLOCK, OUTPUT);
+  pinMode(SR_LATCH, OUTPUT);
+
+  // Clear everything first
+  digitalWrite(SR_LATCH, LOW);
+  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, 0b00000000);
+  digitalWrite(SR_LATCH, HIGH);
+
+  // Now turn on Q7 (Pin 15)
+  digitalWrite(SR_LATCH, LOW);
+  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, 0b10000000);
+  digitalWrite(SR_LATCH, HIGH);
+  return;
+#endif
   initBootDiagnostics();
   delay(1500);
   emitProtoFrame();
@@ -2699,6 +2720,10 @@ void setup() {
 }
 
 void loop() {
+#if SHIFTREG_VALIDATION_TEST
+  delay(1000);
+  return;
+#endif
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
   static uint32_t hbSeq = 0;
