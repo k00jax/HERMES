@@ -25,7 +25,7 @@ static void handleLine(char *line, uint32_t now);
 #define SR_DATA   D8
 #define SR_CLOCK  D9
 #define SR_LATCH  D10
-#define SHIFTREG_VALIDATION_TEST 1
+#define SHIFTREG_VALIDATION_TEST 0
 
 static const uint8_t OLED_ADDR_ENV = 0x3C;
 static const uint8_t OLED_ADDR_ESP = 0x3D;
@@ -2721,7 +2721,12 @@ void setup() {
 
 void loop() {
 #if SHIFTREG_VALIDATION_TEST
-  delay(1000);
+  static bool q7On = true;
+  digitalWrite(SR_LATCH, LOW);
+  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, q7On ? 0b10000000 : 0b00000000);
+  digitalWrite(SR_LATCH, HIGH);
+  q7On = !q7On;
+  delay(700);
   return;
 #endif
   const uint32_t now = millis();
