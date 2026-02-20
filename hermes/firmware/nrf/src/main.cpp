@@ -25,7 +25,7 @@ static void handleLine(char *line, uint32_t now);
 #define SR_DATA   D8
 #define SR_CLOCK  D9
 #define SR_LATCH  D10
-#define SHIFTREG_VALIDATION_TEST 0
+#define SHIFTREG_VALIDATION_TEST 1
 
 static const uint8_t OLED_ADDR_ENV = 0x3C;
 static const uint8_t OLED_ADDR_ESP = 0x3D;
