@@ -187,7 +187,10 @@ static const int BTN_SELECT = D2;
 static const int BTN_NEXT = D3;
 static const uint32_t INPUT_DEBOUNCE_MS = 80;
 static const uint32_t INPUT_HOLD_MS = 1500;
-static uint32_t inputLastEventMs = 0;
+static uint32_t inputPrevEdgeMs = 0;
+static uint32_t inputSelectEdgeMs = 0;
+static uint32_t inputNextEdgeMs = 0;
+static uint32_t inputLastRawReportMs = 0;
 static bool inputLastPrev = HIGH;
 static bool inputLastSelect = HIGH;
 static bool inputLastNext = HIGH;
@@ -241,27 +244,48 @@ static void runInputBuzzerTestLoop() {
     testBeep(1500, 120);
   }
 
-  if (now - inputLastEventMs >= INPUT_DEBOUNCE_MS) {
-    if (inputLastPrev == HIGH && prev == LOW) {
-      inputLastEventMs = now;
+  if (now - inputLastRawReportMs >= 250) {
+    inputLastRawReportMs = now;
+    HERMES_SERIAL.print("RAW prev=");
+    HERMES_SERIAL.print(prev == LOW ? "LOW" : "HIGH");
+    HERMES_SERIAL.print(", select=");
+    HERMES_SERIAL.print(sel == LOW ? "LOW" : "HIGH");
+    HERMES_SERIAL.print(", next=");
+    HERMES_SERIAL.println(next == LOW ? "LOW" : "HIGH");
+  }
+
+  if (prev != inputLastPrev && (now - inputPrevEdgeMs >= INPUT_DEBOUNCE_MS)) {
+    inputPrevEdgeMs = now;
+    inputLastPrev = prev;
+    if (prev == LOW) {
       HERMES_SERIAL.println("PREV pressed");
       testBeep(900, 50);
-    }
-    if (inputLastNext == HIGH && next == LOW) {
-      inputLastEventMs = now;
-      HERMES_SERIAL.println("NEXT pressed");
-      testBeep(1100, 50);
-    }
-    if (inputLastSelect == HIGH && sel == LOW) {
-      inputLastEventMs = now;
-      HERMES_SERIAL.println("SELECT pressed");
-      testBeep(1600, 70);
+    } else {
+      HERMES_SERIAL.println("PREV released");
     }
   }
 
-  inputLastPrev = prev;
-  inputLastSelect = sel;
-  inputLastNext = next;
+  if (sel != inputLastSelect && (now - inputSelectEdgeMs >= INPUT_DEBOUNCE_MS)) {
+    inputSelectEdgeMs = now;
+    inputLastSelect = sel;
+    if (sel == LOW) {
+      HERMES_SERIAL.println("SELECT pressed");
+      testBeep(1600, 70);
+    } else {
+      HERMES_SERIAL.println("SELECT released");
+    }
+  }
+
+  if (next != inputLastNext && (now - inputNextEdgeMs >= INPUT_DEBOUNCE_MS)) {
+    inputNextEdgeMs = now;
+    inputLastNext = next;
+    if (next == LOW) {
+      HERMES_SERIAL.println("NEXT pressed");
+      testBeep(1100, 50);
+    } else {
+      HERMES_SERIAL.println("NEXT released");
+    }
+  }
 }
 
 static Adafruit_SSD1306 displayEnv(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
