@@ -25,7 +25,21 @@ static void handleLine(char *line, uint32_t now);
 #define SR_DATA   D8
 #define SR_CLOCK  D9
 #define SR_LATCH  D10
-#define SHIFTREG_VALIDATION_TEST 0
+
+enum HermesStatusColor : uint8_t {
+  STATUS_OFF = 0,
+  STATUS_RED,
+  STATUS_GREEN,
+  STATUS_BLUE,
+  STATUS_YELLOW,
+  STATUS_CYAN,
+  STATUS_MAGENTA,
+  STATUS_WHITE
+};
+
+static uint8_t g_srMask = 0xFF;
+static bool g_errorOn = false;
+static HermesStatusColor g_statusColor = STATUS_OFF;
 
 static const uint8_t OLED_ADDR_ENV = 0x3C;
 static const uint8_t OLED_ADDR_ESP = 0x3D;
@@ -66,6 +80,95 @@ static const int TIMEZONE_OFFSET_MIN = -360;
 static const char *FW_NAME = "hermes-nrf";
 
 static const int HIST_N = 120;
+
+static uint8_t statusToMask(HermesStatusColor color) {
+  switch (color) {
+    case STATUS_RED:
+      return static_cast<uint8_t>(1 << 1);
+    case STATUS_GREEN:
+      return static_cast<uint8_t>(1 << 2);
+    case STATUS_BLUE:
+      return static_cast<uint8_t>(1 << 3);
+    case STATUS_YELLOW:
+      return static_cast<uint8_t>((1 << 1) | (1 << 2));
+    case STATUS_CYAN:
+      return static_cast<uint8_t>((1 << 2) | (1 << 3));
+    case STATUS_MAGENTA:
+      return static_cast<uint8_t>((1 << 1) | (1 << 3));
+    case STATUS_WHITE:
+      return static_cast<uint8_t>((1 << 1) | (1 << 2) | (1 << 3));
+    case STATUS_OFF:
+    default:
+      return 0;
+  }
+}
+
+static void srWrite(uint8_t mask) {
+  if (mask == g_srMask) {
+    return;
+  }
+  g_srMask = mask;
+  digitalWrite(SR_LATCH, LOW);
+  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, g_srMask);
+  digitalWrite(SR_LATCH, HIGH);
+}
+
+static void srClear() {
+  g_errorOn = false;
+  g_statusColor = STATUS_OFF;
+  srWrite(0x00);
+}
+
+static void hermesSetMask(uint8_t mask) {
+  uint8_t effectiveMask = static_cast<uint8_t>(mask & 0xFE);
+  if (g_errorOn) {
+    effectiveMask = static_cast<uint8_t>(effectiveMask | (1 << 0));
+  }
+  srWrite(effectiveMask);
+}
+
+static void hermesSetError(bool on) {
+  g_errorOn = on;
+  hermesSetMask(statusToMask(g_statusColor));
+}
+
+static void hermesSetStatusColor(HermesStatusColor color) {
+  g_statusColor = color;
+  hermesSetMask(statusToMask(color));
+}
+
+static void hermesSetStatusPulse(HermesStatusColor color, bool pulseOn) {
+  if (pulseOn) {
+    hermesSetStatusColor(color);
+  } else {
+    hermesSetStatusColor(STATUS_OFF);
+  }
+}
+
+static void hermesBootStrobe() {
+  srClear();
+  for (int i = 0; i < 2; ++i) {
+    hermesSetStatusColor(STATUS_RED);
+    delay(80);
+    hermesSetStatusColor(STATUS_GREEN);
+    delay(80);
+    hermesSetStatusColor(STATUS_BLUE);
+    delay(80);
+    hermesSetStatusColor(STATUS_WHITE);
+    delay(80);
+    hermesSetStatusColor(STATUS_OFF);
+    delay(120);
+  }
+  hermesSetStatusColor(STATUS_OFF);
+}
+
+static void hermesInitShiftRegisterLEDs() {
+  pinMode(SR_DATA, OUTPUT);
+  pinMode(SR_CLOCK, OUTPUT);
+  pinMode(SR_LATCH, OUTPUT);
+  srClear();
+  hermesBootStrobe();
+}
 
 enum UiStack {
   UI_DEBUG = 0,
@@ -2627,6 +2730,20 @@ static void updateLed(uint32_t now) {
         || (phase >= (4 * ALERT_FLASH_STEP_MS) && phase < (5 * ALERT_FLASH_STEP_MS));
   }
 
+  if (parseErrorActive) {
+    hermesSetError(true);
+    hermesSetStatusPulse(STATUS_RED, ledOn);
+  } else if (!hasLink) {
+    hermesSetError(false);
+    hermesSetStatusPulse(STATUS_YELLOW, ledOn);
+  } else if (espTelemetry.rssi == RSSI_NOT_CONNECTED) {
+    hermesSetError(false);
+    hermesSetStatusPulse(STATUS_BLUE, ledOn);
+  } else {
+    hermesSetError(false);
+    hermesSetStatusColor(STATUS_GREEN);
+  }
+
   digitalWrite(STATUS_LED_PIN, ledOn ? HIGH : LOW);
   digitalWrite(DEBUG_LED_PIN, debugLedOn ? HIGH : LOW);
 }
@@ -2667,22 +2784,6 @@ static void heartbeat(uint32_t now) {
 void setup() {
   HERMES_SERIAL.begin(UART_BAUD);
   while (!HERMES_SERIAL) { delay(10); }
-#if SHIFTREG_VALIDATION_TEST
-  pinMode(SR_DATA, OUTPUT);
-  pinMode(SR_CLOCK, OUTPUT);
-  pinMode(SR_LATCH, OUTPUT);
-
-  // Clear everything first
-  digitalWrite(SR_LATCH, LOW);
-  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, 0b00000000);
-  digitalWrite(SR_LATCH, HIGH);
-
-  // Now turn on Q7 (Pin 15)
-  digitalWrite(SR_LATCH, LOW);
-  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, 0b10000000);
-  digitalWrite(SR_LATCH, HIGH);
-  return;
-#endif
   initBootDiagnostics();
   delay(1500);
   emitProtoFrame();
@@ -2695,6 +2796,7 @@ void setup() {
   digitalWrite(STATUS_LED_PIN, LOW);
   pinMode(DEBUG_LED_PIN, OUTPUT);
   digitalWrite(DEBUG_LED_PIN, LOW);
+  hermesInitShiftRegisterLEDs();
   pinMode(PIN_BTN, INPUT_PULLUP);
   pinMode(PIN_SW, INPUT_PULLUP);
   btnRawState = digitalRead(PIN_BTN);
@@ -2720,15 +2822,6 @@ void setup() {
 }
 
 void loop() {
-#if SHIFTREG_VALIDATION_TEST
-  static bool q7On = true;
-  digitalWrite(SR_LATCH, LOW);
-  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, q7On ? 0b10000000 : 0b00000000);
-  digitalWrite(SR_LATCH, HIGH);
-  q7On = !q7On;
-  delay(700);
-  return;
-#endif
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
   static uint32_t hbSeq = 0;
