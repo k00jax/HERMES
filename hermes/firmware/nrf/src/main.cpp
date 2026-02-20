@@ -21,6 +21,7 @@ static void handleLine(char *line, uint32_t now);
 #define HERMES_SERIAL Serial
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
+#define HERMES_INPUT_BUZZER_TEST 1
 
 #define SR_DATA   D8
 #define SR_CLOCK  D9
@@ -179,6 +180,89 @@ static const int DEBUG_PAGE_COUNT = 3;
 static const int USER_PAGE_COUNT = 5;
 static const uint32_t DISPLAY_DEBUG_INTERVAL_MS = 400;
 static const uint32_t DISPLAY_USER_INTERVAL_MS = 800;
+
+static const int BUZZER_PIN = D0;
+static const int BTN_PREV = D1;
+static const int BTN_SELECT = D2;
+static const int BTN_NEXT = D3;
+static const uint32_t INPUT_DEBOUNCE_MS = 80;
+static const uint32_t INPUT_HOLD_MS = 1500;
+static uint32_t inputLastEventMs = 0;
+static bool inputLastPrev = HIGH;
+static bool inputLastSelect = HIGH;
+static bool inputLastNext = HIGH;
+static bool inputChordActive = false;
+static bool inputChordFired = false;
+static uint32_t inputChordStartMs = 0;
+
+static void testBeep(uint16_t freq, uint16_t durMs) {
+  tone(BUZZER_PIN, freq, durMs);
+}
+
+static void runInputBuzzerTestSetup() {
+  delay(200);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BTN_PREV, INPUT_PULLUP);
+  pinMode(BTN_SELECT, INPUT_PULLUP);
+  pinMode(BTN_NEXT, INPUT_PULLUP);
+  inputLastPrev = digitalRead(BTN_PREV);
+  inputLastSelect = digitalRead(BTN_SELECT);
+  inputLastNext = digitalRead(BTN_NEXT);
+
+  testBeep(880, 80);
+  delay(120);
+  testBeep(1320, 80);
+
+  HERMES_SERIAL.println("HERMES input+buzzer test ready (D0 buzzer, D1/D2/D3 buttons).");
+}
+
+static void runInputBuzzerTestLoop() {
+  const bool prev = digitalRead(BTN_PREV);
+  const bool sel = digitalRead(BTN_SELECT);
+  const bool next = digitalRead(BTN_NEXT);
+  const uint32_t now = millis();
+
+  const bool allPressed = (prev == LOW && sel == LOW && next == LOW);
+  if (allPressed && !inputChordActive) {
+    inputChordActive = true;
+    inputChordFired = false;
+    inputChordStartMs = now;
+  }
+  if (!allPressed) {
+    inputChordActive = false;
+    inputChordFired = false;
+    inputChordStartMs = 0;
+  }
+  if (inputChordActive && !inputChordFired && (now - inputChordStartMs >= INPUT_HOLD_MS)) {
+    inputChordFired = true;
+    HERMES_SERIAL.println("ALT MODE (3-button hold) triggered");
+    testBeep(2000, 100);
+    delay(50);
+    testBeep(1500, 120);
+  }
+
+  if (now - inputLastEventMs >= INPUT_DEBOUNCE_MS) {
+    if (inputLastPrev == HIGH && prev == LOW) {
+      inputLastEventMs = now;
+      HERMES_SERIAL.println("PREV pressed");
+      testBeep(900, 50);
+    }
+    if (inputLastNext == HIGH && next == LOW) {
+      inputLastEventMs = now;
+      HERMES_SERIAL.println("NEXT pressed");
+      testBeep(1100, 50);
+    }
+    if (inputLastSelect == HIGH && sel == LOW) {
+      inputLastEventMs = now;
+      HERMES_SERIAL.println("SELECT pressed");
+      testBeep(1600, 70);
+    }
+  }
+
+  inputLastPrev = prev;
+  inputLastSelect = sel;
+  inputLastNext = next;
+}
 
 static Adafruit_SSD1306 displayEnv(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 static Adafruit_SSD1306 displayEsp(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -2784,6 +2868,10 @@ static void heartbeat(uint32_t now) {
 void setup() {
   HERMES_SERIAL.begin(UART_BAUD);
   while (!HERMES_SERIAL) { delay(10); }
+#if HERMES_INPUT_BUZZER_TEST
+  runInputBuzzerTestSetup();
+  return;
+#endif
   initBootDiagnostics();
   delay(1500);
   emitProtoFrame();
@@ -2822,6 +2910,10 @@ void setup() {
 }
 
 void loop() {
+#if HERMES_INPUT_BUZZER_TEST
+  runInputBuzzerTestLoop();
+  return;
+#endif
   const uint32_t now = millis();
   static uint32_t lastHB = 0;
   static uint32_t hbSeq = 0;
