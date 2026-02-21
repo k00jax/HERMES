@@ -6,6 +6,8 @@ import os
 import io
 import math
 import time
+import uuid
+import statistics
 import datetime
 import threading
 from pathlib import Path
@@ -74,6 +76,9 @@ RSSI_MAX_DBM = 0
 
 event_post_rate_lock = threading.Lock()
 event_post_rate: Dict[str, List[float]] = {}
+
+radar_calibration_lock = threading.Lock()
+radar_calibration_sessions: Dict[str, Dict[str, object]] = {}
 
 
 def run_cmd(args: List[str], timeout_sec: float) -> Dict[str, object]:
@@ -213,6 +218,191 @@ def ensure_events_table(conn: sqlite3.Connection) -> None:
   conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);")
   conn.execute("CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);")
   conn.execute("CREATE INDEX IF NOT EXISTS idx_events_dedupe ON events(dedupe_key);")
+
+
+def ensure_radar_calibration_table(conn: sqlite3.Connection) -> None:
+  conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS radar_calibration (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts_utc TEXT NOT NULL,
+      ts_local TEXT,
+      duration_s INTEGER NOT NULL,
+      max_range_cm INTEGER NOT NULL,
+      samples INTEGER NOT NULL,
+      baseline_detect_cm REAL,
+      noise_detect_cm REAL,
+      false_presence_count INTEGER NOT NULL,
+      notes TEXT
+    );
+    """
+  )
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_radar_calibration_ts ON radar_calibration(ts_utc);")
+
+
+def insert_event_row(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    severity: str,
+    source: str,
+    message: str,
+    data: Optional[Dict[str, object]] = None,
+    dedupe_key: Optional[str] = None,
+) -> int:
+  ensure_events_table(conn)
+  now_utc = now_utc_iso()
+  now_local = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+  payload = json.dumps(data or {}, separators=(",", ":"), ensure_ascii=False)
+  cur = conn.execute(
+    """
+    INSERT INTO events (ts_utc, ts_local, kind, severity, source, message, data_json, dedupe_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+    (now_utc, now_local, kind, severity, source, message, payload, dedupe_key),
+  )
+  return int(cur.lastrowid or 0)
+
+
+def trigger_radar_calibration_jingle() -> Dict[str, object]:
+  cmd = run_cmd(["python3", str(CLIENT_PATH), "send", "BUZZER,JINGLE,cal_done"], timeout_sec=2)
+  return {
+    "ok": bool(cmd.get("ok")),
+    "code": int(cmd.get("code", 1)),
+    "raw": (cmd.get("stdout") or cmd.get("stderr") or "")[:200],
+  }
+
+
+def summarize_radar_calibration_window(
+    conn: sqlite3.Connection,
+    *,
+    start_ts_utc: str,
+    end_ts_utc: str,
+    duration_s: int,
+    max_range_cm: int,
+) -> Dict[str, object]:
+  conn.row_factory = sqlite3.Row
+  rows = conn.execute(
+    """
+    SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc
+    FROM radar
+    WHERE ts_utc >= ? AND ts_utc <= ?
+    ORDER BY ts_utc ASC
+    """,
+    (start_ts_utc, end_ts_utc),
+  ).fetchall()
+
+  alive_rows = [r for r in rows if int(r["alive"] or 0) == 1]
+  samples = len(alive_rows)
+  false_presence_count = sum(1 for r in alive_rows if int(r["target"] or 0) != 0)
+  empty_detect = [float(r["detect_cm"]) for r in alive_rows if int(r["target"] or 0) == 0 and r["detect_cm"] is not None]
+  all_detect = [float(r["detect_cm"]) for r in alive_rows if r["detect_cm"] is not None]
+
+  notes: List[str] = []
+  baseline_source = empty_detect
+  if not baseline_source:
+    baseline_source = all_detect
+    if baseline_source:
+      notes.append("no target==0 samples; baseline from all alive samples")
+    else:
+      notes.append("no alive detect samples")
+
+  baseline_detect_cm: Optional[float] = None
+  noise_detect_cm: Optional[float] = None
+  if baseline_source:
+    baseline_detect_cm = float(statistics.median(baseline_source))
+    med = baseline_detect_cm
+    abs_dev = [abs(v - med) for v in baseline_source]
+    noise_detect_cm = float(statistics.median(abs_dev)) if abs_dev else 0.0
+
+  now_utc = now_utc_iso()
+  now_local = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+  result = {
+    "ts_utc": now_utc,
+    "ts_local": now_local,
+    "duration_s": int(duration_s),
+    "max_range_cm": int(max_range_cm),
+    "samples": int(samples),
+    "baseline_detect_cm": baseline_detect_cm,
+    "noise_detect_cm": noise_detect_cm,
+    "false_presence_count": int(false_presence_count),
+    "notes": "; ".join(notes) if notes else "",
+  }
+  return result
+
+
+def finalize_radar_calibration_session(session_id: str) -> Dict[str, object]:
+  with radar_calibration_lock:
+    session = radar_calibration_sessions.get(session_id)
+    if not session:
+      raise HTTPException(status_code=404, detail="session not found")
+    if session.get("status") in {"done", "cancelled", "error"}:
+      return dict(session)
+    session["status"] = "finalizing"
+
+  try:
+    with open_db() as conn:
+      ensure_radar_calibration_table(conn)
+      summary = summarize_radar_calibration_window(
+        conn,
+        start_ts_utc=str(session["start_ts_utc"]),
+        end_ts_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        duration_s=int(session["duration_s"]),
+        max_range_cm=int(session["max_range_cm"]),
+      )
+      cur = conn.execute(
+        """
+        INSERT INTO radar_calibration (
+          ts_utc, ts_local, duration_s, max_range_cm, samples, baseline_detect_cm, noise_detect_cm,
+          false_presence_count, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+          summary["ts_utc"],
+          summary["ts_local"],
+          summary["duration_s"],
+          summary["max_range_cm"],
+          summary["samples"],
+          summary["baseline_detect_cm"],
+          summary["noise_detect_cm"],
+          summary["false_presence_count"],
+          summary["notes"],
+        ),
+      )
+      calibration_id = int(cur.lastrowid or 0)
+
+      msg = (
+        "Radar calibration complete: "
+        f"samples={summary['samples']}, false_presence={summary['false_presence_count']}, "
+        f"baseline_detect={summary['baseline_detect_cm'] if summary['baseline_detect_cm'] is not None else 'n/a'}, "
+        f"noise={summary['noise_detect_cm'] if summary['noise_detect_cm'] is not None else 'n/a'}"
+      )
+      insert_event_row(
+        conn,
+        kind="radar_calibration",
+        severity="info",
+        source="dashboard",
+        message=msg,
+        data={"session_id": session_id, "calibration_id": calibration_id, **summary},
+      )
+      conn.commit()
+
+    buzzer = trigger_radar_calibration_jingle()
+    result = {"id": calibration_id, **summary, "buzzer": buzzer}
+    with radar_calibration_lock:
+      session = radar_calibration_sessions.get(session_id, session)
+      session["status"] = "done"
+      session["result"] = result
+      session["completed_ts_utc"] = now_utc_iso()
+      radar_calibration_sessions[session_id] = session
+    return dict(session)
+  except Exception as exc:
+    with radar_calibration_lock:
+      session = radar_calibration_sessions.get(session_id, session)
+      session["status"] = "error"
+      session["error"] = str(exc)
+      radar_calibration_sessions[session_id] = session
+    raise
 
 
 def ensure_event_state_table(conn: sqlite3.Connection) -> None:
@@ -1054,6 +1244,141 @@ def api_radar_latest() -> Dict[str, object]:
     }
 
 
+@APP.post("/api/radar/calibrate")
+def api_radar_calibrate_start(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+    duration_s = int(payload.get("duration_s", 60) or 60)
+    max_range_cm = int(payload.get("max_range_cm", 600) or 600)
+    duration_s = max(10, min(duration_s, 300))
+    max_range_cm = max(100, min(max_range_cm, 1200))
+    session_id = uuid.uuid4().hex[:12]
+    started_at = datetime.datetime.now(datetime.timezone.utc)
+    ends_at = started_at + datetime.timedelta(seconds=duration_s)
+    session = {
+      "session_id": session_id,
+      "status": "running",
+      "duration_s": duration_s,
+      "max_range_cm": max_range_cm,
+      "start_ts_utc": started_at.replace(microsecond=0).isoformat(),
+      "start_monotonic": time.monotonic(),
+      "ends_at_ts_utc": ends_at.replace(microsecond=0).isoformat(),
+      "result": None,
+    }
+    with radar_calibration_lock:
+      radar_calibration_sessions[session_id] = session
+    return {
+      "session_id": session_id,
+      "status": "running",
+      "duration_s": duration_s,
+      "max_range_cm": max_range_cm,
+      "ends_at": session["ends_at_ts_utc"],
+    }
+
+
+@APP.get("/api/radar/calibrate/{session_id}")
+def api_radar_calibrate_status(session_id: str) -> Dict[str, object]:
+    with radar_calibration_lock:
+      session = radar_calibration_sessions.get(session_id)
+    if not session:
+      raise HTTPException(status_code=404, detail="session not found")
+
+    status = str(session.get("status"))
+    elapsed_s = max(0.0, time.monotonic() - float(session.get("start_monotonic", time.monotonic())))
+    duration_s = int(session.get("duration_s", 60))
+    remaining_s = max(0, int(round(duration_s - elapsed_s)))
+
+    if status == "running" and elapsed_s >= duration_s:
+      session = finalize_radar_calibration_session(session_id)
+      status = str(session.get("status"))
+
+    samples = 0
+    false_presence_count = 0
+    if status == "running":
+      try:
+        with open_db() as conn:
+          conn.row_factory = sqlite3.Row
+          row = conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN alive=1 THEN 1 ELSE 0 END) AS samples,
+              SUM(CASE WHEN alive=1 AND target!=0 THEN 1 ELSE 0 END) AS false_presence_count
+            FROM radar
+            WHERE ts_utc >= ? AND ts_utc <= ?
+            """,
+            (str(session.get("start_ts_utc")), datetime.datetime.now(datetime.timezone.utc).isoformat()),
+          ).fetchone()
+          if row:
+            samples = int(row["samples"] or 0)
+            false_presence_count = int(row["false_presence_count"] or 0)
+      except Exception:
+        pass
+
+    response = {
+      "session_id": session_id,
+      "status": status,
+      "elapsed_s": int(max(0, round(min(elapsed_s, duration_s)))) if status == "running" else duration_s,
+      "remaining_s": remaining_s if status == "running" else 0,
+      "samples": samples,
+      "false_presence_count": false_presence_count,
+    }
+    if status == "done":
+      response["result"] = session.get("result")
+    if status == "error":
+      response["error"] = session.get("error")
+    if status == "cancelled":
+      response["cancelled_ts_utc"] = session.get("cancelled_ts_utc")
+    return response
+
+
+@APP.post("/api/radar/calibrate/{session_id}/cancel")
+def api_radar_calibrate_cancel(session_id: str) -> Dict[str, object]:
+    with radar_calibration_lock:
+      session = radar_calibration_sessions.get(session_id)
+      if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+      if session.get("status") == "running":
+        session["status"] = "cancelled"
+        session["cancelled_ts_utc"] = now_utc_iso()
+        radar_calibration_sessions[session_id] = session
+    return {"session_id": session_id, "status": str(session.get("status"))}
+
+
+@APP.post("/api/radar/calibration/{calibration_id}/note")
+def api_radar_calibration_note(calibration_id: int, payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+    note = str(payload.get("note") or "").strip()
+    if len(note) > 400:
+      raise HTTPException(status_code=400, detail="note too long")
+    with open_db() as conn:
+      ensure_radar_calibration_table(conn)
+      cur = conn.execute("UPDATE radar_calibration SET notes=? WHERE id=?", (note, int(calibration_id)))
+      conn.commit()
+      if int(cur.rowcount or 0) == 0:
+        raise HTTPException(status_code=404, detail="calibration not found")
+    return {"ok": True, "id": int(calibration_id), "note": note}
+
+
+@APP.get("/api/radar/calibration/history")
+def api_radar_calibration_history(limit: int = Query(10, ge=1, le=100)) -> Dict[str, object]:
+    if not DB_PATH.exists():
+      return {"rows": []}
+    try:
+      with open_db() as conn:
+        ensure_radar_calibration_table(conn)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM radar_calibration ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    except sqlite3.OperationalError as exc:
+      if "locked" in str(exc).lower():
+        return {"rows": []}
+      raise
+    return {"rows": [dict(r) for r in rows]}
+
+
+@APP.get("/api/radar/calibration/latest")
+def api_radar_calibration_latest() -> Dict[str, object]:
+    payload = api_radar_calibration_history(limit=1)
+    rows = payload.get("rows") or []
+    return {"row": rows[0] if rows else None}
+
+
 @APP.get("/chart/{series}.png")
 def chart_png(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Response:
     if series not in SERIES_MAP:
@@ -1226,6 +1551,23 @@ HTML_PAGE = """
     .slot-ctrl { display: inline-flex; align-items: center; gap: 6px; }
     .slot-ctrl label { font-size: 12px; color: #9fb3c8; }
     .slot-ctrl select { background: #111820; color: #d9e6f3; border: 1px solid #26313d; border-radius: 8px; padding: 5px 8px; }
+    .btn-diagnostics { padding: 6px 10px; font-size: 12px; }
+    .rssi-box { border: 2px solid rgba(255,255,255,0.08); }
+    .rssi-good { border-color: rgba(0, 200, 100, 0.70); box-shadow: 0 0 0 1px rgba(0,200,100,0.15) inset; }
+    .rssi-med  { border-color: rgba(255, 180, 0, 0.70); box-shadow: 0 0 0 1px rgba(255,180,0,0.12) inset; }
+    .rssi-poor { border-color: rgba(255, 70, 70, 0.75); box-shadow: 0 0 0 1px rgba(255,70,70,0.12) inset; }
+    .status-pill { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; border: 1px solid #2a3b4f; background: #111820; color: #c3d4e6; font-size: 11px; font-weight: 650; }
+    .state-offline { border-color: #5a6775; color: #bdc8d4; }
+    .state-none { border-color: #2f5f9b; color: #a7c4e5; }
+    .state-moving { border-color: #4ca9ff; color: #c8e6ff; }
+    .state-still { border-color: #3e6fad; color: #b7d0ea; }
+    .state-both { border-color: #66bb6a; color: #d2f0d5; }
+    .cal-btn { margin-left: 8px; padding: 5px 9px; font-size: 11px; border-radius: 999px; }
+    .cal-panel { border: 1px solid #2a3440; border-radius: 8px; background: #101722; padding: 10px; font-size: 12px; }
+    .cal-instruction { color: #c6d5e7; margin-bottom: 8px; }
+    .cal-counters { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+    .cal-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .cal-history { margin-top: 8px; color: #9fb3c8; font-size: 11px; max-height: 100px; overflow: auto; }
   </style>
 </head>
 <body>
@@ -1242,8 +1584,7 @@ HTML_PAGE = """
     <div class=\"card status\"><b>Port</b><div id=\"port\">-</div></div>
     <div class=\"card status\"><b>Lines In</b><div id=\"lines\">-</div></div>
     <div class=\"card status\"><b>Last Error</b><div id=\"error\">-</div></div>
-    <div class=\"card\"><button onclick=\"downloadDiag()\">Download diagnostics</button></div>
-    <div class=\"card status\"><b>RSSI</b><div id=\"top-rssi\">--</div></div>
+    <div id=\"rssiBox\" class=\"card status rssi-box\"><b>RSSI</b><div id=\"top-rssi\">--</div></div>
   </div>
 
   <div class=\"row\" id=\"freshness\"></div>
@@ -1272,6 +1613,7 @@ HTML_PAGE = """
           <div id="events-last" class="event-summary">Last event: loading...</div>
         </div>
         <div style=\"display:flex; align-items:center; gap:8px;\">
+          <button class=\"btn-diagnostics\" onclick=\"downloadDiag()\">Download diagnostics</button>
           <span class=\"muted small\">Severity</span>
           <select id=\"events-severity\" style=\"padding:5px 8px;\">
             <option value=\"\">all</option>
@@ -1354,8 +1696,6 @@ const radarNow = {
   enabled: true,
   view: 'now',
   maxRangeCm: 300,
-  blipAngleDeg: 225,
-  sweepAngleDeg: 0,
   state: {
     alive: 0,
     target: 0,
@@ -1393,6 +1733,12 @@ let readyController = null;
 let eventsController = null;
 let lastUpdatedMs = 0;
 let trendMinutes = 60;
+const radarCalibration = {
+  sessionId: null,
+  status: 'idle',
+  latestResult: null,
+  pollHandle: null,
+};
 const radarBodiesState = {
   initialized: false,
   stableBodies: 0,
@@ -1580,6 +1926,129 @@ window.setRadarView = function setRadarView(view) {
   radarViewButtonsActive();
 };
 
+function setRadarCalibrationPanelVisible(visible) {
+  const panel = document.getElementById('radar-cal-panel');
+  if (panel) panel.classList.toggle('hidden', !visible);
+}
+
+function renderRadarCalibrationHistory(rows) {
+  const el = document.getElementById('radar-cal-history');
+  if (!el) return;
+  const items = Array.isArray(rows) ? rows : [];
+  if (!items.length) {
+    el.textContent = 'No calibration history yet.';
+    return;
+  }
+  el.innerHTML = items.slice(0, 5).map((row) => {
+    const ts = row.ts_local || row.ts_utc || '';
+    const baseline = row.baseline_detect_cm == null ? 'n/a' : Number(row.baseline_detect_cm).toFixed(1);
+    const noise = row.noise_detect_cm == null ? 'n/a' : Number(row.noise_detect_cm).toFixed(1);
+    return '<div>#' + row.id + ' ' + escapeHtml(formatDateTime(ts)) + ' · baseline ' + baseline + 'cm · noise ' + noise + ' · false ' + Number(row.false_presence_count || 0) + '</div>';
+  }).join('');
+}
+
+async function loadRadarCalibrationHistory() {
+  try {
+    const data = await fetchJson('/api/radar/calibration/history?limit=5', new AbortController());
+    renderRadarCalibrationHistory(data.rows || []);
+  } catch (_err) {
+  }
+}
+
+function renderRadarCalibrationStatus(data) {
+  const statusEl = document.getElementById('radar-cal-status');
+  const remEl = document.getElementById('radar-cal-remaining');
+  const samplesEl = document.getElementById('radar-cal-samples');
+  const falseEl = document.getElementById('radar-cal-false');
+  const baselineEl = document.getElementById('radar-cal-baseline');
+  const noiseEl = document.getElementById('radar-cal-noise');
+  if (statusEl) statusEl.textContent = String(data.status || 'idle');
+  if (remEl) remEl.textContent = data.status === 'running' ? String(data.remaining_s ?? '--') + 's' : '--';
+  if (samplesEl) samplesEl.textContent = String(data.samples ?? 0);
+  if (falseEl) falseEl.textContent = String(data.false_presence_count ?? 0);
+  if (data.result) {
+    const base = data.result.baseline_detect_cm;
+    const noise = data.result.noise_detect_cm;
+    if (baselineEl) baselineEl.textContent = base == null ? 'n/a' : Number(base).toFixed(1) + 'cm';
+    if (noiseEl) noiseEl.textContent = noise == null ? 'n/a' : Number(noise).toFixed(1) + 'cm';
+  }
+}
+
+async function pollRadarCalibrationStatus() {
+  if (!radarCalibration.sessionId) return;
+  try {
+    const data = await fetchJson('/api/radar/calibrate/' + radarCalibration.sessionId, new AbortController());
+    radarCalibration.status = String(data.status || 'idle');
+    if (radarCalibration.status === 'done') {
+      radarCalibration.latestResult = data.result || null;
+      if (radarCalibration.pollHandle) {
+        clearInterval(radarCalibration.pollHandle);
+        radarCalibration.pollHandle = null;
+      }
+      await loadRadarCalibrationHistory();
+    } else if (radarCalibration.status === 'cancelled' || radarCalibration.status === 'error') {
+      if (radarCalibration.pollHandle) {
+        clearInterval(radarCalibration.pollHandle);
+        radarCalibration.pollHandle = null;
+      }
+    }
+    renderRadarCalibrationStatus(data);
+  } catch (_err) {
+  }
+}
+
+window.startRadarCalibration = async function startRadarCalibration() {
+  try {
+    const data = await postJson('/api/radar/calibrate', { duration_s: 60, max_range_cm: 600 });
+    radarCalibration.sessionId = String(data.session_id || '');
+    radarCalibration.status = 'running';
+    radarCalibration.latestResult = null;
+    setRadarCalibrationPanelVisible(true);
+    renderRadarCalibrationStatus({ status: 'running', remaining_s: 60, samples: 0, false_presence_count: 0 });
+    if (radarCalibration.pollHandle) clearInterval(radarCalibration.pollHandle);
+    radarCalibration.pollHandle = setInterval(pollRadarCalibrationStatus, 1000);
+    await pollRadarCalibrationStatus();
+  } catch (err) {
+    console.error(err);
+    alert('Calibration start failed');
+  }
+};
+
+window.cancelRadarCalibration = async function cancelRadarCalibration() {
+  if (!radarCalibration.sessionId) {
+    setRadarCalibrationPanelVisible(false);
+    return;
+  }
+  try {
+    await postJson('/api/radar/calibrate/' + radarCalibration.sessionId + '/cancel', {});
+    radarCalibration.status = 'cancelled';
+    if (radarCalibration.pollHandle) {
+      clearInterval(radarCalibration.pollHandle);
+      radarCalibration.pollHandle = null;
+    }
+    await pollRadarCalibrationStatus();
+  } catch (err) {
+    console.error(err);
+  }
+};
+
+window.saveRadarCalibrationNote = async function saveRadarCalibrationNote() {
+  const noteEl = document.getElementById('radar-cal-note');
+  const note = noteEl ? String(noteEl.value || '').trim() : '';
+  const latest = radarCalibration.latestResult;
+  if (!latest || !latest.id) {
+    alert('No completed calibration to annotate yet.');
+    return;
+  }
+  try {
+    await postJson('/api/radar/calibration/' + latest.id + '/note', { note });
+    await loadRadarCalibrationHistory();
+  } catch (err) {
+    console.error(err);
+    alert('Failed to save note');
+  }
+};
+
 function updateRadarReadout(state) {
   const alive = Number(state.alive || 0) === 1;
   const target = Number(state.target || 0);
@@ -1593,34 +2062,46 @@ function updateRadarReadout(state) {
   const bodyCount = getStableBodies(target);
 
   const stateEl = document.getElementById('radar-now-state');
+  const statePillEl = document.getElementById('radar-now-state-pill');
   const bodiesEl = document.getElementById('radar-now-bodies');
-  const moveEl = document.getElementById('radar-now-move');
-  const statEl = document.getElementById('radar-now-stat');
   const detectEl = document.getElementById('radar-now-detect');
   const moveSigEl = document.getElementById('radar-now-move-sig');
   const statSigEl = document.getElementById('radar-now-stat-sig');
   const targetEl = document.getElementById('radar-now-target');
-  const moveConfFillEl = document.getElementById('radar-conf-move');
-  const statConfFillEl = document.getElementById('radar-conf-stat');
-  const moveConfValEl = document.getElementById('radar-conf-move-val');
-  const statConfValEl = document.getElementById('radar-conf-stat-val');
+  const moveState = moveMetric > 0;
+  const statState = statMetric > 0;
 
   if (stateEl) {
-    if (!alive) stateEl.textContent = 'RADAR offline';
+    if (!alive) stateEl.textContent = 'Radar offline';
     else if (target === 0) stateEl.textContent = 'No presence';
-    else stateEl.textContent = 'Presence detected';
+    else if (moveState && !statState) stateEl.textContent = 'Moving presence';
+    else if (!moveState && statState) stateEl.textContent = 'Still presence';
+    else stateEl.textContent = 'Moving + still';
+  }
+  if (statePillEl) {
+    statePillEl.className = 'status-pill';
+    if (!alive) {
+      statePillEl.textContent = 'RADAR OFFLINE';
+      statePillEl.classList.add('state-offline');
+    } else if (target === 0) {
+      statePillEl.textContent = 'NO PRESENCE';
+      statePillEl.classList.add('state-none');
+    } else if (moveState && !statState) {
+      statePillEl.textContent = 'MOVING PRESENCE';
+      statePillEl.classList.add('state-moving');
+    } else if (!moveState && statState) {
+      statePillEl.textContent = 'STILL PRESENCE';
+      statePillEl.classList.add('state-still');
+    } else {
+      statePillEl.textContent = 'MOVING + STILL';
+      statePillEl.classList.add('state-both');
+    }
   }
   if (bodiesEl) bodiesEl.textContent = alive ? `${bodyCount}` : '--';
-  if (moveEl) moveEl.textContent = alive ? `${Math.round(moveMetric)}%` : '--';
-  if (statEl) statEl.textContent = alive ? `${Math.round(statMetric)}%` : '--';
   if (detectEl) detectEl.textContent = alive && target !== 0 ? `${detectCm} cm` : '--';
-  if (moveSigEl) moveSigEl.textContent = moveActive ? `${moveCm} cm` : '--';
-  if (statSigEl) statSigEl.textContent = statActive ? `${statCm} cm` : '--';
+  if (moveSigEl) moveSigEl.textContent = moveState ? `${moveCm} cm` : '--';
+  if (statSigEl) statSigEl.textContent = statState ? `${statCm} cm` : '--';
   if (targetEl) targetEl.textContent = `${target}/3`;
-  if (moveConfFillEl) moveConfFillEl.style.width = `${Math.round(moveMetric)}%`;
-  if (statConfFillEl) statConfFillEl.style.width = `${Math.round(statMetric)}%`;
-  if (moveConfValEl) moveConfValEl.textContent = alive ? `${Math.round(moveMetric)}%` : '--';
-  if (statConfValEl) statConfValEl.textContent = alive ? `${Math.round(statMetric)}%` : '--';
 }
 
 function drawRadarScope(state) {
@@ -1655,7 +2136,7 @@ function drawRadarScope(state) {
     detectMarkerEl.classList.remove('hidden');
     detectMarkerEl.style.left = markerLeft(detectCm, radarNow.maxRangeCm, 7);
     detectMarkerEl.classList.remove('pulse-fast', 'pulse-slow');
-    if (moveActive) detectMarkerEl.classList.add('pulse-fast');
+    if (moveMetric > 0) detectMarkerEl.classList.add('pulse-fast');
     else detectMarkerEl.classList.add('pulse-slow');
 
     if (moveActive) {
@@ -2077,7 +2558,7 @@ function initTrends() {
   radarCard.className = 'card trend-card chart hp-card';
   radarCard.innerHTML =
     '<div class="trend-top card-header hp-head">' +
-      '<div><b>' + radarTrend.title + '</b></div>' +
+      '<div><b>' + radarTrend.title + '</b><button class="cal-btn" onclick="startRadarCalibration()">Calibration</button></div>' +
       '<div class="hp-tabs">' +
         '<button id="radar-view-now" class="hp-tab active" onclick="setRadarView(\'now\')">Now</button>' +
         '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
@@ -2086,6 +2567,26 @@ function initTrends() {
     '<div id="trend-badges-' + radarTrend.key + '" class="trend-badges hp-badges pill-row"></div>' +
     '<div id="trend-value-' + radarTrend.key + '" class="trend-value metric-value">n/a</div>' +
     '<div id="radar-now-pane" class="radar-now-wrap">' +
+      '<div id="radar-cal-panel" class="cal-panel hidden">' +
+        '<div class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
+        '<div class="cal-counters">' +
+          '<div><span class="muted">Status</span><div id="radar-cal-status">idle</div></div>' +
+          '<div><span class="muted">Countdown</span><div id="radar-cal-remaining">--</div></div>' +
+          '<div><span class="muted">Samples</span><div id="radar-cal-samples">0</div></div>' +
+        '</div>' +
+        '<div class="cal-counters">' +
+          '<div><span class="muted">False presence</span><div id="radar-cal-false">0</div></div>' +
+          '<div><span class="muted">Baseline</span><div id="radar-cal-baseline">--</div></div>' +
+          '<div><span class="muted">Noise</span><div id="radar-cal-noise">--</div></div>' +
+        '</div>' +
+        '<div class="cal-actions">' +
+          '<button onclick="cancelRadarCalibration()">Cancel</button>' +
+          '<button onclick="startRadarCalibration()">Run again</button>' +
+        '</div>' +
+        '<div style="margin-top:8px"><input id="radar-cal-note" type="text" placeholder="Save note (optional)" style="width:100%; padding:6px 8px; border-radius:8px; border:1px solid #26313d; background:#0f1620; color:#d9e6f3;" /></div>' +
+        '<div class="cal-actions"><button onclick="saveRadarCalibrationNote()">Save note</button></div>' +
+        '<div id="radar-cal-history" class="cal-history"></div>' +
+      '</div>' +
       '<div id="range-strip" class="range-strip">' +
         '<div class="range-track"></div>' +
         '<div id="range-marker-detect" class="marker detect hidden"></div>' +
@@ -2093,13 +2594,10 @@ function initTrends() {
         '<div id="range-marker-stat" class="marker stat hidden"></div>' +
         '<div class="range-labels"><span>0cm</span><span id="range-max-label">300cm</span></div>' +
       '</div>' +
-      '<div class="conf-row"><span class="radar-label">Moving Conf</span><div class="conf-bar"><div id="radar-conf-move" class="conf-fill move"></div></div><span id="radar-conf-move-val">--</span></div>' +
-      '<div class="conf-row"><span class="radar-label">Stationary Conf</span><div class="conf-bar"><div id="radar-conf-stat" class="conf-fill stat"></div></div><span id="radar-conf-stat-val">--</span></div>' +
       '<div class="radar-readout">' +
-        '<div id="radar-now-state" class="radar-state">RADAR offline</div>' +
+        '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
+        '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
         '<div class="radar-line"><span class="radar-label">Bodies</span><span id="radar-now-bodies">--</span></div>' +
-        '<div class="radar-line"><span class="radar-label">Moving Confidence</span><span id="radar-now-move">--</span></div>' +
-        '<div class="radar-line"><span class="radar-label">Stationary Confidence</span><span id="radar-now-stat">--</span></div>' +
         '<div class="radar-line"><span class="radar-label">Detect</span><span id="radar-now-detect">--</span></div>' +
         '<div class="radar-line"><span class="radar-label">Motion signature</span><span id="radar-now-move-sig">--</span></div>' +
         '<div class="radar-line"><span class="radar-label">Still signature</span><span id="radar-now-stat-sig">--</span></div>' +
@@ -2530,16 +3028,27 @@ function applyTableRows(tableName, rows, force = false) {
   updateTableStaleBadge(tableName);
   if (tableName === 'esp_net') {
     const rssiEl = document.getElementById('top-rssi');
+    const rssiBoxEl = document.getElementById('rssiBox');
     if (rssiEl) {
       const latest = Array.isArray(rows) && rows.length ? rows[0] : null;
       const rssi = latest ? Number(latest.rssi) : NaN;
       const wifist = latest ? Number(latest.wifist) : NaN;
+      if (rssiBoxEl) {
+        rssiBoxEl.classList.remove('rssi-good', 'rssi-med', 'rssi-poor');
+      }
       if (!Number.isFinite(rssi) || rssi === 999 || rssi > 0 || rssi < -130) {
         rssiEl.textContent = 'n/a';
+        if (rssiBoxEl) rssiBoxEl.classList.add('rssi-poor');
       } else if (Number.isFinite(wifist) && wifist !== 1 && wifist !== 3) {
         rssiEl.textContent = 'offline';
+        if (rssiBoxEl) rssiBoxEl.classList.add('rssi-poor');
       } else {
         rssiEl.textContent = Math.round(rssi) + ' dBm';
+        if (rssiBoxEl) {
+          if (rssi >= -65) rssiBoxEl.classList.add('rssi-good');
+          else if (rssi >= -80) rssiBoxEl.classList.add('rssi-med');
+          else rssiBoxEl.classList.add('rssi-poor');
+        }
       }
     }
   }
@@ -2834,6 +3343,7 @@ async function pollEvents() {
   await pollStatus();
   await pollTables();
   await pollEvents();
+  await loadRadarCalibrationHistory();
   setInterval(pollStatus, 1000);
   setInterval(pollReady, 3000);
   setInterval(pollTables, 3000);
