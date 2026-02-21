@@ -49,7 +49,7 @@ SERIES_MAP = {
   "esp_rssi": {"table": "esp_net", "column": "rssi", "label": "RSSI (dBm)", "color": "#ef5350", "stepped": False},
   "esp_wifist": {"table": "esp_net", "column": "wifist", "label": "WiFi State", "color": "#90a4ae", "stepped": True},
   "radar_target": {"table": "radar", "column": "target", "label": "Presence Target (0-3)", "color": "#66bb6a", "stepped": True},
-  "radar_detect_cm": {"table": "radar", "column": "detect_cm", "label": "Human Presenses (cm)", "color": "#66bb6a", "stepped": False},
+  "radar_detect_cm": {"table": "radar", "column": "detect_cm", "label": "Human Presences (cm)", "color": "#66bb6a", "stepped": False},
 }
 
 CHART_CACHE_TTL_SECS = 5.0
@@ -993,6 +993,45 @@ def api_ts(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Dict[str,
     return {"series": series, "minutes": minutes, "points": points, "stats": stats}
 
 
+  @APP.get("/api/radar/latest")
+  def api_radar_latest() -> Dict[str, object]:
+    default = {
+      "alive": 0,
+      "target": 0,
+      "detect_cm": 0,
+      "move_cm": 0,
+      "stat_cm": 0,
+      "move_en": 0,
+      "stat_en": 0,
+      "ts_utc": None,
+    }
+    if not DB_PATH.exists():
+      return default
+    try:
+      with open_db() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+          "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+          "FROM radar ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+      if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+        return default
+      raise
+    if not row:
+      return default
+    return {
+      "alive": int(row["alive"] or 0),
+      "target": int(row["target"] or 0),
+      "detect_cm": int(row["detect_cm"] or 0),
+      "move_cm": int(row["move_cm"] or 0),
+      "stat_cm": int(row["stat_cm"] or 0),
+      "move_en": int(row["move_en"] or 0),
+      "stat_en": int(row["stat_en"] or 0),
+      "ts_utc": row["ts_utc"],
+    }
+
+
 @APP.get("/chart/{series}.png")
 def chart_png(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Response:
     if series not in SERIES_MAP:
@@ -1109,6 +1148,13 @@ HTML_PAGE = """
     .chip-note { border-color: #4a5f80; color: #b9cbe3; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-actions { display: inline-flex; gap: 6px; }
     .event-actions button { padding: 4px 8px; font-size: 11px; }
+    .radar-tabs { margin-left: auto; }
+    .radar-now-wrap { margin-top: 6px; }
+    .radar-canvas { width: 100%; height: 190px; border-radius: 8px; border: 1px solid #26313d; background: #0f1620; display: block; }
+    .radar-readout { margin-top: 8px; font-size: 12px; color: #b8c7d8; line-height: 1.6; }
+    .radar-line { display: flex; justify-content: space-between; gap: 10px; }
+    .radar-label { color: #8ea1b3; }
+    .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
   </style>
 </head>
 <body>
@@ -1220,12 +1266,28 @@ const tableLabels = {
 };
 const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET','RADAR'];
 const trendSeries = [
-  { key: 'radar_detect_cm', title: 'Human Presenses', unit: 'cm', decimals: 0, table: 'radar' },
+  { key: 'radar_detect_cm', title: 'Human Presences', unit: 'cm', decimals: 0, table: 'radar' },
   { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0, table: 'air' },
   { key: 'env_temp', title: 'Temp', unit: '°C', decimals: 1, table: 'env' },
   { key: 'env_hum', title: 'Humidity', unit: '%', decimals: 1, table: 'env' },
   { key: 'esp_rssi', title: 'RSSI', unit: 'dBm', decimals: 0, table: 'esp_net' },
 ];
+const radarNow = {
+  enabled: true,
+  view: 'now',
+  maxRangeCm: 300,
+  sweepAngleDeg: 0,
+  state: {
+    alive: 0,
+    target: 0,
+    detect_cm: 0,
+    move_cm: 0,
+    stat_cm: 0,
+    move_en: 0,
+    stat_en: 0,
+    ts_utc: null,
+  },
+};
 const tableState = {};
 const tableRowLimit = {};
 const eventsState = {
@@ -1308,6 +1370,154 @@ function setTrendMinutes(m) {
   document.getElementById('win-60').classList.toggle('active', m === 60);
   document.getElementById('win-240').classList.toggle('active', m === 240);
   pollTrends();
+}
+
+function clamp(value, min, max) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return min;
+  return Math.min(max, Math.max(min, v));
+}
+
+function radarViewButtonsActive() {
+  const nowBtn = document.getElementById('radar-view-now');
+  const historyBtn = document.getElementById('radar-view-history');
+  const nowPane = document.getElementById('radar-now-pane');
+  const historyPane = document.getElementById('radar-history-pane');
+  const showNow = radarNow.view === 'now';
+  if (nowBtn) nowBtn.classList.toggle('active', showNow);
+  if (historyBtn) historyBtn.classList.toggle('active', !showNow);
+  if (nowPane) nowPane.classList.toggle('hidden', !showNow);
+  if (historyPane) historyPane.classList.toggle('hidden', showNow);
+}
+
+window.setRadarView = function setRadarView(view) {
+  radarNow.view = (view === 'history') ? 'history' : 'now';
+  radarViewButtonsActive();
+};
+
+function updateRadarReadout(state) {
+  const alive = Number(state.alive || 0) === 1;
+  const target = Number(state.target || 0);
+  const detectCm = Number(state.detect_cm || 0);
+  const moveCm = Number(state.move_cm || 0);
+  const statCm = Number(state.stat_cm || 0);
+  const moveEn = Number(state.move_en || 0) === 1;
+  const statEn = Number(state.stat_en || 0) === 1;
+
+  const stateEl = document.getElementById('radar-now-state');
+  const detectEl = document.getElementById('radar-now-detect');
+  const moveEl = document.getElementById('radar-now-move');
+  const statEl = document.getElementById('radar-now-stat');
+  const targetEl = document.getElementById('radar-now-target');
+
+  if (stateEl) {
+    if (!alive) stateEl.textContent = 'RADAR offline';
+    else if (target === 0) stateEl.textContent = 'No presence';
+    else stateEl.textContent = 'Presence detected';
+  }
+  if (detectEl) detectEl.textContent = `${detectCm} cm`;
+  if (moveEl) moveEl.textContent = moveEn ? `${moveCm} cm` : '--';
+  if (statEl) statEl.textContent = statEn ? `${statCm} cm` : '--';
+  if (targetEl) targetEl.textContent = `${target}/3`;
+}
+
+function drawRadarScope(state) {
+  const canvas = document.getElementById('radar-now-canvas');
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(260, Math.floor(rect.width || 260));
+  const height = Math.max(170, Math.floor(rect.height || 190));
+  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, width, height);
+
+  const alive = Number(state.alive || 0) === 1;
+  const target = Number(state.target || 0);
+  const detectCmRaw = Number(state.detect_cm || 0);
+  const moveEn = Number(state.move_en || 0) === 1;
+  const statEn = Number(state.stat_en || 0) === 1;
+  const noContact = (!alive || target === 0);
+
+  const cx = width * 0.5;
+  const cy = height * 0.5;
+  const radius = Math.max(45, Math.min(width, height) * 0.44);
+
+  ctx.fillStyle = alive ? '#0d1721' : '#182029';
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.strokeStyle = alive ? 'rgba(96, 173, 126, 0.35)' : 'rgba(130, 140, 150, 0.25)';
+  ctx.lineWidth = 1;
+  [0.25, 0.5, 0.75, 1.0].forEach((scale) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * scale, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+
+  const sweepRad = (radarNow.sweepAngleDeg * Math.PI) / 180;
+  const gx = cx + Math.cos(sweepRad) * radius;
+  const gy = cy + Math.sin(sweepRad) * radius;
+  const grad = ctx.createLinearGradient(cx, cy, gx, gy);
+  if (alive) {
+    grad.addColorStop(0, 'rgba(120, 210, 150, 0.05)');
+    grad.addColorStop(1, 'rgba(120, 210, 150, 0.45)');
+  } else {
+    grad.addColorStop(0, 'rgba(170, 170, 170, 0.04)');
+    grad.addColorStop(1, 'rgba(170, 170, 170, 0.18)');
+  }
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(gx, gy);
+  ctx.stroke();
+
+  if (!noContact) {
+    const detectCm = clamp(detectCmRaw, 0, radarNow.maxRangeCm);
+    let blipR = (detectCm / radarNow.maxRangeCm) * (radius - 10);
+    if (detectCmRaw <= 0) blipR = Math.max(8, radius * 0.1);
+    const pulse = 0.6 + 0.4 * Math.sin((Date.now() / (moveEn ? 220 : 480)) * Math.PI * 2);
+    const angle = sweepRad;
+    const bx = cx + Math.cos(angle) * blipR;
+    const by = cy + Math.sin(angle) * blipR;
+
+    const baseColor = 'rgba(96, 220, 145, 1.0)';
+    ctx.lineWidth = 2;
+
+    if (target === 3) {
+      ctx.beginPath();
+      ctx.arc(bx, by, 5 + (2 * pulse), 0, Math.PI * 2);
+      ctx.fillStyle = baseColor;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(bx, by, 10 + (3 * pulse), 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(130, 255, 180, 0.8)';
+      ctx.stroke();
+    } else if (moveEn || target === 1) {
+      ctx.beginPath();
+      ctx.arc(bx, by, 5 + (3 * pulse), 0, Math.PI * 2);
+      ctx.fillStyle = baseColor;
+      ctx.fill();
+    } else if (statEn || target === 2) {
+      ctx.beginPath();
+      ctx.arc(bx, by, 7 + (2 * pulse), 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(130, 255, 180, 0.9)';
+      ctx.stroke();
+    }
+  }
+
+  updateRadarReadout(state);
+}
+
+function animateRadarScope() {
+  if (!radarNow.enabled) return;
+  radarNow.sweepAngleDeg = (radarNow.sweepAngleDeg + 4) % 360;
+  drawRadarScope(radarNow.state);
 }
 
 function renderBadges(seriesKey, stats, decimals, unit) {
@@ -1702,15 +1912,42 @@ function initTrends() {
   for (const trend of trendSeries) {
     const card = document.createElement('div');
     card.className = 'card trend-card';
-    card.innerHTML =
-      '<div class="trend-top">' +
-        '<div><b>' + trend.title + '</b></div>' +
-        '<div id="trend-badges-' + trend.key + '" class="trend-badges"></div>' +
-      '</div>' +
-      '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
-      '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />';
+    if (trend.key === 'radar_detect_cm') {
+      card.innerHTML =
+        '<div class="trend-top">' +
+          '<div><b>' + trend.title + '</b></div>' +
+          '<div class="seg radar-tabs">' +
+            '<button id="radar-view-now" class="active" onclick="setRadarView(\'now\')">Now</button>' +
+            '<button id="radar-view-history" onclick="setRadarView(\'history\')">History</button>' +
+          '</div>' +
+          '<div id="trend-badges-' + trend.key + '" class="trend-badges"></div>' +
+        '</div>' +
+        '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
+        '<div id="radar-now-pane" class="radar-now-wrap">' +
+          '<canvas id="radar-now-canvas" class="radar-canvas"></canvas>' +
+          '<div class="radar-readout">' +
+            '<div id="radar-now-state" class="radar-state">RADAR offline</div>' +
+            '<div class="radar-line"><span class="radar-label">Detect</span><span id="radar-now-detect">--</span></div>' +
+            '<div class="radar-line"><span class="radar-label">Moving</span><span id="radar-now-move">--</span></div>' +
+            '<div class="radar-line"><span class="radar-label">Stationary</span><span id="radar-now-stat">--</span></div>' +
+            '<div class="radar-line"><span class="radar-label">Target</span><span id="radar-now-target">0/3</span></div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="radar-history-pane" class="hidden">' +
+          '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
+        '</div>';
+    } else {
+      card.innerHTML =
+        '<div class="trend-top">' +
+          '<div><b>' + trend.title + '</b></div>' +
+          '<div id="trend-badges-' + trend.key + '" class="trend-badges"></div>' +
+        '</div>' +
+        '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
+        '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />';
+    }
     root.appendChild(card);
   }
+  radarViewButtonsActive();
 }
 
 function initEvents() {
@@ -2233,6 +2470,9 @@ async function pollTrends() {
     const results = await Promise.all(
       trendSeries.map((trend) => fetchJson('/api/ts/' + trend.key + '?minutes=' + trendMinutes, controller).then((data) => [trend, data]))
     );
+    const radarLatest = await fetchJson('/api/radar/latest', controller);
+    radarNow.state = radarLatest || radarNow.state;
+    drawRadarScope(radarNow.state);
 
     const cacheBust = Date.now();
     for (const [trend, data] of results) {
@@ -2247,11 +2487,11 @@ async function pollTrends() {
       const card = imgEl ? imgEl.closest('.trend-card') : null;
       if (imgEl) {
         imgEl.classList.toggle('stale', stale);
+        imgEl.src = '/chart/' + trend.key + '.png?minutes=' + trendMinutes + '&ts=' + cacheBust;
       }
       if (card) {
         card.classList.toggle('stale-card', stale);
       }
-      imgEl.src = '/chart/' + trend.key + '.png?minutes=' + trendMinutes + '&ts=' + cacheBust;
     }
     setLastUpdatedNow();
   } catch (err) {
@@ -2356,6 +2596,7 @@ async function pollEvents() {
   await pollStatus();
   await pollTables();
   await pollEvents();
+  setInterval(animateRadarScope, 100);
   setInterval(pollStatus, 1000);
   setInterval(pollReady, 3000);
   setInterval(pollTables, 3000);
