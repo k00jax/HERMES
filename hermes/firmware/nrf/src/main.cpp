@@ -943,18 +943,40 @@ static void playBuzzerBeep(uint16_t durMs) {
 }
 
 static void playBuzzerJingle(const char *name) {
-  pinMode(BUZZER_PIN, OUTPUT);
   if (name && strcasecmp(name, "cal_done") == 0) {
-    tone(BUZZER_PIN, 1568, 90);
-    delay(110);
-    tone(BUZZER_PIN, 1976, 110);
-    delay(130);
-    tone(BUZZER_PIN, 2637, 140);
+    play_melody(MELODY_STARTUP_RADIANT_BOOTLOADER, MELODY_STARTUP_RADIANT_BOOTLOADER_COUNT);
     return;
   }
-  tone(BUZZER_PIN, 1200, 90);
-  delay(110);
-  tone(BUZZER_PIN, 1700, 120);
+  if (name && strcasecmp(name, "startup_vault_boot") == 0) {
+    play_melody(MELODY_STARTUP_VAULT_BOOT, MELODY_STARTUP_VAULT_BOOT_COUNT);
+    return;
+  }
+  if (name && strcasecmp(name, "startup_atomic_sunrise") == 0) {
+    play_melody(MELODY_STARTUP_ATOMIC_SUNRISE, MELODY_STARTUP_ATOMIC_SUNRISE_COUNT);
+    return;
+  }
+  if (name && strcasecmp(name, "startup_radiant_bootloader") == 0) {
+    play_melody(MELODY_STARTUP_RADIANT_BOOTLOADER, MELODY_STARTUP_RADIANT_BOOTLOADER_COUNT);
+    return;
+  }
+  if (name && strcasecmp(name, "startup_field_unit_online") == 0) {
+    play_melody(MELODY_STARTUP_FIELD_UNIT_ONLINE, MELODY_STARTUP_FIELD_UNIT_ONLINE_COUNT);
+    return;
+  }
+  if (name && strcasecmp(name, "warn_radiation_spike") == 0) {
+    play_warning_chime();
+    return;
+  }
+  if (name && strcasecmp(name, "warn_system_fault") == 0) {
+    play_error_chime();
+    return;
+  }
+  if (name && strcasecmp(name, "warn_low_power") == 0) {
+    play_melody(MELODY_WARN_LOW_POWER, MELODY_WARN_LOW_POWER_COUNT);
+    return;
+  }
+
+  play_melody(MELODY_STARTUP_FIELD_UNIT_ONLINE, MELODY_STARTUP_FIELD_UNIT_ONLINE_COUNT);
 }
 
 static void handleLine(char *line, uint32_t now) {

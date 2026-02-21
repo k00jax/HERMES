@@ -115,6 +115,16 @@ RSSI_MAX_DBM = 0
 event_post_rate_lock = threading.Lock()
 event_post_rate: Dict[str, List[float]] = {}
 
+event_chime_lock = threading.Lock()
+event_chime_initialized = False
+event_chime_last_seen_id = 0
+
+EVENT_KIND_TO_CHIME_SETTING = {
+  "air_spike": "chime_event_air_spike",
+  "wifi_drop": "chime_event_wifi_drop",
+  "reboot_detected": "chime_event_reboot_detected",
+}
+
 radar_calibration_lock = threading.Lock()
 radar_calibration_sessions: Dict[str, Dict[str, object]] = {}
 
@@ -645,6 +655,58 @@ def trigger_radar_calibration_beep() -> Dict[str, object]:
 
 def trigger_radar_calibration_jingle() -> Dict[str, object]:
   return send_buzzer_command("BUZZER,JINGLE,cal_done")
+
+
+def chime_payload_from_key(chime_key: str) -> Optional[str]:
+  key = str(chime_key or "none").strip().lower()
+  if key == "none":
+    return None
+  if key in VALID_CHIME_KEYS:
+    return f"BUZZER,JINGLE,{key}"
+  return None
+
+
+def maybe_play_event_chime(rows: List[Dict[str, object]], settings: Dict[str, object]) -> None:
+  global event_chime_initialized
+  global event_chime_last_seen_id
+
+  valid_rows: List[Dict[str, object]] = []
+  for row in rows or []:
+    try:
+      row_id = int(row.get("id") or 0)
+    except Exception:
+      row_id = 0
+    if row_id > 0:
+      valid_rows.append(row)
+
+  if not valid_rows:
+    return
+
+  max_seen = max(int(row.get("id") or 0) for row in valid_rows)
+  baseline = 0
+  with event_chime_lock:
+    if not event_chime_initialized:
+      event_chime_initialized = True
+      event_chime_last_seen_id = max_seen
+      return
+    baseline = int(event_chime_last_seen_id)
+    if max_seen <= baseline:
+      return
+    event_chime_last_seen_id = max_seen
+
+  candidates = [row for row in valid_rows if int(row.get("id") or 0) > baseline]
+  if not candidates:
+    return
+
+  newest = max(candidates, key=lambda row: int(row.get("id") or 0))
+  event_kind = str(newest.get("kind") or "")
+  settings_key = EVENT_KIND_TO_CHIME_SETTING.get(event_kind)
+  if not settings_key:
+    return
+  payload = chime_payload_from_key(str(settings.get(settings_key) or "none"))
+  if not payload:
+    return
+  send_buzzer_command(payload)
 
 
 def summarize_radar_calibration_window(
@@ -1307,6 +1369,7 @@ def api_events_latest(
     kind: str = Query(""),
   since_id: int = Query(0, ge=0),
 ) -> Dict[str, object]:
+    settings_payload: Dict[str, object] = dict(SETTINGS_DEFAULTS)
     try:
       with open_db() as conn:
         ensure_events_table(conn)
@@ -1329,10 +1392,12 @@ def api_events_latest(
         )
         rows = conn.execute(sql, (*params, limit)).fetchall()
         rows_out = apply_state_to_event_rows(conn, rows)
+        settings_payload = get_settings_payload(conn)
     except sqlite3.OperationalError as exc:
       if "locked" in str(exc).lower():
         return {"limit": limit, "rows": []}
       raise
+    maybe_play_event_chime(rows_out, settings_payload)
     return {"limit": limit, "rows": rows_out}
 
 
@@ -1861,6 +1926,18 @@ def api_settings_reset() -> Dict[str, object]:
     result = reset_settings_payload(conn)
     conn.commit()
   return {"ok": True, "settings": result}
+
+
+@APP.post("/api/chime/preview")
+def api_chime_preview(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+  if not isinstance(payload, dict):
+    raise HTTPException(status_code=400, detail="payload must be an object")
+  chime_key = str(payload.get("key") or "none")
+  cmd_payload = chime_payload_from_key(chime_key)
+  if not cmd_payload:
+    return {"ok": True, "played": False, "key": chime_key}
+  cmd = send_buzzer_command(cmd_payload)
+  return {"ok": bool(cmd.get("ok")), "played": True, "key": chime_key, "command": cmd}
 
 
 def ensure_analytics_indexes(conn: sqlite3.Connection) -> None:
@@ -2963,9 +3040,24 @@ def render_settings_page() -> str:
     <b>Chime assignments</b>
     <div class=\"muted\" style=\"margin-top:4px\">Assign a melody to each event type.</div>
     <div style=\"display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px;margin-top:10px\">
-      <label>Air spike <select id=\"chimeAirSpike\"></select></label>
-      <label>WiFi drop <select id=\"chimeWifiDrop\"></select></label>
-      <label>Reboot detected <select id=\"chimeRebootDetected\"></select></label>
+      <label>Air spike
+        <div style=\"display:flex;gap:8px;align-items:center;margin-top:4px\">
+          <select id=\"chimeAirSpike\" style=\"flex:1\"></select>
+          <button id=\"previewAirSpike\" type=\"button\">Preview</button>
+        </div>
+      </label>
+      <label>WiFi drop
+        <div style=\"display:flex;gap:8px;align-items:center;margin-top:4px\">
+          <select id=\"chimeWifiDrop\" style=\"flex:1\"></select>
+          <button id=\"previewWifiDrop\" type=\"button\">Preview</button>
+        </div>
+      </label>
+      <label>Reboot detected
+        <div style=\"display:flex;gap:8px;align-items:center;margin-top:4px\">
+          <select id=\"chimeRebootDetected\" style=\"flex:1\"></select>
+          <button id=\"previewRebootDetected\" type=\"button\">Preview</button>
+        </div>
+      </label>
     </div>
   </div>
   """
@@ -3062,6 +3154,23 @@ def render_settings_page() -> str:
     if (msg) msg.textContent = 'Reset to defaults.';
   }
 
+  let previewBusyUntil = 0;
+
+  async function previewChimeBySelect(selectId) {
+    const nowMs = Date.now();
+    if (nowMs < previewBusyUntil) return;
+    previewBusyUntil = nowMs + 500;
+    const selectEl = document.getElementById(selectId);
+    const msg = document.getElementById('saveMsg');
+    const key = selectEl?.value || 'none';
+    const resp = await fetchJson('/api/chime/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    if (msg) msg.textContent = resp && resp.played ? 'Preview played.' : 'Preview skipped (None).';
+  }
+
   (async () => {
     ['slotA', 'slotB', 'slotC', 'slotD'].forEach(fillTrendSelect);
     ['chimeAirSpike', 'chimeWifiDrop', 'chimeRebootDetected'].forEach(fillChimeSelect);
@@ -3069,6 +3178,9 @@ def render_settings_page() -> str:
     applySettings(data || {});
     document.getElementById('saveBtn')?.addEventListener('click', () => saveSettings().catch((e) => alert(String(e.message || e))));
     document.getElementById('resetBtn')?.addEventListener('click', () => resetSettings().catch((e) => alert(String(e.message || e))));
+    document.getElementById('previewAirSpike')?.addEventListener('click', () => previewChimeBySelect('chimeAirSpike').catch((e) => alert(String(e.message || e))));
+    document.getElementById('previewWifiDrop')?.addEventListener('click', () => previewChimeBySelect('chimeWifiDrop').catch((e) => alert(String(e.message || e))));
+    document.getElementById('previewRebootDetected')?.addEventListener('click', () => previewChimeBySelect('chimeRebootDetected').catch((e) => alert(String(e.message || e))));
   })();
   """
   return render_shell_page("/settings", "HERMES Settings", body, script)
