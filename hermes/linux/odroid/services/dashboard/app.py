@@ -1188,6 +1188,10 @@ HTML_PAGE = """
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
     .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
+    .chart-slot-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+    .slot-ctrl { display: inline-flex; align-items: center; gap: 6px; }
+    .slot-ctrl label { font-size: 12px; color: #9fb3c8; }
+    .slot-ctrl select { background: #111820; color: #d9e6f3; border: 1px solid #26313d; border-radius: 8px; padding: 5px 8px; }
   </style>
 </head>
 <body>
@@ -1218,6 +1222,7 @@ HTML_PAGE = """
         <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
         <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
       </div>
+      <div id=\"chartSlotControls\" class=\"chart-slot-controls\"></div>
     </div>
   </div>
 
@@ -1298,19 +1303,24 @@ const tableLabels = {
   radar: 'Human Presence',
 };
 const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET','RADAR'];
-const trendSeries = [
-  { key: 'radar_bodies', title: 'Human Presences', unit: 'bodies', decimals: 0, table: 'radar' },
+const radarTrend = { key: 'radar_bodies', title: 'Human Presences', unit: 'bodies', decimals: 0, table: 'radar' };
+const chartTrendOptions = [
   { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0, table: 'air' },
   { key: 'env_temp', title: 'Temp', unit: '°C', decimals: 1, table: 'env' },
   { key: 'env_hum', title: 'Humidity', unit: '%', decimals: 1, table: 'env' },
   { key: 'esp_rssi', title: 'RSSI', unit: 'dBm', decimals: 0, table: 'esp_net' },
+  { key: 'air_tvoc', title: 'TVOC', unit: 'ppb', decimals: 0, table: 'air' },
 ];
+const trendSeries = [radarTrend, ...chartTrendOptions];
+const chartSlotDefaults = { A: 'air_eco2', B: 'env_temp', C: 'env_hum', D: 'esp_rssi' };
+const chartSlotsStorageKey = 'chartSlots';
+const chartSlotOrder = ['A', 'B', 'C', 'D'];
+let chartSlots = { ...chartSlotDefaults };
 const radarNow = {
   enabled: true,
   view: 'now',
   maxRangeCm: 300,
-  movingAngleDeg: 225,
-  stationaryAngleDeg: 315,
+  blipAngleDeg: 225,
   sweepAngleDeg: 0,
   state: {
     alive: 0,
@@ -1407,6 +1417,64 @@ function setTrendMinutes(m) {
   pollTrends();
 }
 
+function getTrendByKey(key) {
+  return chartTrendOptions.find((item) => item.key === key) || chartTrendOptions[0];
+}
+
+function loadChartSlots() {
+  try {
+    const raw = localStorage.getItem(chartSlotsStorageKey);
+    if (!raw) return { ...chartSlotDefaults };
+    const parsed = JSON.parse(raw);
+    const resolved = { ...chartSlotDefaults };
+    for (const slot of chartSlotOrder) {
+      const requested = parsed && typeof parsed === 'object' ? String(parsed[slot] || '') : '';
+      resolved[slot] = getTrendByKey(requested).key;
+    }
+    return resolved;
+  } catch (_err) {
+    return { ...chartSlotDefaults };
+  }
+}
+
+function saveChartSlots() {
+  try {
+    localStorage.setItem(chartSlotsStorageKey, JSON.stringify(chartSlots));
+  } catch (_err) {
+  }
+}
+
+function renderChartSlotControls() {
+  const root = document.getElementById('chartSlotControls');
+  if (!root) return;
+  root.innerHTML = '';
+  for (const slot of chartSlotOrder) {
+    const wrap = document.createElement('span');
+    wrap.className = 'slot-ctrl';
+    const label = document.createElement('label');
+    label.setAttribute('for', 'chartSel' + slot);
+    label.textContent = 'Slot ' + slot;
+    const select = document.createElement('select');
+    select.id = 'chartSel' + slot;
+    for (const trend of chartTrendOptions) {
+      const opt = document.createElement('option');
+      opt.value = trend.key;
+      opt.textContent = trend.title;
+      select.appendChild(opt);
+    }
+    select.value = getTrendByKey(chartSlots[slot]).key;
+    select.onchange = async () => {
+      chartSlots[slot] = getTrendByKey(select.value).key;
+      saveChartSlots();
+      initTrends();
+      await pollTrends();
+    };
+    wrap.appendChild(label);
+    wrap.appendChild(select);
+    root.appendChild(wrap);
+  }
+}
+
 function clamp(value, min, max) {
   const v = Number(value);
   if (!Number.isFinite(v)) return min;
@@ -1442,10 +1510,6 @@ function updateRadarReadout(state) {
   const target = Number(state.target || 0);
   const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
   const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
-  const moveCm = clamp(Number(state.move_cm || state.detect_cm || 0), 0, radarNow.maxRangeCm);
-  const statCm = clamp(Number(state.stat_cm || state.detect_cm || 0), 0, radarNow.maxRangeCm);
-  const movingActive = alive && (target === 1 || target === 3);
-  const stationaryActive = alive && (target === 2 || target === 3);
   const bodyCount = target === 3 ? 2 : (target === 0 ? 0 : 1);
 
   const stateEl = document.getElementById('radar-now-state');
@@ -1457,14 +1521,14 @@ function updateRadarReadout(state) {
   if (stateEl) {
     if (!alive) stateEl.textContent = 'RADAR offline';
     else if (target === 0) stateEl.textContent = 'No presence';
-    else if (target === 3) stateEl.textContent = 'Moving + stationary detected';
-    else if (target === 1) stateEl.textContent = 'Moving presence detected';
-    else if (target === 2) stateEl.textContent = 'Stationary presence detected';
+    else if (target === 3) stateEl.textContent = 'Moving + stationary signature';
+    else if (target === 1) stateEl.textContent = 'Moving signature';
+    else if (target === 2) stateEl.textContent = 'Stationary signature';
     else stateEl.textContent = 'Presence detected';
   }
   if (bodiesEl) bodiesEl.textContent = alive ? `${bodyCount}` : '--';
-  if (moveEl) moveEl.textContent = movingActive ? `${Math.round(moveMetric)}% @ ${Math.round(moveCm)}cm` : '--';
-  if (statEl) statEl.textContent = stationaryActive ? `${Math.round(statMetric)}% @ ${Math.round(statCm)}cm` : '--';
+  if (moveEl) moveEl.textContent = alive ? `${Math.round(moveMetric)}%` : '--';
+  if (statEl) statEl.textContent = alive ? `${Math.round(statMetric)}%` : '--';
   if (targetEl) targetEl.textContent = `${target}/3`;
 }
 
@@ -1488,8 +1552,6 @@ function drawRadarScope(state) {
   const target = Number(state.target || 0);
   const noContact = (!alive || target === 0);
   const detectCm = clamp(Number(state.detect_cm || 0), 0, radarNow.maxRangeCm);
-  const movingRange = clamp(Number(state.move_cm || detectCm), 0, radarNow.maxRangeCm);
-  const stationaryRange = clamp(Number(state.stat_cm || detectCm), 0, radarNow.maxRangeCm);
 
   const cx = width * 0.5;
   const cy = height * 0.5;
@@ -1524,30 +1586,60 @@ function drawRadarScope(state) {
   ctx.lineTo(gx, gy);
   ctx.stroke();
 
-  const drawPresenceBlip = (angleDeg, rangeCm, colorTemplate, pulseMs) => {
+  const drawPresenceBlip = (style) => {
+    const angleDeg = radarNow.blipAngleDeg;
+    const rangeCm = detectCm;
     const theta = (angleDeg * Math.PI) / 180;
     const blipR = clamp((rangeCm / radarNow.maxRangeCm) * (radius - 10), 8, radius - 10);
     const bx = cx + Math.cos(theta) * blipR;
     const by = cy + Math.sin(theta) * blipR;
     const crossing = angleDiffDeg(radarNow.sweepAngleDeg, angleDeg) < 6;
-    const pulse = 0.70 + 0.30 * Math.sin((Date.now() / pulseMs) * Math.PI * 2);
+    if (style === 'moving') {
+      const pulse = 0.72 + 0.28 * Math.sin((Date.now() / 300) * Math.PI * 2);
+      const alpha = crossing ? 1.0 : pulse;
+      ctx.beginPath();
+      ctx.arc(bx, by, 6, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(140, 210, 255, ' + alpha.toFixed(3) + ')';
+      ctx.fill();
+      return;
+    }
+    if (style === 'stationary') {
+      const pulse = 0.60 + 0.20 * Math.sin((Date.now() / 520) * Math.PI * 2);
+      const alpha = crossing ? 0.95 : pulse;
+      ctx.beginPath();
+      ctx.arc(bx, by, 7, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(62, 112, 182, ' + alpha.toFixed(3) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      return;
+    }
+    const pulse = 0.70 + 0.25 * Math.sin((Date.now() / 360) * Math.PI * 2);
     const alpha = crossing ? 1.0 : pulse;
     ctx.beginPath();
     ctx.arc(bx, by, 6, 0, Math.PI * 2);
-    ctx.fillStyle = colorTemplate.replace('__A__', alpha.toFixed(3));
+    ctx.fillStyle = 'rgba(140, 210, 255, ' + alpha.toFixed(3) + ')';
     ctx.fill();
+    ctx.beginPath();
+    ctx.arc(bx, by, 9, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(62, 112, 182, ' + Math.max(0.45, alpha * 0.9).toFixed(3) + ')';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(bx, by, 12 + (2 * pulse), 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(110, 170, 230, ' + Math.max(0.20, alpha * 0.35).toFixed(3) + ')';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   };
 
   if (!noContact) {
     if (target === 1) {
-      drawPresenceBlip(radarNow.movingAngleDeg, movingRange, 'rgba(140, 210, 255, __A__)', 300);
+      drawPresenceBlip('moving');
     } else if (target === 2) {
-      drawPresenceBlip(radarNow.stationaryAngleDeg, stationaryRange, 'rgba(62, 112, 182, __A__)', 420);
+      drawPresenceBlip('stationary');
     } else if (target === 3) {
-      drawPresenceBlip(radarNow.movingAngleDeg, movingRange, 'rgba(140, 210, 255, __A__)', 300);
-      drawPresenceBlip(radarNow.stationaryAngleDeg, stationaryRange, 'rgba(62, 112, 182, __A__)', 420);
+      drawPresenceBlip('both');
     } else {
-      drawPresenceBlip(radarNow.movingAngleDeg, detectCm, 'rgba(140, 210, 255, __A__)', 320);
+      drawPresenceBlip('moving');
     }
   }
 
@@ -1560,10 +1652,8 @@ function animateRadarScope() {
   drawRadarScope(radarNow.state);
 }
 
-function renderBadges(seriesKey, stats, decimals, unit) {
-  const el = document.getElementById('trend-badges-' + seriesKey);
-  if (!el) return;
-  const trend = trendSeries.find((item) => item.key === seriesKey);
+function renderBadgesToEl(el, trend, stats, decimals, unit) {
+  if (!el || !trend) return;
   const staleByReady = trend ? tableIsStale(trend.table) : false;
   const stale = staleByReady || !stats;
   if (stale) {
@@ -1580,6 +1670,12 @@ function renderBadges(seriesKey, stats, decimals, unit) {
     '<span class="badge">min ' + minv + unit + '</span>' +
     '<span class="badge">max ' + maxv + unit + '</span>' +
     '<span class="badge">last ' + last + unit + '</span>';
+}
+
+function renderBadges(seriesKey, stats, decimals, unit) {
+  const el = document.getElementById('trend-badges-' + seriesKey);
+  const trend = trendSeries.find((item) => item.key === seriesKey);
+  renderBadgesToEl(el, trend, stats, decimals, unit);
 }
 
 function clsFor(s) {
@@ -1949,47 +2045,50 @@ function initTrends() {
   const root = document.getElementById('trends');
   if (!root) return;
   root.innerHTML = '';
-  for (const trend of trendSeries) {
+  const radarCard = document.createElement('div');
+  radarCard.className = 'card trend-card chart hp-card';
+  radarCard.innerHTML =
+    '<div class="trend-top hp-head">' +
+      '<div><b>' + radarTrend.title + '</b></div>' +
+      '<div class="hp-tabs">' +
+        '<button id="radar-view-now" class="hp-tab active" onclick="setRadarView(\'now\')">Now</button>' +
+        '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
+      '</div>' +
+    '</div>' +
+    '<div id="trend-badges-' + radarTrend.key + '" class="trend-badges hp-badges"></div>' +
+    '<div id="trend-value-' + radarTrend.key + '" class="trend-value">n/a</div>' +
+    '<div id="radar-now-pane" class="radar-now-wrap">' +
+      '<canvas id="radar-now-canvas" class="radar-canvas"></canvas>' +
+      '<div class="radar-readout">' +
+        '<div id="radar-now-state" class="radar-state">RADAR offline</div>' +
+        '<div class="radar-line"><span class="radar-label">Bodies</span><span id="radar-now-bodies">--</span></div>' +
+        '<div class="radar-line"><span class="radar-label">Moving Confidence</span><span id="radar-now-move">--</span></div>' +
+        '<div class="radar-line"><span class="radar-label">Stationary Confidence</span><span id="radar-now-stat">--</span></div>' +
+        '<div class="radar-line"><span class="radar-label">Target</span><span id="radar-now-target">0/3</span></div>' +
+      '</div>' +
+    '</div>' +
+    '<div id="radar-history-pane" class="hidden">' +
+      '<div class="chart-wrap">' +
+        '<img id="trend-img-' + radarTrend.key + '" class="trend-img" alt="' + radarTrend.title + ' trend" src="/chart/' + radarTrend.key + '.png?minutes=60" />' +
+      '</div>' +
+    '</div>';
+  root.appendChild(radarCard);
+
+  for (const slot of chartSlotOrder) {
+    const trend = getTrendByKey(chartSlots[slot]);
     const card = document.createElement('div');
     card.className = 'card trend-card chart';
-    if (trend.key === 'radar_bodies') {
-      card.classList.add('hp-card');
-      card.innerHTML =
-        '<div class="trend-top hp-head">' +
-          '<div><b>' + trend.title + '</b></div>' +
-          '<div class="hp-tabs">' +
-            '<button id="radar-view-now" class="hp-tab active" onclick="setRadarView(\'now\')">Now</button>' +
-            '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
-          '</div>' +
-        '</div>' +
-        '<div id="trend-badges-' + trend.key + '" class="trend-badges hp-badges"></div>' +
-        '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
-        '<div id="radar-now-pane" class="radar-now-wrap">' +
-          '<canvas id="radar-now-canvas" class="radar-canvas"></canvas>' +
-          '<div class="radar-readout">' +
-            '<div id="radar-now-state" class="radar-state">RADAR offline</div>' +
-            '<div class="radar-line"><span class="radar-label">Bodies</span><span id="radar-now-bodies">--</span></div>' +
-            '<div class="radar-line"><span class="radar-label">Moving Confidence</span><span id="radar-now-move">--</span></div>' +
-            '<div class="radar-line"><span class="radar-label">Stationary Confidence</span><span id="radar-now-stat">--</span></div>' +
-            '<div class="radar-line"><span class="radar-label">Target</span><span id="radar-now-target">0/3</span></div>' +
-          '</div>' +
-        '</div>' +
-        '<div id="radar-history-pane" class="hidden">' +
-          '<div class="chart-wrap">' +
-            '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
-          '</div>' +
-        '</div>';
-    } else {
-      card.innerHTML =
-        '<div class="trend-top">' +
-          '<div><b>' + trend.title + '</b></div>' +
-          '<div id="trend-badges-' + trend.key + '" class="trend-badges"></div>' +
-        '</div>' +
-        '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
-        '<div class="chart-wrap">' +
-          '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
-        '</div>';
-    }
+    card.dataset.slot = slot;
+    card.dataset.trendKey = trend.key;
+    card.innerHTML =
+      '<div class="trend-top">' +
+        '<div><b id="trend-title-slot-' + slot + '">' + trend.title + '</b></div>' +
+        '<div id="trend-badges-slot-' + slot + '" class="trend-badges"></div>' +
+      '</div>' +
+      '<div id="trend-value-slot-' + slot + '" class="trend-value">n/a</div>' +
+      '<div class="chart-wrap">' +
+        '<img id="trend-img-slot-' + slot + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
+      '</div>';
     root.appendChild(card);
   }
   radarViewButtonsActive();
@@ -2512,26 +2611,64 @@ async function pollTrends() {
   const controller = new AbortController();
   trendController = controller;
   try {
+    const requestedKeys = [radarTrend.key, ...chartSlotOrder.map((slot) => getTrendByKey(chartSlots[slot]).key)];
+    const uniqueKeys = [...new Set(requestedKeys)];
     const results = await Promise.all(
-      trendSeries.map((trend) => fetchJson('/api/ts/' + trend.key + '?minutes=' + trendMinutes, controller).then((data) => [trend, data]))
+      uniqueKeys.map((key) => fetchJson('/api/ts/' + key + '?minutes=' + trendMinutes, controller).then((data) => [key, data]))
     );
+    const trendData = {};
+    for (const [key, data] of results) {
+      trendData[key] = data;
+    }
     const radarLatest = await fetchJson('/api/radar/latest', controller);
     radarNow.state = radarLatest || radarNow.state;
     drawRadarScope(radarNow.state);
 
     const cacheBust = Date.now();
-    for (const [trend, data] of results) {
+    {
+      const trend = radarTrend;
+      const data = trendData[trend.key] || { points: [], stats: null };
       const points = data.points || [];
       const latest = points.length ? points[points.length - 1].v : null;
       const valueEl = document.getElementById('trend-value-' + trend.key);
       const stale = tableIsStale(trend.table) || !points.length || !data.stats;
-      valueEl.textContent = latest === null ? 'n/a' : (formatMetric(latest, trend.decimals) + ' ' + trend.unit);
+      if (valueEl) {
+        valueEl.textContent = latest === null ? 'n/a' : (formatMetric(latest, trend.decimals) + ' ' + trend.unit);
+      }
       renderBadges(trend.key, data.stats || null, trend.decimals, ' ' + trend.unit);
 
       const imgEl = document.getElementById('trend-img-' + trend.key);
       const card = imgEl ? imgEl.closest('.trend-card') : null;
       if (imgEl) {
         imgEl.classList.toggle('stale', stale);
+        imgEl.src = '/chart/' + trend.key + '.png?minutes=' + trendMinutes + '&ts=' + cacheBust;
+      }
+      if (card) {
+        card.classList.toggle('stale-card', stale);
+      }
+    }
+
+    for (const slot of chartSlotOrder) {
+      const trend = getTrendByKey(chartSlots[slot]);
+      const data = trendData[trend.key] || { points: [], stats: null };
+      const points = data.points || [];
+      const latest = points.length ? points[points.length - 1].v : null;
+      const valueEl = document.getElementById('trend-value-slot-' + slot);
+      const stale = tableIsStale(trend.table) || !points.length || !data.stats;
+      if (valueEl) {
+        valueEl.textContent = latest === null ? 'n/a' : (formatMetric(latest, trend.decimals) + ' ' + trend.unit);
+      }
+      const badgesEl = document.getElementById('trend-badges-slot-' + slot);
+      renderBadgesToEl(badgesEl, trend, data.stats || null, trend.decimals, ' ' + trend.unit);
+
+      const titleEl = document.getElementById('trend-title-slot-' + slot);
+      if (titleEl) titleEl.textContent = trend.title;
+
+      const imgEl = document.getElementById('trend-img-slot-' + slot);
+      const card = imgEl ? imgEl.closest('.trend-card') : null;
+      if (imgEl) {
+        imgEl.classList.toggle('stale', stale);
+        imgEl.alt = trend.title + ' trend';
         imgEl.src = '/chart/' + trend.key + '.png?minutes=' + trendMinutes + '&ts=' + cacheBust;
       }
       if (card) {
@@ -2634,6 +2771,8 @@ async function pollEvents() {
 
 (async () => {
   initEvents();
+  chartSlots = loadChartSlots();
+  renderChartSlotControls();
   initTrends();
   setTrendMinutes(60);
   initTables();
