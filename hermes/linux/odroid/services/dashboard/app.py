@@ -1248,12 +1248,19 @@ def query_series(series: str, minutes: int) -> List[Dict[str, object]]:
     return downsample_points(points, max_points=300)
 
 
-def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, object]]) -> bytes:
+def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, object]], width_px: int, height_px: int, device_pixel_ratio: float) -> bytes:
   cfg = SERIES_MAP[series]
   render_start = time.perf_counter()
+  width_px = max(180, min(2200, int(width_px or 528)))
+  height_px = max(120, min(1400, int(height_px or 226)))
+  dpr = max(1.0, min(3.0, float(device_pixel_ratio or 1.0)))
+  base_dpi = 100
+  fig_w = width_px / float(base_dpi)
+  fig_h = height_px / float(base_dpi)
+  render_dpi = int(round(base_dpi * dpr))
   try:
     with chart_render_lock:
-      fig, ax = plt.subplots(figsize=(4.8, 2.05), dpi=110)
+      fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=render_dpi)
       fig.patch.set_facecolor("#151c24")
       ax.set_facecolor("#151c24")
 
@@ -2099,7 +2106,13 @@ def api_radar_calibration_latest() -> Dict[str, object]:
 
 
 @APP.get("/chart/{series}.png")
-def chart_png(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Response:
+def chart_png(
+  series: str,
+  minutes: int = Query(60, ge=1, le=24 * 60),
+  w: int = Query(528, ge=120, le=2400),
+  h: int = Query(226, ge=100, le=1600),
+  dpr: float = Query(1.0, ge=1.0, le=3.0),
+) -> Response:
     if series not in SERIES_MAP:
         raise HTTPException(status_code=404, detail="series not allowed")
 
@@ -2110,7 +2123,11 @@ def chart_png(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Respon
     else:
         minutes = 240
 
-    cache_key = f"{series}:{minutes}"
+    width_px = int(w)
+    height_px = int(h)
+    dpr_norm = float(dpr)
+
+    cache_key = f"{series}:{minutes}:{width_px}:{height_px}:{dpr_norm:.2f}"
     now = time.time()
     with chart_cache_lock:
         cached = chart_cache.get(cache_key)
@@ -2118,7 +2135,7 @@ def chart_png(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Respon
             return Response(content=cached[1], media_type="image/png", headers={"Cache-Control": "no-store"})
 
     points = query_series(series, minutes)
-    payload = render_sparkline_png(series, minutes, points)
+    payload = render_sparkline_png(series, minutes, points, width_px, height_px, dpr_norm)
 
     with chart_cache_lock:
         chart_cache[cache_key] = (now, payload)
@@ -2782,17 +2799,17 @@ HTML_PAGE = """
     .ts-main { display: block; }
     .ts-sub { display: block; font-size: 11px; color: #8ea1b3; }
     td.changed { background: #213447; transition: background-color 0.5s ease; }
-    .trend-card { min-width: 260px; flex: 1 1 320px; display: flex; flex-direction: column; gap: 6px; }
-    .card.chart { height: 360px; }
-    .trend-card.chart { height: 360px; }
+    .trend-card { min-width: 260px; flex: 1 1 320px; display: flex; flex-direction: column; gap: 0.375rem; }
+    .card.chart { height: auto; }
+    .trend-card.chart { height: auto; }
     @media (min-width: 1400px) {
-      .trend-card.chart { height: 380px; }
+      .trend-card.chart { height: auto; }
     }
     .metric-value, .card h2 { font-weight: 650; }
-    .trend-value { font-size: 18px; font-weight: 650; margin: 2px 0 4px 0; }
+    .trend-value { font-size: 1.125rem; line-height: 1.2; font-weight: 650; margin: 0.125rem 0 0.25rem 0; }
     .card.chart .card-header { padding: 12px 14px 6px 14px; margin: -10px -12px 0 -12px; }
-    .chart-wrap { flex: 1 1 auto; min-height: 260px; }
-    .card.chart .plot { height: 260px; min-height: 260px; }
+    .chart-wrap { flex: 1 1 auto; width: 100%; }
+    .card.chart .plot { position: relative; width: 100%; aspect-ratio: 16 / 9; min-height: 220px; max-height: 360px; }
     .card.chart canvas, .card.chart svg { height: 100% !important; width: 100% !important; }
     .trend-img { width: 100%; height: 100%; border-radius: 8px; border: 1px solid #26313d; display: block; }
     .trend-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
@@ -3974,6 +3991,9 @@ let readyController = null;
 let eventsController = null;
 let lastUpdatedMs = 0;
 let trendMinutes = 60;
+let chartResizeObserver = null;
+const pendingChartRedrawIds = new Set();
+let pendingChartRedrawTimer = null;
 const radarCalibration = {
   sessionId: null,
   status: 'idle',
@@ -4057,6 +4077,72 @@ function bindPresenceToggleUi() {
   toggleEl.addEventListener('change', () => {
     useDerivedPresence = !!toggleEl.checked;
     drawRadarScope(radarNow.state || {});
+  });
+}
+
+function getChartRenderSize(imgEl) {
+  if (!imgEl) return null;
+  const wrap = imgEl.closest('.chart-wrap.plot');
+  if (!wrap) return null;
+  const rect = wrap.getBoundingClientRect();
+  const width = Math.max(160, Math.round(rect.width || 0));
+  const height = Math.max(120, Math.round(rect.height || 0));
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  return { width, height };
+}
+
+function buildChartImageUrl(trendKey, cacheBust, imgEl) {
+  const size = getChartRenderSize(imgEl);
+  const dpr = Math.max(1, Math.min(3, Number(window.devicePixelRatio || 1)));
+  const width = size ? size.width : 528;
+  const height = size ? size.height : 226;
+  return '/chart/' + trendKey + '.png?minutes=' + trendMinutes + '&w=' + width + '&h=' + height + '&dpr=' + dpr.toFixed(2) + '&ts=' + cacheBust;
+}
+
+function setTrendImageSrc(imgEl, trendKey, cacheBust) {
+  if (!imgEl || !trendKey) return;
+  imgEl.src = buildChartImageUrl(trendKey, cacheBust, imgEl);
+}
+
+function resizeAndRedrawChart(chartId) {
+  const imgEl = document.getElementById(chartId);
+  if (!imgEl) return;
+  const trendKey = String(imgEl.dataset.trendKey || '').trim();
+  if (!trendKey) return;
+  setTrendImageSrc(imgEl, trendKey, Date.now());
+}
+
+function queueChartRedraw(chartId) {
+  if (!chartId) return;
+  pendingChartRedrawIds.add(chartId);
+  if (pendingChartRedrawTimer) return;
+  pendingChartRedrawTimer = setTimeout(() => {
+    const ids = Array.from(pendingChartRedrawIds);
+    pendingChartRedrawIds.clear();
+    pendingChartRedrawTimer = null;
+    for (const id of ids) {
+      resizeAndRedrawChart(id);
+    }
+  }, 120);
+}
+
+function initChartResizeObserver() {
+  if (chartResizeObserver) {
+    chartResizeObserver.disconnect();
+    chartResizeObserver = null;
+  }
+  if (typeof ResizeObserver === 'undefined') return;
+  chartResizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const wrap = entry.target;
+      const imgEl = wrap.querySelector('img.trend-img');
+      if (imgEl && imgEl.id) {
+        queueChartRedraw(imgEl.id);
+      }
+    }
+  });
+  document.querySelectorAll('.chart-wrap.plot').forEach((wrap) => {
+    chartResizeObserver.observe(wrap);
   });
 }
 
@@ -4923,7 +5009,7 @@ function initTrends() {
     '</div>' +
     '<div id="radar-history-pane" class="hidden">' +
       '<div class="chart-wrap plot">' +
-        '<img id="trend-img-' + radarTrend.key + '" class="trend-img" alt="' + radarTrend.title + ' trend" src="/chart/' + radarTrend.key + '.png?minutes=60" />' +
+        '<img id="trend-img-' + radarTrend.key + '" class="trend-img" data-trend-key="' + radarTrend.key + '" alt="' + radarTrend.title + ' trend" src="/chart/' + radarTrend.key + '.png?minutes=60" />' +
       '</div>' +
     '</div>';
   root.appendChild(radarCard);
@@ -4941,11 +5027,12 @@ function initTrends() {
       '</div>' +
       '<div id="trend-value-slot-' + slot + '" class="trend-value metric-value">n/a</div>' +
       '<div class="chart-wrap plot">' +
-        '<img id="trend-img-slot-' + slot + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
+        '<img id="trend-img-slot-' + slot + '" class="trend-img" data-trend-key="' + trend.key + '" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
       '</div>';
     root.appendChild(card);
   }
   radarViewButtonsActive();
+  initChartResizeObserver();
 }
 
 function initEvents() {
@@ -5525,7 +5612,8 @@ async function pollTrends() {
       const card = imgEl ? imgEl.closest('.trend-card') : null;
       if (imgEl) {
         imgEl.classList.toggle('stale', stale);
-        imgEl.src = '/chart/' + trend.key + '.png?minutes=' + trendMinutes + '&ts=' + cacheBust;
+        imgEl.dataset.trendKey = trend.key;
+        setTrendImageSrc(imgEl, trend.key, cacheBust);
       }
       if (card) {
         card.classList.toggle('stale-card', stale);
@@ -5553,7 +5641,8 @@ async function pollTrends() {
       if (imgEl) {
         imgEl.classList.toggle('stale', stale);
         imgEl.alt = trend.title + ' trend';
-        imgEl.src = '/chart/' + trend.key + '.png?minutes=' + trendMinutes + '&ts=' + cacheBust;
+        imgEl.dataset.trendKey = trend.key;
+        setTrendImageSrc(imgEl, trend.key, cacheBust);
       }
       if (card) {
         card.classList.toggle('stale-card', stale);
