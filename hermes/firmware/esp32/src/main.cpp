@@ -38,6 +38,10 @@
 #define CAMERA_PROBE_MODE 0
 #endif
 
+#ifndef LD2410_UART_BRINGUP_MODE
+#define LD2410_UART_BRINGUP_MODE 1
+#endif
+
 #define ENABLE_ESP_CMD 1
 #ifndef ENABLE_CAMERA
 #define ENABLE_CAMERA 0
@@ -47,6 +51,10 @@
 
 static const uint8_t UART_RX_PIN = D7;
 static const uint8_t UART_TX_PIN = D6;
+static const int LD2410_UART_RX_PIN = UART_RX_PIN;
+static const int LD2410_UART_TX_PIN = UART_TX_PIN;
+static const uint32_t LD2410_UART_BAUD = 256000;
+HardwareSerial RadarSerial(2);
 
 static const uint32_t CAMERA_INTERVAL_MS = 2000;
 static const int SCENE_STRIDE = 4;
@@ -752,6 +760,22 @@ static void sendTelemetryLine() {
 
 void setup() {
   Serial.begin(115200);
+#if LD2410_UART_BRINGUP_MODE
+  delay(200);
+  waitForSerial(1500);
+  Serial.println("LD2410 UART bring-up starting...");
+
+  RadarSerial.begin(LD2410_UART_BAUD, SERIAL_8N1, LD2410_UART_RX_PIN, LD2410_UART_TX_PIN);
+
+  Serial.print("Radar UART RX pin = ");
+  Serial.println(LD2410_UART_RX_PIN);
+  Serial.print("Radar UART TX pin = ");
+  Serial.println(LD2410_UART_TX_PIN);
+  Serial.print("Radar UART baud = ");
+  Serial.println(static_cast<unsigned long>(LD2410_UART_BAUD));
+  Serial.println("Waiting for radar bytes...");
+  return;
+#endif
 #if CAMERA_PROBE_MODE
   delay(50);
   waitForSerial(1500);
@@ -770,6 +794,19 @@ void setup() {
 }
 
 void loop() {
+#if LD2410_UART_BRINGUP_MODE
+  bool printed = false;
+  while (RadarSerial.available() > 0) {
+    const uint8_t byteValue = static_cast<uint8_t>(RadarSerial.read());
+    Serial.printf("%02X ", byteValue);
+    printed = true;
+  }
+  if (printed) {
+    Serial.println();
+  }
+  delay(10);
+  return;
+#endif
 #if CAMERA_PROBE_MODE
   delay(1000);
   return;
