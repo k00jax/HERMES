@@ -50,6 +50,14 @@ NAV_LINKS = (
   ("Calibration", "/calibration"),
   ("Settings", "/settings"),
 )
+SETTINGS_DEFAULTS = {
+  "field_mode_start": False,
+  "units_distance": "cm",
+  "chart_slot_a": "air_eco2",
+  "chart_slot_b": "env_temp",
+  "chart_slot_c": "env_hum",
+  "chart_slot_d": "air_tvoc",
+}
 
 SERIES_MAP = {
   "env_temp": {"table": "env", "column": "temp_c", "label": "Temp (C)", "color": "#4fc3f7", "stepped": False},
@@ -246,6 +254,110 @@ def ensure_radar_calibration_table(conn: sqlite3.Connection) -> None:
     """
   )
   conn.execute("CREATE INDEX IF NOT EXISTS idx_radar_calibration_ts ON radar_calibration(ts_utc);")
+
+
+def ensure_settings_table(conn: sqlite3.Connection) -> None:
+  conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      updated_ts_utc TEXT NOT NULL
+    );
+    """
+  )
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_settings_updated ON settings(updated_ts_utc);")
+
+
+def get_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
+  ensure_settings_table(conn)
+  rows = conn.execute("SELECT key, value_json FROM settings").fetchall()
+  parsed: Dict[str, object] = {}
+  for row in rows:
+    key = str(row[0])
+    value_json = row[1]
+    try:
+      parsed[key] = json.loads(value_json)
+    except Exception:
+      continue
+
+  result = dict(SETTINGS_DEFAULTS)
+  for key in SETTINGS_DEFAULTS:
+    if key in parsed:
+      result[key] = parsed[key]
+
+  result["field_mode_start"] = bool(result.get("field_mode_start"))
+  units = str(result.get("units_distance") or "cm").lower()
+  result["units_distance"] = "m" if units == "m" else "cm"
+
+  valid_chart = {"air_eco2", "env_temp", "env_hum", "air_tvoc"}
+  for slot_key, fallback in (
+      ("chart_slot_a", "air_eco2"),
+      ("chart_slot_b", "env_temp"),
+      ("chart_slot_c", "env_hum"),
+      ("chart_slot_d", "air_tvoc"),
+  ):
+    chosen = str(result.get(slot_key) or fallback)
+    result[slot_key] = chosen if chosen in valid_chart else fallback
+  return result
+
+
+def save_settings_payload(conn: sqlite3.Connection, updates: Dict[str, object]) -> Dict[str, object]:
+  ensure_settings_table(conn)
+  current = get_settings_payload(conn)
+  merged = dict(current)
+  for key, value in (updates or {}).items():
+    if key not in SETTINGS_DEFAULTS:
+      continue
+    merged[key] = value
+
+  if "field_mode_start" in updates:
+    merged["field_mode_start"] = bool(updates.get("field_mode_start"))
+  if "units_distance" in updates:
+    units = str(updates.get("units_distance") or "cm").lower()
+    merged["units_distance"] = "m" if units == "m" else "cm"
+
+  valid_chart = {"air_eco2", "env_temp", "env_hum", "air_tvoc"}
+  for slot_key, fallback in (
+      ("chart_slot_a", "air_eco2"),
+      ("chart_slot_b", "env_temp"),
+      ("chart_slot_c", "env_hum"),
+      ("chart_slot_d", "air_tvoc"),
+  ):
+    if slot_key in updates:
+      chosen = str(updates.get(slot_key) or fallback)
+      merged[slot_key] = chosen if chosen in valid_chart else fallback
+
+  now_ts = now_utc_iso()
+  for key in SETTINGS_DEFAULTS:
+    conn.execute(
+      """
+      INSERT INTO settings (key, value_json, updated_ts_utc)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value_json = excluded.value_json,
+        updated_ts_utc = excluded.updated_ts_utc
+      """,
+      (key, json.dumps(merged[key], separators=(",", ":"), ensure_ascii=False), now_ts),
+    )
+  return merged
+
+
+def reset_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
+  ensure_settings_table(conn)
+  now_ts = now_utc_iso()
+  for key, value in SETTINGS_DEFAULTS.items():
+    conn.execute(
+      """
+      INSERT INTO settings (key, value_json, updated_ts_utc)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value_json = excluded.value_json,
+        updated_ts_utc = excluded.updated_ts_utc
+      """,
+      (key, json.dumps(value, separators=(",", ":"), ensure_ascii=False), now_ts),
+    )
+  return dict(SETTINGS_DEFAULTS)
 
 
 def insert_event_row(
@@ -1479,6 +1591,209 @@ def chart_png(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Respon
     return Response(content=payload, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+@APP.get("/api/settings")
+def api_settings_get() -> Dict[str, object]:
+  if not DB_PATH.exists():
+    return dict(SETTINGS_DEFAULTS)
+  with open_db() as conn:
+    return get_settings_payload(conn)
+
+
+@APP.post("/api/settings")
+def api_settings_post(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+  if not isinstance(payload, dict):
+    raise HTTPException(status_code=400, detail="payload must be an object")
+  with open_db() as conn:
+    result = save_settings_payload(conn, payload)
+    conn.commit()
+  return {"ok": True, "settings": result}
+
+
+@APP.post("/api/settings/reset")
+def api_settings_reset() -> Dict[str, object]:
+  with open_db() as conn:
+    result = reset_settings_payload(conn)
+    conn.commit()
+  return {"ok": True, "settings": result}
+
+
+def ensure_analytics_indexes(conn: sqlite3.Connection) -> None:
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_radar_ts_utc ON radar(ts_utc);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_air_ts_utc ON air(ts_utc);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_env_ts_utc ON env(ts_utc);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_esp_net_ts_utc ON esp_net(ts_utc);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts_utc ON events(ts_utc);")
+
+
+def estimate_radar_sample_seconds(conn: sqlite3.Connection) -> float:
+  conn.row_factory = sqlite3.Row
+  rows = conn.execute(
+    """
+    SELECT ts_utc
+    FROM radar
+    WHERE alive=1
+    ORDER BY id DESC
+    LIMIT 400
+    """
+  ).fetchall()
+  if len(rows) < 2:
+    return 0.1
+  parsed: List[datetime.datetime] = []
+  for row in rows:
+    raw = row["ts_utc"]
+    if not raw:
+      continue
+    try:
+      parsed.append(parse_iso8601_utc(str(raw)))
+    except Exception:
+      continue
+  if len(parsed) < 2:
+    return 0.1
+  deltas: List[float] = []
+  for idx in range(1, len(parsed)):
+    diff = abs((parsed[idx - 1] - parsed[idx]).total_seconds())
+    if 0.01 <= diff <= 2.0:
+      deltas.append(diff)
+  if not deltas:
+    return 0.1
+  return float(statistics.median(deltas))
+
+
+@APP.get("/api/analytics/presence_by_hour")
+def api_analytics_presence_by_hour(hours: int = Query(24, ge=1, le=168)) -> Dict[str, object]:
+  cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+  cutoff_iso_utc = cutoff.isoformat()
+  with open_db() as conn:
+    ensure_analytics_indexes(conn)
+    conn.row_factory = sqlite3.Row
+    sample_sec = estimate_radar_sample_seconds(conn)
+    rows = conn.execute(
+      """
+      SELECT
+        CAST(strftime('%H', COALESCE(ts_local, ts_utc)) AS INTEGER) AS hour_local,
+        COUNT(*) AS present_samples
+      FROM radar
+      WHERE ts_utc >= ? AND alive=1 AND target!=0
+      GROUP BY hour_local
+      ORDER BY hour_local ASC
+      """,
+      (cutoff_iso_utc,),
+    ).fetchall()
+
+  buckets = {hour: 0.0 for hour in range(24)}
+  for row in rows:
+    hour = int(row["hour_local"] or 0)
+    if 0 <= hour <= 23:
+      buckets[hour] = float(row["present_samples"] or 0) * sample_sec / 60.0
+  series = [{"hour": hour, "minutes_present": round(buckets[hour], 2)} for hour in range(24)]
+  return {
+    "hours": int(hours),
+    "sample_seconds": round(sample_sec, 4),
+    "series": series,
+  }
+
+
+@APP.get("/api/analytics/eco2_vs_presence")
+def api_analytics_eco2_vs_presence(hours: int = Query(24, ge=1, le=168)) -> Dict[str, object]:
+  cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+  cutoff_iso_utc = cutoff.isoformat()
+  with open_db() as conn:
+    ensure_analytics_indexes(conn)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+      """
+      WITH air_window AS (
+        SELECT ts_utc, eco2_ppm
+        FROM air
+        WHERE ts_utc >= ?
+      ),
+      classified AS (
+        SELECT
+          a.eco2_ppm AS eco2_ppm,
+          CASE
+            WHEN (
+              SELECT COALESCE(r.alive, 0)
+              FROM radar r
+              WHERE r.ts_utc <= a.ts_utc
+              ORDER BY r.ts_utc DESC
+              LIMIT 1
+            ) = 1
+            AND (
+              SELECT COALESCE(r.target, 0)
+              FROM radar r
+              WHERE r.ts_utc <= a.ts_utc
+              ORDER BY r.ts_utc DESC
+              LIMIT 1
+            ) != 0
+            THEN 1
+            ELSE 0
+          END AS present
+        FROM air_window a
+        WHERE a.eco2_ppm IS NOT NULL
+      )
+      SELECT
+        AVG(CASE WHEN present=1 THEN eco2_ppm END) AS avg_present,
+        AVG(CASE WHEN present=0 THEN eco2_ppm END) AS avg_absent,
+        SUM(CASE WHEN present=1 THEN 1 ELSE 0 END) AS samples_present,
+        SUM(CASE WHEN present=0 THEN 1 ELSE 0 END) AS samples_absent
+      FROM classified
+      """,
+      (cutoff_iso_utc,),
+    ).fetchone()
+
+  avg_present = float(row["avg_present"]) if row and row["avg_present"] is not None else None
+  avg_absent = float(row["avg_absent"]) if row and row["avg_absent"] is not None else None
+  delta = None
+  if avg_present is not None and avg_absent is not None:
+    delta = avg_present - avg_absent
+  return {
+    "hours": int(hours),
+    "avg_eco2_present": round(avg_present, 2) if avg_present is not None else None,
+    "avg_eco2_absent": round(avg_absent, 2) if avg_absent is not None else None,
+    "delta_present_minus_absent": round(delta, 2) if delta is not None else None,
+    "samples_present": int(row["samples_present"] or 0) if row else 0,
+    "samples_absent": int(row["samples_absent"] or 0) if row else 0,
+  }
+
+
+@APP.get("/api/analytics/event_counts")
+def api_analytics_event_counts(days: int = Query(7, ge=1, le=90)) -> Dict[str, object]:
+  cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+  cutoff_iso_utc = cutoff.isoformat()
+  with open_db() as conn:
+    ensure_events_table(conn)
+    ensure_analytics_indexes(conn)
+    conn.row_factory = sqlite3.Row
+    sev_rows = conn.execute(
+      """
+      SELECT severity, COUNT(*) AS count
+      FROM events
+      WHERE ts_utc >= ?
+      GROUP BY severity
+      ORDER BY count DESC
+      """,
+      (cutoff_iso_utc,),
+    ).fetchall()
+    kind_rows = conn.execute(
+      """
+      SELECT kind, COUNT(*) AS count
+      FROM events
+      WHERE ts_utc >= ?
+      GROUP BY kind
+      ORDER BY count DESC
+      LIMIT 5
+      """,
+      (cutoff_iso_utc,),
+    ).fetchall()
+  by_severity = {str(row["severity"] or "unknown"): int(row["count"] or 0) for row in sev_rows}
+  top_kinds = [{"kind": str(row["kind"] or "unknown"), "count": int(row["count"] or 0)} for row in kind_rows]
+  return {
+    "days": int(days),
+    "by_severity": by_severity,
+    "top_kinds": top_kinds,
+  }
+
+
 HTML_PAGE = """
 <!doctype html>
 <html>
@@ -1509,6 +1824,20 @@ HTML_PAGE = """
       text-decoration: none;
     }
     .nav-link.active { background: #1f5f99; border-color: #1f5f99; color: #fff; }
+    .field-entry { margin: 6px 0 12px 0; }
+    .field-entry a {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      text-decoration: none;
+      background: #1f5f99;
+      color: #fff;
+      border-radius: 999px;
+      padding: 9px 14px;
+      border: 1px solid #1f5f99;
+      font-size: 14px;
+      font-weight: 650;
+    }
     .row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
     .card { background: #151c24; border: 1px solid #26313d; border-radius: 10px; padding: 10px 12px; }
 
@@ -1654,6 +1983,7 @@ HTML_PAGE = """
 <body>
   <h1>HERMES Dashboard</h1>
   {{TOP_NAV}}
+  <div id="fieldModeEntry" class="field-entry hidden"><a href="/field">Enter Field Mode</a></div>
   <div id="readyBanner" class="banner hidden">NOT READY</div>
   <div id="lastUpdated" class="muted small">Last updated: never</div>
   <div id="dbg" class="muted small" style="margin-top:6px;">
@@ -1763,6 +2093,388 @@ def render_dashboard_page(active_path: str) -> str:
   return HTML_PAGE.replace("{{TOP_NAV}}", render_top_nav(active_path))
 
 
+def render_shell_page(active_path: str, title: str, body_html: str, script_js: str, extra_style: str = "") -> str:
+  nav = render_top_nav(active_path)
+  return f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>{title}</title>
+  <style>
+    body {{
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, Helvetica, Arial;
+      margin: 16px;
+      background: #0b0f14;
+      color: #e8eef5;
+    }}
+    h1 {{ margin: 0 0 4px 0; }}
+    .muted {{ color: #9fb3c8; }}
+    .top-nav {{ margin: 10px 0 14px 0; display: flex; gap: 8px; flex-wrap: wrap; }}
+    .nav-link {{
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid #26313d;
+      background: #111820;
+      color: #9fb3c8;
+      font-size: 12px;
+      text-decoration: none;
+    }}
+    .nav-link.active {{ background: #1f5f99; border-color: #1f5f99; color: #fff; }}
+    .card {{ background: #151c24; border: 1px solid #26313d; border-radius: 10px; padding: 12px; margin-bottom: 12px; }}
+    button {{ background: #1f5f99; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }}
+    input, select {{ background: #111820; color: #d9e6f3; border: 1px solid #26313d; border-radius: 8px; padding: 7px 9px; }}
+    {extra_style}
+  </style>
+</head>
+<body>
+  <h1>{title}</h1>
+  {nav}
+  {body_html}
+  <script>
+  {script_js}
+  </script>
+</body>
+</html>
+"""
+
+
+def render_analytics_page() -> str:
+  body = """
+  <div class=\"card\">
+    <b>Presence Minutes by Hour (last 24h)</b>
+    <div class=\"muted\" style=\"margin-top:4px\">Estimated minutes with alive presence by local hour.</div>
+    <div id=\"presenceByHour\" style=\"margin-top:10px\"></div>
+  </div>
+  <div class=\"card\">
+    <b>ECO2 vs Presence (last 24h)</b>
+    <div id=\"eco2Corr\" style=\"display:grid;grid-template-columns:repeat(3,minmax(160px,1fr));gap:10px;margin-top:10px\"></div>
+  </div>
+  <div class=\"card\">
+    <b>Top Events (last 7d)</b>
+    <div id=\"eventSeverity\" class=\"muted\" style=\"margin-top:8px\"></div>
+    <div id=\"eventKinds\" style=\"margin-top:10px\"></div>
+  </div>
+  """
+  script = """
+  function barRow(label, value, maxValue) {
+    const safeMax = Math.max(1, Number(maxValue || 1));
+    const width = Math.max(0, Math.min(100, (Number(value || 0) / safeMax) * 100));
+    return '<div style="display:grid;grid-template-columns:52px 1fr 58px;gap:8px;align-items:center;margin:4px 0">'
+      + '<span class="muted">' + String(label).padStart(2, '0') + ':00</span>'
+      + '<div style="height:10px;border:1px solid #26313d;border-radius:999px;background:#111820;overflow:hidden"><div style="height:100%;width:' + width.toFixed(1) + '%;background:#4ca9ff"></div></div>'
+      + '<span>' + Number(value || 0).toFixed(1) + 'm</span>'
+      + '</div>';
+  }
+
+  async function fetchJson(url) {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url);
+    return await r.json();
+  }
+
+  async function loadAnalytics() {
+    const [presence, eco2, events] = await Promise.all([
+      fetchJson('/api/analytics/presence_by_hour?hours=24'),
+      fetchJson('/api/analytics/eco2_vs_presence?hours=24'),
+      fetchJson('/api/analytics/event_counts?days=7'),
+    ]);
+
+    const series = Array.isArray(presence.series) ? presence.series : [];
+    const maxM = series.reduce((m, row) => Math.max(m, Number(row.minutes_present || 0)), 0);
+    const byHour = document.getElementById('presenceByHour');
+    if (byHour) {
+      byHour.innerHTML = series.map((row) => barRow(row.hour, row.minutes_present, maxM)).join('');
+    }
+
+    const corr = document.getElementById('eco2Corr');
+    if (corr) {
+      const present = eco2.avg_eco2_present == null ? 'n/a' : Number(eco2.avg_eco2_present).toFixed(1) + ' ppm';
+      const absent = eco2.avg_eco2_absent == null ? 'n/a' : Number(eco2.avg_eco2_absent).toFixed(1) + ' ppm';
+      const delta = eco2.delta_present_minus_absent == null ? 'n/a' : Number(eco2.delta_present_minus_absent).toFixed(1) + ' ppm';
+      corr.innerHTML =
+        '<div class="card" style="margin:0"><div class="muted">Avg ECO2 (presence)</div><div style="font-size:28px;font-weight:700">' + present + '</div></div>' +
+        '<div class="card" style="margin:0"><div class="muted">Avg ECO2 (no presence)</div><div style="font-size:28px;font-weight:700">' + absent + '</div></div>' +
+        '<div class="card" style="margin:0"><div class="muted">Delta (present - absent)</div><div style="font-size:28px;font-weight:700">' + delta + '</div></div>';
+    }
+
+    const sev = document.getElementById('eventSeverity');
+    if (sev) {
+      const bySev = events.by_severity || {};
+      const parts = Object.keys(bySev).sort().map((k) => k + ': ' + bySev[k]);
+      sev.textContent = parts.length ? ('Severity counts — ' + parts.join(' · ')) : 'No events in window.';
+    }
+
+    const kinds = document.getElementById('eventKinds');
+    if (kinds) {
+      const top = Array.isArray(events.top_kinds) ? events.top_kinds : [];
+      kinds.innerHTML = top.map((row, idx) =>
+        '<div style="display:flex;justify-content:space-between;border-bottom:1px solid #26313d;padding:6px 0">'
+        + '<span>' + String(idx + 1) + '. ' + String(row.kind || 'unknown') + '</span>'
+        + '<b>' + String(row.count || 0) + '</b>'
+        + '</div>'
+      ).join('');
+    }
+  }
+
+  loadAnalytics().catch((err) => {
+    const roots = ['presenceByHour', 'eco2Corr', 'eventKinds'];
+    for (const id of roots) {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = '<div class="muted">Failed to load analytics: ' + String(err && err.message ? err.message : err) + '</div>';
+    }
+  });
+  """
+  return render_shell_page("/analytics", "HERMES Analytics", body, script)
+
+
+def render_field_page() -> str:
+  body = """
+  <div class=\"card\" style=\"padding:14px\">
+    <div id=\"fieldStatus\" class=\"status-pill state-offline\">RADAR OFFLINE</div>
+    <div style=\"margin-top:12px\">
+      <div class=\"muted\">Detect Distance</div>
+      <div id=\"fieldDetect\" style=\"font-size:64px;line-height:1.05;font-weight:750\">--</div>
+    </div>
+  </div>
+  <div class=\"tile-grid\">
+    <div class=\"card tile\"><div class=\"muted\">ECO2</div><div id=\"tileEco2\" class=\"tile-val\">--</div></div>
+    <div class=\"card tile\"><div class=\"muted\">Temp</div><div id=\"tileTemp\" class=\"tile-val\">--</div></div>
+    <div class=\"card tile\"><div class=\"muted\">Humidity</div><div id=\"tileHum\" class=\"tile-val\">--</div></div>
+    <div id=\"tileRssiWrap\" class=\"card tile rssi-box\"><div class=\"muted\">RSSI</div><div id=\"tileRssi\" class=\"tile-val\">--</div></div>
+  </div>
+  <div class=\"muted\" id=\"fieldFooter\" style=\"margin-top:10px\">Last updated: never · System: --</div>
+  """
+  style = """
+    .tile-grid { display:grid; grid-template-columns: repeat(4,minmax(180px,1fr)); gap:10px; }
+    @media (max-width: 1100px) { .tile-grid { grid-template-columns: repeat(2,minmax(180px,1fr)); } }
+    .tile { min-height: 120px; }
+    .tile-val { font-size: 42px; font-weight: 750; margin-top: 8px; }
+    .status-pill { display:inline-flex; align-items:center; padding:8px 16px; border-radius:999px; border:1px solid #2a3b4f; background:#111820; color:#c3d4e6; font-size:24px; font-weight:700; }
+    .state-offline { border-color:#5a6775; color:#bdc8d4; }
+    .state-none { border-color:#2f5f9b; color:#a7c4e5; }
+    .state-moving { border-color:#4ca9ff; color:#c8e6ff; }
+    .state-still { border-color:#3e6fad; color:#b7d0ea; }
+    .state-both { border-color:#66bb6a; color:#d2f0d5; }
+    .rssi-box { border: 2px solid rgba(255,255,255,0.08); }
+    .rssi-good { border-color: rgba(0, 200, 100, 0.70); box-shadow: 0 0 0 1px rgba(0,200,100,0.15) inset; }
+    .rssi-med  { border-color: rgba(255, 180, 0, 0.70); box-shadow: 0 0 0 1px rgba(255,180,0,0.12) inset; }
+    .rssi-poor { border-color: rgba(255, 70, 70, 0.75); box-shadow: 0 0 0 1px rgba(255,70,70,0.12) inset; }
+  """
+  script = """
+  let unitDistance = 'cm';
+
+  function fmtDetect(cm) {
+    const value = Number(cm || 0);
+    if (!Number.isFinite(value)) return '--';
+    if (unitDistance === 'm') return (value / 100).toFixed(2) + ' m';
+    return Math.round(value) + ' cm';
+  }
+
+  function toPresenceStatus(radar) {
+    const alive = Number(radar.alive || 0) === 1;
+    if (!alive) return { text: 'RADAR OFFLINE', cls: 'state-offline' };
+    const target = Number(radar.target || 0);
+    const moving = Number(radar.move_en || 0) > 0;
+    const still = Number(radar.stat_en || 0) > 0;
+    if (target === 0) return { text: 'NO PRESENCE', cls: 'state-none' };
+    if (moving && still) return { text: 'MOVING + STILL', cls: 'state-both' };
+    if (moving && !still) return { text: 'MOVING PRESENCE', cls: 'state-moving' };
+    if (!moving && still) return { text: 'STILL PRESENCE', cls: 'state-still' };
+    return { text: 'NO PRESENCE', cls: 'state-none' };
+  }
+
+  function rssiClass(rssi, wifist) {
+    if (!Number.isFinite(rssi) || rssi === 999 || rssi > 0 || rssi < -130) return 'rssi-poor';
+    if (Number.isFinite(wifist) && wifist !== 1 && wifist !== 3) return 'rssi-poor';
+    if (rssi >= -65) return 'rssi-good';
+    if (rssi >= -80) return 'rssi-med';
+    return 'rssi-poor';
+  }
+
+  async function fetchJson(url) {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url);
+    return await r.json();
+  }
+
+  async function loadSettings() {
+    try {
+      const settings = await fetchJson('/api/settings');
+      unitDistance = String(settings.units_distance || 'cm') === 'm' ? 'm' : 'cm';
+    } catch (_err) {
+      unitDistance = 'cm';
+    }
+  }
+
+  async function refreshField() {
+    const [radarResp, airResp, envResp, espResp, healthResp] = await Promise.all([
+      fetchJson('/api/radar/latest'),
+      fetchJson('/api/latest/air?limit=1'),
+      fetchJson('/api/latest/env?limit=1'),
+      fetchJson('/api/latest/esp_net?limit=1'),
+      fetchJson('/api/health'),
+    ]);
+
+    const radar = radarResp || {};
+    const air = (airResp.rows || [])[0] || {};
+    const env = (envResp.rows || [])[0] || {};
+    const esp = (espResp.rows || [])[0] || {};
+    const freshness = (healthResp && healthResp.freshness) ? healthResp.freshness : {};
+
+    const st = toPresenceStatus(radar);
+    const statusEl = document.getElementById('fieldStatus');
+    if (statusEl) {
+      statusEl.textContent = st.text;
+      statusEl.className = 'status-pill ' + st.cls;
+    }
+
+    const detectEl = document.getElementById('fieldDetect');
+    if (detectEl) detectEl.textContent = fmtDetect(radar.detect_cm);
+
+    const eco2El = document.getElementById('tileEco2');
+    if (eco2El) eco2El.textContent = (air.eco2_ppm == null ? '--' : (Math.round(Number(air.eco2_ppm)) + ' ppm'));
+    const tempEl = document.getElementById('tileTemp');
+    if (tempEl) tempEl.textContent = (env.temp_c == null ? '--' : (Number(env.temp_c).toFixed(1) + '°C'));
+    const humEl = document.getElementById('tileHum');
+    if (humEl) humEl.textContent = (env.hum_pct == null ? '--' : (Number(env.hum_pct).toFixed(1) + '%'));
+
+    const rssiVal = Number(esp.rssi);
+    const wifist = Number(esp.wifist);
+    const rssiEl = document.getElementById('tileRssi');
+    if (rssiEl) {
+      if (!Number.isFinite(rssiVal) || rssiVal === 999 || rssiVal > 0 || rssiVal < -130) rssiEl.textContent = 'n/a';
+      else if (wifist !== 1 && wifist !== 3) rssiEl.textContent = 'offline';
+      else rssiEl.textContent = Math.round(rssiVal) + ' dBm';
+    }
+    const rssiWrap = document.getElementById('tileRssiWrap');
+    if (rssiWrap) {
+      rssiWrap.classList.remove('rssi-good', 'rssi-med', 'rssi-poor');
+      rssiWrap.classList.add(rssiClass(rssiVal, wifist));
+    }
+
+    const footer = document.getElementById('fieldFooter');
+    if (footer) {
+      const nowIso = new Date().toLocaleTimeString();
+      const deadKeys = Object.keys(freshness).filter((k) => String(freshness[k]) !== 'ok');
+      const sys = deadKeys.length ? ('DEGRADED (' + deadKeys.join(', ') + ')') : 'OK';
+      footer.textContent = 'Last updated: ' + nowIso + ' · System: ' + sys;
+    }
+  }
+
+  (async () => {
+    await loadSettings();
+    await refreshField();
+    setInterval(refreshField, 1000);
+  })();
+  """
+  return render_shell_page("/field", "HERMES Field Mode", body, script, extra_style=style)
+
+
+def render_settings_page() -> str:
+  body = """
+  <div class=\"card\">
+    <div style=\"display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px\">
+      <label style=\"display:flex;align-items:center;gap:8px\"><input id=\"fieldModeStart\" type=\"checkbox\" /> Field mode quick-entry on Home</label>
+      <label>Distance units
+        <select id=\"unitsDistance\" style=\"margin-left:8px\"><option value=\"cm\">cm</option><option value=\"m\">m</option></select>
+      </label>
+    </div>
+  </div>
+  <div class=\"card\">
+    <b>Home chart slots</b>
+    <div class=\"muted\" style=\"margin-top:4px\">Persisted immediately and used on Home load.</div>
+    <div style=\"display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px;margin-top:10px\">
+      <label>Slot A <select id=\"slotA\"></select></label>
+      <label>Slot B <select id=\"slotB\"></select></label>
+      <label>Slot C <select id=\"slotC\"></select></label>
+      <label>Slot D <select id=\"slotD\"></select></label>
+    </div>
+    <div style=\"margin-top:12px;display:flex;gap:8px\">
+      <button id=\"saveBtn\">Save</button>
+      <button id=\"resetBtn\">Reset to defaults</button>
+      <span id=\"saveMsg\" class=\"muted\"></span>
+    </div>
+  </div>
+  """
+  script = """
+  const trends = [
+    { key: 'air_eco2', title: 'ECO2' },
+    { key: 'env_temp', title: 'Temp' },
+    { key: 'env_hum', title: 'Humidity' },
+    { key: 'air_tvoc', title: 'TVOC' },
+  ];
+
+  function fillTrendSelect(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = '';
+    for (const t of trends) {
+      const opt = document.createElement('option');
+      opt.value = t.key;
+      opt.textContent = t.title;
+      el.appendChild(opt);
+    }
+  }
+
+  async function fetchJson(url, options) {
+    const r = await fetch(url, options || { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url);
+    return await r.json();
+  }
+
+  function getPayload() {
+    return {
+      field_mode_start: !!document.getElementById('fieldModeStart')?.checked,
+      units_distance: document.getElementById('unitsDistance')?.value === 'm' ? 'm' : 'cm',
+      chart_slot_a: document.getElementById('slotA')?.value || 'air_eco2',
+      chart_slot_b: document.getElementById('slotB')?.value || 'env_temp',
+      chart_slot_c: document.getElementById('slotC')?.value || 'env_hum',
+      chart_slot_d: document.getElementById('slotD')?.value || 'air_tvoc',
+    };
+  }
+
+  function applySettings(s) {
+    document.getElementById('fieldModeStart').checked = !!s.field_mode_start;
+    document.getElementById('unitsDistance').value = String(s.units_distance || 'cm') === 'm' ? 'm' : 'cm';
+    document.getElementById('slotA').value = s.chart_slot_a || 'air_eco2';
+    document.getElementById('slotB').value = s.chart_slot_b || 'env_temp';
+    document.getElementById('slotC').value = s.chart_slot_c || 'env_hum';
+    document.getElementById('slotD').value = s.chart_slot_d || 'air_tvoc';
+  }
+
+  async function saveSettings() {
+    const msg = document.getElementById('saveMsg');
+    const payload = getPayload();
+    await fetchJson('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (msg) msg.textContent = 'Saved.';
+  }
+
+  async function resetSettings() {
+    const msg = document.getElementById('saveMsg');
+    const data = await fetchJson('/api/settings/reset', { method: 'POST' });
+    applySettings(data.settings || {});
+    if (msg) msg.textContent = 'Reset to defaults.';
+  }
+
+  (async () => {
+    ['slotA', 'slotB', 'slotC', 'slotD'].forEach(fillTrendSelect);
+    const data = await fetchJson('/api/settings');
+    applySettings(data || {});
+    document.getElementById('saveBtn')?.addEventListener('click', () => saveSettings().catch((e) => alert(String(e.message || e))));
+    document.getElementById('resetBtn')?.addEventListener('click', () => resetSettings().catch((e) => alert(String(e.message || e))));
+  })();
+  """
+  return render_shell_page("/settings", "HERMES Settings", body, script)
+
+
 JS_BUNDLE = r"""
 const tables = ['hb','env','air','light','mic_noise','esp_net','radar'];
 const tableLabels = {
@@ -1783,10 +2495,19 @@ const chartTrendOptions = [
   { key: 'air_tvoc', title: 'TVOC', unit: 'ppb', decimals: 0, table: 'air' },
 ];
 const trendSeries = [radarTrend, ...chartTrendOptions];
-const chartSlotDefaults = { A: 'air_eco2', B: 'env_temp', C: 'env_hum' };
+const chartSlotDefaults = { A: 'air_eco2', B: 'env_temp', C: 'env_hum', D: 'air_tvoc' };
 const chartSlotsStorageKey = 'chartSlots';
-const chartSlotOrder = ['A', 'B', 'C'];
+const chartSlotOrder = ['A', 'B', 'C', 'D'];
 let chartSlots = { ...chartSlotDefaults };
+const dashboardSettingDefaults = {
+  field_mode_start: false,
+  units_distance: 'cm',
+  chart_slot_a: chartSlotDefaults.A,
+  chart_slot_b: chartSlotDefaults.B,
+  chart_slot_c: chartSlotDefaults.C,
+  chart_slot_d: chartSlotDefaults.D,
+};
+let dashboardSettings = { ...dashboardSettingDefaults };
 const radarNow = {
   enabled: true,
   view: 'now',
@@ -1881,6 +2602,44 @@ function dbgSet(id, text) {
   if (el) el.textContent = String(text);
 }
 
+function applyFieldModeEntryVisibility() {
+  const el = document.getElementById('fieldModeEntry');
+  if (!el) return;
+  el.classList.toggle('hidden', !dashboardSettings.field_mode_start);
+}
+
+async function loadDashboardSettings() {
+  try {
+    const resp = await fetch('/api/settings', { cache: 'no-store' });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    dashboardSettings = { ...dashboardSettingDefaults, ...(data || {}) };
+    chartSlots.A = getTrendByKey(String(dashboardSettings.chart_slot_a || chartSlotDefaults.A)).key;
+    chartSlots.B = getTrendByKey(String(dashboardSettings.chart_slot_b || chartSlotDefaults.B)).key;
+    chartSlots.C = getTrendByKey(String(dashboardSettings.chart_slot_c || chartSlotDefaults.C)).key;
+    chartSlots.D = getTrendByKey(String(dashboardSettings.chart_slot_d || chartSlotDefaults.D)).key;
+    saveChartSlots();
+    applyFieldModeEntryVisibility();
+  } catch (_err) {
+  }
+}
+
+async function persistChartSlotsToSettings() {
+  try {
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chart_slot_a: chartSlots.A,
+        chart_slot_b: chartSlots.B,
+        chart_slot_c: chartSlots.C,
+        chart_slot_d: chartSlots.D,
+      }),
+    });
+  } catch (_err) {
+  }
+}
+
 dbgSet('dbg-js', 'alive');
 dbgSet('dbg-origin', window.location.origin);
 window.addEventListener('error', (e) => {
@@ -1947,6 +2706,7 @@ function renderChartSlotControls() {
     select.onchange = async () => {
       chartSlots[slot] = getTrendByKey(select.value).key;
       saveChartSlots();
+      await persistChartSlotsToSettings();
       initTrends();
       await pollTrends();
     };
@@ -3443,6 +4203,7 @@ async function pollEvents() {
 (async () => {
   initEvents();
   chartSlots = loadChartSlots();
+  await loadDashboardSettings();
   renderChartSlotControls();
   initTrends();
   setTrendMinutes(60);
@@ -3485,7 +4246,7 @@ def events_page() -> HTMLResponse:
 
 @APP.get("/analytics", response_class=HTMLResponse)
 def analytics_page() -> HTMLResponse:
-  return HTMLResponse(render_dashboard_page("/analytics"))
+  return HTMLResponse(render_analytics_page())
 
 
 @APP.get("/calibration", response_class=HTMLResponse)
@@ -3495,7 +4256,12 @@ def calibration_page() -> HTMLResponse:
 
 @APP.get("/settings", response_class=HTMLResponse)
 def settings_page() -> HTMLResponse:
-  return HTMLResponse(render_dashboard_page("/settings"))
+  return HTMLResponse(render_settings_page())
+
+
+@APP.get("/field", response_class=HTMLResponse)
+def field_page() -> HTMLResponse:
+  return HTMLResponse(render_field_page())
 
 
 @APP.get("/healthz")
