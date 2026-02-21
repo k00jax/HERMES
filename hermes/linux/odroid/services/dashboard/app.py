@@ -264,13 +264,21 @@ def insert_event_row(
   return int(cur.lastrowid or 0)
 
 
-def trigger_radar_calibration_jingle() -> Dict[str, object]:
-  cmd = run_cmd(["python3", str(CLIENT_PATH), "send", "BUZZER,JINGLE,cal_done"], timeout_sec=2)
+def send_buzzer_command(payload: str) -> Dict[str, object]:
+  cmd = run_cmd(["python3", str(CLIENT_PATH), "send", payload], timeout_sec=2)
   return {
     "ok": bool(cmd.get("ok")),
     "code": int(cmd.get("code", 1)),
     "raw": (cmd.get("stdout") or cmd.get("stderr") or "")[:200],
   }
+
+
+def trigger_radar_calibration_beep() -> Dict[str, object]:
+  return send_buzzer_command("BUZZER,BEEP,100")
+
+
+def trigger_radar_calibration_jingle() -> Dict[str, object]:
+  return send_buzzer_command("BUZZER,JINGLE,cal_done")
 
 
 def summarize_radar_calibration_window(
@@ -345,7 +353,7 @@ def finalize_radar_calibration_session(session_id: str) -> Dict[str, object]:
       ensure_radar_calibration_table(conn)
       summary = summarize_radar_calibration_window(
         conn,
-        start_ts_utc=str(session["start_ts_utc"]),
+        start_ts_utc=str(session.get("capture_start_ts_utc") or session["start_ts_utc"]),
         end_ts_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         duration_s=int(session["duration_s"]),
         max_range_cm=int(session["max_range_cm"]),
@@ -1248,18 +1256,43 @@ def api_radar_latest() -> Dict[str, object]:
 def api_radar_calibrate_start(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
     duration_s = int(payload.get("duration_s", 60) or 60)
     max_range_cm = int(payload.get("max_range_cm", 600) or 600)
+    pre_countdown_s = 10
     duration_s = max(10, min(duration_s, 300))
     max_range_cm = max(100, min(max_range_cm, 1200))
+
+    if not DB_PATH.exists():
+      raise HTTPException(status_code=409, detail="radar_stream_dead: database missing")
+
+    try:
+      with open_db() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT ts_utc FROM radar ORDER BY id DESC LIMIT 1").fetchone()
+    except Exception:
+      row = None
+    if not row or not row["ts_utc"]:
+      raise HTTPException(status_code=409, detail="radar_stream_dead: no radar samples yet")
+    try:
+      ts_last = parse_iso8601_utc(str(row["ts_utc"]))
+      age_s = max(0.0, (datetime.datetime.now(datetime.timezone.utc) - ts_last).total_seconds())
+    except Exception:
+      age_s = 9999.0
+    if age_s > 12.0:
+      raise HTTPException(status_code=409, detail=f"radar_stream_dead: latest sample age={age_s:.1f}s")
+
     session_id = uuid.uuid4().hex[:12]
     started_at = datetime.datetime.now(datetime.timezone.utc)
-    ends_at = started_at + datetime.timedelta(seconds=duration_s)
+    capture_start_at = started_at + datetime.timedelta(seconds=pre_countdown_s)
+    ends_at = capture_start_at + datetime.timedelta(seconds=duration_s)
     session = {
       "session_id": session_id,
-      "status": "running",
+      "status": "prepare",
       "duration_s": duration_s,
+      "pre_countdown_s": pre_countdown_s,
       "max_range_cm": max_range_cm,
       "start_ts_utc": started_at.replace(microsecond=0).isoformat(),
+      "capture_start_ts_utc": capture_start_at.replace(microsecond=0).isoformat(),
       "start_monotonic": time.monotonic(),
+      "next_beep_capture_s": 10,
       "ends_at_ts_utc": ends_at.replace(microsecond=0).isoformat(),
       "result": None,
     }
@@ -1267,9 +1300,11 @@ def api_radar_calibrate_start(payload: Dict[str, object] = Body(default={})) -> 
       radar_calibration_sessions[session_id] = session
     return {
       "session_id": session_id,
-      "status": "running",
+      "status": "prepare",
       "duration_s": duration_s,
+      "pre_countdown_s": pre_countdown_s,
       "max_range_cm": max_range_cm,
+      "capture_starts_at": session["capture_start_ts_utc"],
       "ends_at": session["ends_at_ts_utc"],
     }
 
@@ -1282,13 +1317,29 @@ def api_radar_calibrate_status(session_id: str) -> Dict[str, object]:
       raise HTTPException(status_code=404, detail="session not found")
 
     status = str(session.get("status"))
-    elapsed_s = max(0.0, time.monotonic() - float(session.get("start_monotonic", time.monotonic())))
+    elapsed_total_s = max(0.0, time.monotonic() - float(session.get("start_monotonic", time.monotonic())))
     duration_s = int(session.get("duration_s", 60))
-    remaining_s = max(0, int(round(duration_s - elapsed_s)))
+    pre_countdown_s = int(session.get("pre_countdown_s", 10))
+    elapsed_capture_s = max(0.0, elapsed_total_s - pre_countdown_s)
+    capture_started = elapsed_total_s >= pre_countdown_s
 
-    if status == "running" and elapsed_s >= duration_s:
+    if status in {"prepare", "running"}:
+      status = "running" if capture_started else "prepare"
+
+    if status == "running" and elapsed_capture_s >= duration_s:
       session = finalize_radar_calibration_session(session_id)
       status = str(session.get("status"))
+
+    if status == "running":
+      with radar_calibration_lock:
+        session_live = radar_calibration_sessions.get(session_id)
+        if session_live and session_live.get("status") == "running":
+          next_beep_capture_s = int(session_live.get("next_beep_capture_s", 10))
+          while elapsed_capture_s >= next_beep_capture_s and next_beep_capture_s <= duration_s:
+            trigger_radar_calibration_beep()
+            next_beep_capture_s += 10
+          session_live["next_beep_capture_s"] = next_beep_capture_s
+          radar_calibration_sessions[session_id] = session_live
 
     samples = 0
     false_presence_count = 0
@@ -1304,7 +1355,7 @@ def api_radar_calibrate_status(session_id: str) -> Dict[str, object]:
             FROM radar
             WHERE ts_utc >= ? AND ts_utc <= ?
             """,
-            (str(session.get("start_ts_utc")), datetime.datetime.now(datetime.timezone.utc).isoformat()),
+            (str(session.get("capture_start_ts_utc")), datetime.datetime.now(datetime.timezone.utc).isoformat()),
           ).fetchone()
           if row:
             samples = int(row["samples"] or 0)
@@ -1312,11 +1363,20 @@ def api_radar_calibrate_status(session_id: str) -> Dict[str, object]:
       except Exception:
         pass
 
+    remaining_s = 0
+    if status == "prepare":
+      remaining_s = max(0, int(round(pre_countdown_s - elapsed_total_s)))
+    elif status == "running":
+      remaining_s = max(0, int(round(duration_s - elapsed_capture_s)))
+
     response = {
       "session_id": session_id,
       "status": status,
-      "elapsed_s": int(max(0, round(min(elapsed_s, duration_s)))) if status == "running" else duration_s,
-      "remaining_s": remaining_s if status == "running" else 0,
+      "phase": status,
+      "elapsed_s": int(max(0, round(min(elapsed_capture_s, duration_s)))) if status == "running" else 0,
+      "remaining_s": remaining_s,
+      "pre_countdown_s": pre_countdown_s,
+      "pre_remaining_s": max(0, int(round(pre_countdown_s - elapsed_total_s))) if status == "prepare" else 0,
       "samples": samples,
       "false_presence_count": false_presence_count,
     }
@@ -1335,7 +1395,7 @@ def api_radar_calibrate_cancel(session_id: str) -> Dict[str, object]:
       session = radar_calibration_sessions.get(session_id)
       if not session:
         raise HTTPException(status_code=404, detail="session not found")
-      if session.get("status") == "running":
+      if session.get("status") in {"running", "prepare"}:
         session["status"] = "cancelled"
         session["cancelled_ts_utc"] = now_utc_iso()
         radar_calibration_sessions[session_id] = session
@@ -1956,14 +2016,27 @@ async function loadRadarCalibrationHistory() {
 }
 
 function renderRadarCalibrationStatus(data) {
+  const instructionEl = document.getElementById('radar-cal-instruction');
   const statusEl = document.getElementById('radar-cal-status');
   const remEl = document.getElementById('radar-cal-remaining');
   const samplesEl = document.getElementById('radar-cal-samples');
   const falseEl = document.getElementById('radar-cal-false');
   const baselineEl = document.getElementById('radar-cal-baseline');
   const noiseEl = document.getElementById('radar-cal-noise');
-  if (statusEl) statusEl.textContent = String(data.status || 'idle');
-  if (remEl) remEl.textContent = data.status === 'running' ? String(data.remaining_s ?? '--') + 's' : '--';
+  const phase = String(data.phase || data.status || 'idle');
+  if (instructionEl) {
+    if (phase === 'prepare') {
+      instructionEl.textContent = 'Move away from the device. Calibration begins in ' + String(data.pre_remaining_s ?? data.remaining_s ?? '--') + 's.';
+    } else if (phase === 'running') {
+      instructionEl.textContent = 'Calibration capture in progress. Keep the area clear within 6m.';
+    } else if (phase === 'done') {
+      instructionEl.textContent = 'Calibration complete.';
+    } else {
+      instructionEl.textContent = 'Clear area within 6m for 60 seconds.';
+    }
+  }
+  if (statusEl) statusEl.textContent = phase;
+  if (remEl) remEl.textContent = (phase === 'running' || phase === 'prepare') ? String(data.remaining_s ?? '--') + 's' : '--';
   if (samplesEl) samplesEl.textContent = String(data.samples ?? 0);
   if (falseEl) falseEl.textContent = String(data.false_presence_count ?? 0);
   if (data.result) {
@@ -2001,16 +2074,16 @@ window.startRadarCalibration = async function startRadarCalibration() {
   try {
     const data = await postJson('/api/radar/calibrate', { duration_s: 60, max_range_cm: 600 });
     radarCalibration.sessionId = String(data.session_id || '');
-    radarCalibration.status = 'running';
+    radarCalibration.status = String(data.status || 'prepare');
     radarCalibration.latestResult = null;
     setRadarCalibrationPanelVisible(true);
-    renderRadarCalibrationStatus({ status: 'running', remaining_s: 60, samples: 0, false_presence_count: 0 });
+    renderRadarCalibrationStatus({ status: radarCalibration.status, phase: radarCalibration.status, remaining_s: 10, pre_remaining_s: 10, samples: 0, false_presence_count: 0 });
     if (radarCalibration.pollHandle) clearInterval(radarCalibration.pollHandle);
     radarCalibration.pollHandle = setInterval(pollRadarCalibrationStatus, 1000);
     await pollRadarCalibrationStatus();
   } catch (err) {
     console.error(err);
-    alert('Calibration start failed');
+    alert('Calibration start failed: ' + (err && err.message ? err.message : err));
   }
 };
 
@@ -2568,7 +2641,7 @@ function initTrends() {
     '<div id="trend-value-' + radarTrend.key + '" class="trend-value metric-value">n/a</div>' +
     '<div id="radar-now-pane" class="radar-now-wrap">' +
       '<div id="radar-cal-panel" class="cal-panel hidden">' +
-        '<div class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
+        '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
         '<div class="cal-counters">' +
           '<div><span class="muted">Status</span><div id="radar-cal-status">idle</div></div>' +
           '<div><span class="muted">Countdown</span><div id="radar-cal-remaining">--</div></div>' +
