@@ -42,6 +42,14 @@ MAX_CACHE_KEYS = int(os.environ.get("HERMES_CHART_CACHE_KEYS", "64"))
 TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net", "radar")
 READY_TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
 FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "ESP,NET", "RADAR")
+NAV_LINKS = (
+  ("Home", "/"),
+  ("History", "/history"),
+  ("Events", "/events"),
+  ("Analytics", "/analytics"),
+  ("Calibration", "/calibration"),
+  ("Settings", "/settings"),
+)
 
 SERIES_MAP = {
   "env_temp": {"table": "env", "column": "temp_c", "label": "Temp (C)", "color": "#4fc3f7", "stepped": False},
@@ -1488,6 +1496,19 @@ HTML_PAGE = """
       color: #e8eef5;
     }
     h1 { margin: 0 0 4px 0; }
+    .top-nav { margin: 10px 0 14px 0; display: flex; gap: 8px; flex-wrap: wrap; }
+    .nav-link {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid #26313d;
+      background: #111820;
+      color: #9fb3c8;
+      font-size: 12px;
+      text-decoration: none;
+    }
+    .nav-link.active { background: #1f5f99; border-color: #1f5f99; color: #fff; }
     .row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
     .card { background: #151c24; border: 1px solid #26313d; border-radius: 10px; padding: 10px 12px; }
 
@@ -1632,6 +1653,7 @@ HTML_PAGE = """
 </head>
 <body>
   <h1>HERMES Dashboard</h1>
+  {{TOP_NAV}}
   <div id="readyBanner" class="banner hidden">NOT READY</div>
   <div id="lastUpdated" class="muted small">Last updated: never</div>
   <div id="dbg" class="muted small" style="margin-top:6px;">
@@ -1726,6 +1748,19 @@ HTML_PAGE = """
 </body>
 </html>
 """
+
+
+def render_top_nav(active_path: str) -> str:
+  links: List[str] = []
+  for label, href in NAV_LINKS:
+    is_active = href == active_path
+    cls = "nav-link active" if is_active else "nav-link"
+    links.append(f'<a href="{href}" class="{cls}">{label}</a>')
+  return '<nav class="top-nav" aria-label="Primary">' + "".join(links) + "</nav>"
+
+
+def render_dashboard_page(active_path: str) -> str:
+  return HTML_PAGE.replace("{{TOP_NAV}}", render_top_nav(active_path))
 
 
 JS_BUNDLE = r"""
@@ -3435,7 +3470,32 @@ def app_js() -> Response:
 
 @APP.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    return HTMLResponse(HTML_PAGE)
+  return HTMLResponse(render_dashboard_page("/"))
+
+
+@APP.get("/history", response_class=HTMLResponse)
+def history_page() -> HTMLResponse:
+  return HTMLResponse(render_dashboard_page("/history"))
+
+
+@APP.get("/events", response_class=HTMLResponse)
+def events_page() -> HTMLResponse:
+  return HTMLResponse(render_dashboard_page("/events"))
+
+
+@APP.get("/analytics", response_class=HTMLResponse)
+def analytics_page() -> HTMLResponse:
+  return HTMLResponse(render_dashboard_page("/analytics"))
+
+
+@APP.get("/calibration", response_class=HTMLResponse)
+def calibration_page() -> HTMLResponse:
+  return HTMLResponse(render_dashboard_page("/calibration"))
+
+
+@APP.get("/settings", response_class=HTMLResponse)
+def settings_page() -> HTMLResponse:
+  return HTMLResponse(render_dashboard_page("/settings"))
 
 
 @APP.get("/healthz")
