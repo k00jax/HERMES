@@ -1,0 +1,74 @@
+#pragma once
+
+#include <stddef.h>
+
+struct Note {
+  int freq_hz;
+  int dur_ms;
+};
+
+inline constexpr Note MELODY_STARTUP_VAULT_BOOT[] = {
+  {880, 150},
+  {1046, 150},
+  {1318, 180},
+  {1567, 300},
+  {1318, 150},
+  {1046, 200},
+  {880, 400},
+};
+inline constexpr size_t MELODY_STARTUP_VAULT_BOOT_COUNT = sizeof(MELODY_STARTUP_VAULT_BOOT) / sizeof(MELODY_STARTUP_VAULT_BOOT[0]);
+
+inline constexpr Note MELODY_STARTUP_ATOMIC_SUNRISE[] = {
+  {659, 200},
+  {784, 200},
+  {988, 250},
+  {1318, 350},
+  {1174, 200},
+  {988, 200},
+  {784, 500},
+};
+inline constexpr size_t MELODY_STARTUP_ATOMIC_SUNRISE_COUNT = sizeof(MELODY_STARTUP_ATOMIC_SUNRISE) / sizeof(MELODY_STARTUP_ATOMIC_SUNRISE[0]);
+
+inline constexpr Note MELODY_STARTUP_RADIANT_BOOTLOADER[] = {
+  {1200, 120},
+  {1400, 120},
+  {1600, 120},
+  {2000, 200},
+  {1600, 150},
+  {2400, 300},
+};
+inline constexpr size_t MELODY_STARTUP_RADIANT_BOOTLOADER_COUNT = sizeof(MELODY_STARTUP_RADIANT_BOOTLOADER) / sizeof(MELODY_STARTUP_RADIANT_BOOTLOADER[0]);
+
+inline constexpr Note MELODY_STARTUP_FIELD_UNIT_ONLINE[] = {
+  {523, 200},
+  {659, 200},
+  {784, 200},
+  {1046, 400},
+};
+inline constexpr size_t MELODY_STARTUP_FIELD_UNIT_ONLINE_COUNT = sizeof(MELODY_STARTUP_FIELD_UNIT_ONLINE) / sizeof(MELODY_STARTUP_FIELD_UNIT_ONLINE[0]);
+
+inline constexpr Note MELODY_WARN_RADIATION_SPIKE[] = {
+  {1400, 200},
+  {1100, 200},
+  {900, 250},
+  {700, 400},
+};
+inline constexpr size_t MELODY_WARN_RADIATION_SPIKE_COUNT = sizeof(MELODY_WARN_RADIATION_SPIKE) / sizeof(MELODY_WARN_RADIATION_SPIKE[0]);
+
+inline constexpr Note MELODY_WARN_SYSTEM_FAULT[] = {
+  {2000, 150},
+  {400, 300},
+  {2000, 150},
+  {400, 400},
+};
+inline constexpr size_t MELODY_WARN_SYSTEM_FAULT_COUNT = sizeof(MELODY_WARN_SYSTEM_FAULT) / sizeof(MELODY_WARN_SYSTEM_FAULT[0]);
+
+inline constexpr Note MELODY_WARN_LOW_POWER[] = {
+  {880, 200},
+  {784, 200},
+  {698, 250},
+  {523, 400},
+};
+inline constexpr size_t MELODY_WARN_LOW_POWER_COUNT = sizeof(MELODY_WARN_LOW_POWER) / sizeof(MELODY_WARN_LOW_POWER[0]);
+
+void play_melody(const Note* notes, size_t count, int gap_ms = 30);
