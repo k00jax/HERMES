@@ -48,26 +48,30 @@ inline constexpr Note MELODY_STARTUP_FIELD_UNIT_ONLINE[] = {
 inline constexpr size_t MELODY_STARTUP_FIELD_UNIT_ONLINE_COUNT = sizeof(MELODY_STARTUP_FIELD_UNIT_ONLINE) / sizeof(MELODY_STARTUP_FIELD_UNIT_ONLINE[0]);
 
 inline constexpr Note MELODY_WARN_RADIATION_SPIKE[] = {
-  {1400, 200},
-  {1100, 200},
-  {900, 250},
-  {700, 400},
+  {2200, 90},
+  {2500, 90},
+  {2200, 90},
+  {2800, 180},
+  {0, 70},
+  {2800, 180},
 };
 inline constexpr size_t MELODY_WARN_RADIATION_SPIKE_COUNT = sizeof(MELODY_WARN_RADIATION_SPIKE) / sizeof(MELODY_WARN_RADIATION_SPIKE[0]);
 
 inline constexpr Note MELODY_WARN_SYSTEM_FAULT[] = {
-  {2000, 150},
-  {400, 300},
-  {2000, 150},
-  {400, 400},
+  {420, 260},
+  {0, 90},
+  {420, 260},
+  {0, 90},
+  {420, 420},
 };
 inline constexpr size_t MELODY_WARN_SYSTEM_FAULT_COUNT = sizeof(MELODY_WARN_SYSTEM_FAULT) / sizeof(MELODY_WARN_SYSTEM_FAULT[0]);
 
 inline constexpr Note MELODY_WARN_LOW_POWER[] = {
-  {880, 200},
-  {784, 200},
-  {698, 250},
-  {523, 400},
+  {900, 120},
+  {0, 120},
+  {900, 120},
+  {0, 240},
+  {700, 220},
 };
 inline constexpr size_t MELODY_WARN_LOW_POWER_COUNT = sizeof(MELODY_WARN_LOW_POWER) / sizeof(MELODY_WARN_LOW_POWER[0]);
 
