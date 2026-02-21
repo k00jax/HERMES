@@ -1209,6 +1209,7 @@ HTML_PAGE = """
     <div class=\"card status\"><b>Lines In</b><div id=\"lines\">-</div></div>
     <div class=\"card status\"><b>Last Error</b><div id=\"error\">-</div></div>
     <div class=\"card\"><button onclick=\"downloadDiag()\">Download diagnostics</button></div>
+    <div class=\"card status\"><b>RSSI</b><div id=\"top-rssi\">--</div></div>
   </div>
 
   <div class=\"row\" id=\"freshness\"></div>
@@ -1308,13 +1309,12 @@ const chartTrendOptions = [
   { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0, table: 'air' },
   { key: 'env_temp', title: 'Temp', unit: '°C', decimals: 1, table: 'env' },
   { key: 'env_hum', title: 'Humidity', unit: '%', decimals: 1, table: 'env' },
-  { key: 'esp_rssi', title: 'RSSI', unit: 'dBm', decimals: 0, table: 'esp_net' },
   { key: 'air_tvoc', title: 'TVOC', unit: 'ppb', decimals: 0, table: 'air' },
 ];
 const trendSeries = [radarTrend, ...chartTrendOptions];
-const chartSlotDefaults = { A: 'air_eco2', B: 'env_temp', C: 'env_hum', D: 'esp_rssi' };
+const chartSlotDefaults = { A: 'air_eco2', B: 'env_temp', C: 'env_hum' };
 const chartSlotsStorageKey = 'chartSlots';
-const chartSlotOrder = ['A', 'B', 'C', 'D'];
+const chartSlotOrder = ['A', 'B', 'C'];
 let chartSlots = { ...chartSlotDefaults };
 const radarNow = {
   enabled: true,
@@ -2489,6 +2489,21 @@ function renderTableRows(tableName, rows, force = false) {
 function applyTableRows(tableName, rows, force = false) {
   renderTableRows(tableName, rows, force);
   updateTableStaleBadge(tableName);
+  if (tableName === 'esp_net') {
+    const rssiEl = document.getElementById('top-rssi');
+    if (rssiEl) {
+      const latest = Array.isArray(rows) && rows.length ? rows[0] : null;
+      const rssi = latest ? Number(latest.rssi) : NaN;
+      const wifist = latest ? Number(latest.wifist) : NaN;
+      if (!Number.isFinite(rssi) || rssi === 999 || rssi > 0 || rssi < -130) {
+        rssiEl.textContent = 'n/a';
+      } else if (Number.isFinite(wifist) && wifist !== 1 && wifist !== 3) {
+        rssiEl.textContent = 'offline';
+      } else {
+        rssiEl.textContent = Math.round(rssi) + ' dBm';
+      }
+    }
+  }
 }
 
 function fetchOneTable(tableName, controller = null) {
