@@ -551,7 +551,7 @@ def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, objec
   render_start = time.perf_counter()
   try:
     with chart_render_lock:
-      fig, ax = plt.subplots(figsize=(4.6, 1.4), dpi=110)
+      fig, ax = plt.subplots(figsize=(4.8, 2.05), dpi=110)
       fig.patch.set_facecolor("#151c24")
       ax.set_facecolor("#151c24")
 
@@ -634,15 +634,36 @@ def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, objec
       ax.text(0.5, 0.5, f"{cfg['label']}\nno data", transform=ax.transAxes, va="center", ha="center", color="#8ea1b3", fontsize=9)
 
     ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
-      spine.set_visible(False)
+    if points:
+      lo, hi = ax.get_ylim()
+      if math.isfinite(lo) and math.isfinite(hi) and hi > lo:
+        tick_count = 4
+        step = (hi - lo) / (tick_count - 1)
+        ticks = [lo + (i * step) for i in range(tick_count)]
+        ax.set_yticks(ticks)
+        max_abs = max(abs(lo), abs(hi))
+        decimals = 0 if max_abs >= 100 else 1
+        ax.set_yticklabels([f"{t:.{decimals}f}" for t in ticks], color="#8ea1b3", fontsize=7)
+        ax.tick_params(axis="y", colors="#8ea1b3", length=2, width=0.6)
+        ax.grid(axis="y", color="#2a3440", alpha=0.45, linewidth=0.6)
+      else:
+        ax.set_yticks([])
+    else:
+      ax.set_yticks([])
 
-      fig.tight_layout(pad=0.2)
-      buf = io.BytesIO()
-      fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor=fig.get_facecolor())
-      plt.close(fig)
-      return buf.getvalue()
+    for name, spine in ax.spines.items():
+      if name == "left":
+        spine.set_visible(True)
+        spine.set_color("#2a3440")
+        spine.set_linewidth(0.8)
+      else:
+        spine.set_visible(False)
+
+    fig.tight_layout(pad=0.2)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor=fig.get_facecolor())
+    plt.close(fig)
+    return buf.getvalue()
   finally:
     render_ms = (time.perf_counter() - render_start) * 1000.0
     with chart_metrics_lock:
@@ -1121,14 +1142,14 @@ HTML_PAGE = """
     .ts-main { display: block; }
     .ts-sub { display: block; font-size: 11px; color: #8ea1b3; }
     td.changed { background: #213447; transition: background-color 0.5s ease; }
-    .trend-card { min-width: 220px; flex: 1 1 260px; display: flex; flex-direction: column; gap: 6px; }
-    .card.chart { min-height: 320px; }
-    .trend-card.chart { min-height: 320px; }
+    .trend-card { min-width: 260px; flex: 1 1 320px; display: flex; flex-direction: column; gap: 6px; }
+    .card.chart { min-height: 360px; }
+    .trend-card.chart { min-height: 360px; }
     @media (min-width: 1400px) {
-      .trend-card.chart { min-height: 340px; }
+      .trend-card.chart { min-height: 380px; }
     }
-    .trend-value { font-size: 18px; font-weight: 700; margin: 4px 0 6px 0; }
-    .chart-wrap { height: calc(100% - 92px); min-height: 220px; }
+    .trend-value { font-size: 18px; font-weight: 700; margin: 2px 0 4px 0; }
+    .chart-wrap { flex: 1 1 auto; min-height: 260px; }
     .trend-img { width: 100%; height: 100%; border-radius: 8px; border: 1px solid #26313d; display: block; }
     .trend-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
     .trend-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
@@ -1288,7 +1309,8 @@ const radarNow = {
   enabled: true,
   view: 'now',
   maxRangeCm: 300,
-  blipAngleDeg: 225,
+  movingAngleDeg: 225,
+  stationaryAngleDeg: 315,
   sweepAngleDeg: 0,
   state: {
     alive: 0,
@@ -1420,6 +1442,10 @@ function updateRadarReadout(state) {
   const target = Number(state.target || 0);
   const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
   const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
+  const moveCm = clamp(Number(state.move_cm || state.detect_cm || 0), 0, radarNow.maxRangeCm);
+  const statCm = clamp(Number(state.stat_cm || state.detect_cm || 0), 0, radarNow.maxRangeCm);
+  const movingActive = alive && (target === 1 || target === 3);
+  const stationaryActive = alive && (target === 2 || target === 3);
   const bodyCount = target === 3 ? 2 : (target === 0 ? 0 : 1);
 
   const stateEl = document.getElementById('radar-now-state');
@@ -1431,11 +1457,14 @@ function updateRadarReadout(state) {
   if (stateEl) {
     if (!alive) stateEl.textContent = 'RADAR offline';
     else if (target === 0) stateEl.textContent = 'No presence';
+    else if (target === 3) stateEl.textContent = 'Moving + stationary detected';
+    else if (target === 1) stateEl.textContent = 'Moving presence detected';
+    else if (target === 2) stateEl.textContent = 'Stationary presence detected';
     else stateEl.textContent = 'Presence detected';
   }
   if (bodiesEl) bodiesEl.textContent = alive ? `${bodyCount}` : '--';
-  if (moveEl) moveEl.textContent = alive ? `${moveMetric}/100` : '--';
-  if (statEl) statEl.textContent = alive ? `${statMetric}/100` : '--';
+  if (moveEl) moveEl.textContent = movingActive ? `${Math.round(moveMetric)}% @ ${Math.round(moveCm)}cm` : '--';
+  if (statEl) statEl.textContent = stationaryActive ? `${Math.round(statMetric)}% @ ${Math.round(statCm)}cm` : '--';
   if (targetEl) targetEl.textContent = `${target}/3`;
 }
 
@@ -1459,6 +1488,8 @@ function drawRadarScope(state) {
   const target = Number(state.target || 0);
   const noContact = (!alive || target === 0);
   const detectCm = clamp(Number(state.detect_cm || 0), 0, radarNow.maxRangeCm);
+  const movingRange = clamp(Number(state.move_cm || detectCm), 0, radarNow.maxRangeCm);
+  const stationaryRange = clamp(Number(state.stat_cm || detectCm), 0, radarNow.maxRangeCm);
 
   const cx = width * 0.5;
   const cy = height * 0.5;
@@ -1493,18 +1524,31 @@ function drawRadarScope(state) {
   ctx.lineTo(gx, gy);
   ctx.stroke();
 
-  if (!noContact) {
-    const theta = (radarNow.blipAngleDeg * Math.PI) / 180;
-    const blipR = clamp((detectCm / radarNow.maxRangeCm) * (radius - 10), 8, radius - 10);
+  const drawPresenceBlip = (angleDeg, rangeCm, colorTemplate, pulseMs) => {
+    const theta = (angleDeg * Math.PI) / 180;
+    const blipR = clamp((rangeCm / radarNow.maxRangeCm) * (radius - 10), 8, radius - 10);
     const bx = cx + Math.cos(theta) * blipR;
     const by = cy + Math.sin(theta) * blipR;
-    const crossing = angleDiffDeg(radarNow.sweepAngleDeg, radarNow.blipAngleDeg) < 6;
-    const pulse = 0.72 + 0.28 * Math.sin((Date.now() / 320) * Math.PI * 2);
+    const crossing = angleDiffDeg(radarNow.sweepAngleDeg, angleDeg) < 6;
+    const pulse = 0.70 + 0.30 * Math.sin((Date.now() / pulseMs) * Math.PI * 2);
     const alpha = crossing ? 1.0 : pulse;
     ctx.beginPath();
     ctx.arc(bx, by, 6, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(96, 220, 145, ' + alpha.toFixed(3) + ')';
+    ctx.fillStyle = colorTemplate.replace('__A__', alpha.toFixed(3));
     ctx.fill();
+  };
+
+  if (!noContact) {
+    if (target === 1) {
+      drawPresenceBlip(radarNow.movingAngleDeg, movingRange, 'rgba(140, 210, 255, __A__)', 300);
+    } else if (target === 2) {
+      drawPresenceBlip(radarNow.stationaryAngleDeg, stationaryRange, 'rgba(62, 112, 182, __A__)', 420);
+    } else if (target === 3) {
+      drawPresenceBlip(radarNow.movingAngleDeg, movingRange, 'rgba(140, 210, 255, __A__)', 300);
+      drawPresenceBlip(radarNow.stationaryAngleDeg, stationaryRange, 'rgba(62, 112, 182, __A__)', 420);
+    } else {
+      drawPresenceBlip(radarNow.movingAngleDeg, detectCm, 'rgba(140, 210, 255, __A__)', 320);
+    }
   }
 
   updateRadarReadout(state);
@@ -1925,8 +1969,8 @@ function initTrends() {
           '<div class="radar-readout">' +
             '<div id="radar-now-state" class="radar-state">RADAR offline</div>' +
             '<div class="radar-line"><span class="radar-label">Bodies</span><span id="radar-now-bodies">--</span></div>' +
-            '<div class="radar-line"><span class="radar-label">Moving Metric</span><span id="radar-now-move">--</span></div>' +
-            '<div class="radar-line"><span class="radar-label">Stationary Metric</span><span id="radar-now-stat">--</span></div>' +
+            '<div class="radar-line"><span class="radar-label">Moving Confidence</span><span id="radar-now-move">--</span></div>' +
+            '<div class="radar-line"><span class="radar-label">Stationary Confidence</span><span id="radar-now-stat">--</span></div>' +
             '<div class="radar-line"><span class="radar-label">Target</span><span id="radar-now-target">0/3</span></div>' +
           '</div>' +
         '</div>' +
