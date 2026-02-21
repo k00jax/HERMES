@@ -54,7 +54,135 @@ static const uint8_t UART_TX_PIN = D6;
 static const int LD2410_UART_RX_PIN = UART_RX_PIN;
 static const int LD2410_UART_TX_PIN = UART_TX_PIN;
 static const uint32_t LD2410_UART_BAUD = 256000;
+static const uint8_t LD2410_HEADER[4] = {0xF4, 0xF3, 0xF2, 0xF1};
+static const uint8_t LD2410_FOOTER[4] = {0xF8, 0xF7, 0xF6, 0xF5};
+static const size_t LD2410_MAX_FRAME = 64;
 HardwareSerial RadarSerial(2);
+
+static uint8_t ld2410Frame[LD2410_MAX_FRAME];
+static size_t ld2410FrameLen = 0;
+static uint8_t ld2410HeaderMatch = 0;
+static bool ld2410InFrame = false;
+
+static bool endsWithFooter(const uint8_t *buffer, size_t len) {
+  if (len < sizeof(LD2410_FOOTER)) {
+    return false;
+  }
+  const size_t start = len - sizeof(LD2410_FOOTER);
+  for (size_t index = 0; index < sizeof(LD2410_FOOTER); ++index) {
+    if (buffer[start + index] != LD2410_FOOTER[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static const char *targetStateText(uint8_t state) {
+  switch (state) {
+    case 0:
+      return "none";
+    case 1:
+      return "moving";
+    case 2:
+      return "stationary";
+    case 3:
+      return "both";
+    default:
+      return "unknown";
+  }
+}
+
+static void parseAndPrintLd2410Frame(const uint8_t *frame, size_t frameLen) {
+  if (frameLen < 10) {
+    return;
+  }
+
+  const uint16_t payloadLen = static_cast<uint16_t>(frame[4])
+      | (static_cast<uint16_t>(frame[5]) << 8);
+  const size_t expectedFrameLen = 4 + 2 + payloadLen + 4;
+  if (frameLen != expectedFrameLen) {
+    Serial.print("[ld2410] frame_len_mismatch got=");
+    Serial.print(static_cast<unsigned long>(frameLen));
+    Serial.print(" expected=");
+    Serial.println(static_cast<unsigned long>(expectedFrameLen));
+    return;
+  }
+
+  Serial.print("[ld2410] frame ");
+  for (size_t index = 0; index < frameLen; ++index) {
+    Serial.printf("%02X ", frame[index]);
+  }
+  Serial.println();
+
+  if (payloadLen < 13) {
+    Serial.print("[ld2410] payload_len=");
+    Serial.println(static_cast<unsigned long>(payloadLen));
+    return;
+  }
+
+  const uint8_t *payload = frame + 6;
+  const uint8_t reportType = payload[0];
+  const uint8_t reportMarker = payload[1];
+  const uint8_t targetState = payload[2];
+  const uint16_t movingDistanceCm = static_cast<uint16_t>(payload[3])
+      | (static_cast<uint16_t>(payload[4]) << 8);
+  const uint16_t stationaryDistanceCm = static_cast<uint16_t>(payload[5])
+      | (static_cast<uint16_t>(payload[6]) << 8);
+  const uint8_t movingEnergy = payload[7];
+  const uint8_t stationaryEnergy = payload[8];
+  const uint16_t detectDistanceCm = static_cast<uint16_t>(payload[9])
+      | (static_cast<uint16_t>(payload[10]) << 8);
+
+  Serial.printf(
+      "[ld2410] type=0x%02X marker=0x%02X target=%u(%s) move_cm=%u stat_cm=%u move_en=%u stat_en=%u detect_cm=%u\n",
+      reportType,
+      reportMarker,
+      targetState,
+      targetStateText(targetState),
+      static_cast<unsigned>(movingDistanceCm),
+      static_cast<unsigned>(stationaryDistanceCm),
+      static_cast<unsigned>(movingEnergy),
+      static_cast<unsigned>(stationaryEnergy),
+      static_cast<unsigned>(detectDistanceCm));
+}
+
+static void processLd2410Byte(uint8_t byteValue) {
+  if (!ld2410InFrame) {
+    if (byteValue == LD2410_HEADER[ld2410HeaderMatch]) {
+      ld2410HeaderMatch++;
+      if (ld2410HeaderMatch == sizeof(LD2410_HEADER)) {
+        ld2410InFrame = true;
+        ld2410FrameLen = sizeof(LD2410_HEADER);
+        for (size_t index = 0; index < sizeof(LD2410_HEADER); ++index) {
+          ld2410Frame[index] = LD2410_HEADER[index];
+        }
+        ld2410HeaderMatch = 0;
+      }
+    } else {
+      ld2410HeaderMatch = (byteValue == LD2410_HEADER[0]) ? 1 : 0;
+    }
+    return;
+  }
+
+  if (ld2410FrameLen < LD2410_MAX_FRAME) {
+    ld2410Frame[ld2410FrameLen++] = byteValue;
+  } else {
+    ld2410InFrame = false;
+    ld2410FrameLen = 0;
+    ld2410HeaderMatch = 0;
+    Serial.println("[ld2410] frame overflow, reset parser");
+    return;
+  }
+
+  if (!endsWithFooter(ld2410Frame, ld2410FrameLen)) {
+    return;
+  }
+
+  parseAndPrintLd2410Frame(ld2410Frame, ld2410FrameLen);
+  ld2410InFrame = false;
+  ld2410FrameLen = 0;
+  ld2410HeaderMatch = 0;
+}
 
 static const uint32_t CAMERA_INTERVAL_MS = 2000;
 static const int SCENE_STRIDE = 4;
@@ -795,14 +923,9 @@ void setup() {
 
 void loop() {
 #if LD2410_UART_BRINGUP_MODE
-  bool printed = false;
   while (RadarSerial.available() > 0) {
     const uint8_t byteValue = static_cast<uint8_t>(RadarSerial.read());
-    Serial.printf("%02X ", byteValue);
-    printed = true;
-  }
-  if (printed) {
-    Serial.println();
+    processLd2410Byte(byteValue);
   }
   delay(10);
   return;
