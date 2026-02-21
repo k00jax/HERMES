@@ -68,6 +68,11 @@ SETTINGS_DEFAULTS = {
   "chime_event_air_spike": "warn_radiation_spike",
   "chime_event_wifi_drop": "warn_low_power",
   "chime_event_reboot_detected": "warn_system_fault",
+  "radar_self_suppress_enabled": False,
+  "radar_self_suppress_near_cm": 80,
+  "radar_self_suppress_persist_s": 20,
+  "radar_self_suppress_jitter_cm": 15,
+  "radar_presence_mode": "raw",
 }
 
 VALID_CHIME_KEYS = {
@@ -339,6 +344,28 @@ def get_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
   ):
     chosen = str(result.get(chime_key) or fallback)
     result[chime_key] = chosen if chosen in VALID_CHIME_KEYS else fallback
+
+  result["radar_self_suppress_enabled"] = bool(result.get("radar_self_suppress_enabled"))
+  try:
+    near_cm = int(result.get("radar_self_suppress_near_cm"))
+  except Exception:
+    near_cm = 80
+  result["radar_self_suppress_near_cm"] = max(20, min(200, near_cm))
+
+  try:
+    persist_s = int(result.get("radar_self_suppress_persist_s"))
+  except Exception:
+    persist_s = 20
+  result["radar_self_suppress_persist_s"] = max(5, min(120, persist_s))
+
+  try:
+    jitter_cm = int(result.get("radar_self_suppress_jitter_cm"))
+  except Exception:
+    jitter_cm = 15
+  result["radar_self_suppress_jitter_cm"] = max(2, min(80, jitter_cm))
+
+  mode = str(result.get("radar_presence_mode") or "raw").strip().lower()
+  result["radar_presence_mode"] = "derived" if mode == "derived" else "raw"
   return result
 
 
@@ -377,6 +404,36 @@ def save_settings_payload(conn: sqlite3.Connection, updates: Dict[str, object]) 
       chosen = str(updates.get(chime_key) or fallback)
       merged[chime_key] = chosen if chosen in VALID_CHIME_KEYS else fallback
 
+  if "radar_self_suppress_enabled" in updates:
+    merged["radar_self_suppress_enabled"] = bool(updates.get("radar_self_suppress_enabled"))
+  if "radar_self_suppress_near_cm" in updates:
+    try:
+      near_cm = int(updates.get("radar_self_suppress_near_cm"))
+    except Exception:
+      near_cm = int(current.get("radar_self_suppress_near_cm") or 80)
+    merged["radar_self_suppress_near_cm"] = max(20, min(200, near_cm))
+  if "radar_self_suppress_persist_s" in updates:
+    try:
+      persist_s = int(updates.get("radar_self_suppress_persist_s"))
+    except Exception:
+      persist_s = int(current.get("radar_self_suppress_persist_s") or 20)
+    merged["radar_self_suppress_persist_s"] = max(5, min(120, persist_s))
+  if "radar_self_suppress_jitter_cm" in updates:
+    try:
+      jitter_cm = int(updates.get("radar_self_suppress_jitter_cm"))
+    except Exception:
+      jitter_cm = int(current.get("radar_self_suppress_jitter_cm") or 15)
+    merged["radar_self_suppress_jitter_cm"] = max(2, min(80, jitter_cm))
+
+  if "radar_presence_mode" in updates:
+    mode = str(updates.get("radar_presence_mode") or "raw").strip().lower()
+    merged["radar_presence_mode"] = "derived" if mode == "derived" else "raw"
+
+  if not bool(merged.get("radar_self_suppress_enabled")):
+    merged["radar_presence_mode"] = "raw"
+  if str(merged.get("radar_presence_mode") or "raw") == "derived":
+    merged["radar_self_suppress_enabled"] = True
+
   now_ts = now_utc_iso()
   for key in SETTINGS_DEFAULTS:
     conn.execute(
@@ -407,6 +464,25 @@ def reset_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
       (key, json.dumps(value, separators=(",", ":"), ensure_ascii=False), now_ts),
     )
   return dict(SETTINGS_DEFAULTS)
+
+
+def radar_presence_mode(settings: Dict[str, object]) -> str:
+  mode = str(settings.get("radar_presence_mode") or "raw").strip().lower()
+  return "derived" if mode == "derived" else "raw"
+
+
+def radar_present_sql_predicate(settings: Dict[str, object], alias: str = "") -> (str, List[object]):
+  prefix = alias or ""
+  mode = radar_presence_mode(settings)
+  if mode == "derived":
+    near_cm = int(settings.get("radar_self_suppress_near_cm") or 80)
+    near_cm = max(20, min(200, near_cm))
+    # Approximation mode for SQL-only derived presence using non-near distance signals.
+    return (
+      f"{prefix}alive=1 AND ({prefix}target!=0 AND (({prefix}detect_cm IS NOT NULL AND {prefix}detect_cm > ?) OR ({prefix}move_cm IS NOT NULL AND {prefix}move_cm > ?) OR ({prefix}stat_cm IS NOT NULL AND {prefix}stat_cm > ?)))",
+      [near_cm, near_cm, near_cm],
+    )
+  return (f"{prefix}alive=1 AND {prefix}target!=0", [])
 
 
 def ensure_reports_table(conn: sqlite3.Connection) -> None:
@@ -1644,6 +1720,121 @@ def api_ts(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Dict[str,
     return {"series": series, "minutes": minutes, "points": points, "stats": stats}
 
 
+def compute_presence_derived(latest_radar_row, settings, recent_radar_rows=None) -> Dict[str, object]:
+    def _to_int(value) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _present_raw(row) -> bool:
+        alive = _to_int(row["alive"] if row else None) or 0
+        target = _to_int(row["target"] if row else None) or 0
+        move_en = _to_int(row["move_en"] if row else None) or 0
+        stat_en = _to_int(row["stat_en"] if row else None) or 0
+        return (alive == 1 and target != 0) or (move_en == 1 or stat_en == 1)
+
+    def _near_from_row(row, near_cm: int) -> bool:
+        detect_cm = _to_int(row["detect_cm"] if row else None)
+        move_cm = _to_int(row["move_cm"] if row else None)
+        stat_cm = _to_int(row["stat_cm"] if row else None)
+        if detect_cm is not None and detect_cm > 0 and detect_cm <= near_cm:
+            return True
+        candidates = [v for v in (move_cm, stat_cm) if v is not None and v > 0]
+        if candidates and min(candidates) <= near_cm:
+            return True
+        return False
+
+    result = {
+        "present_raw": False,
+        "present_derived": False,
+        "self_suppressed": False,
+        "self_reason": None,
+    }
+    if not latest_radar_row:
+        return result
+
+    present_raw = _present_raw(latest_radar_row)
+    result["present_raw"] = bool(present_raw)
+    result["present_derived"] = bool(present_raw)
+
+    enabled = bool(settings.get("radar_self_suppress_enabled"))
+    if not enabled or not present_raw:
+        return result
+
+    near_cm = max(20, min(200, _to_int(settings.get("radar_self_suppress_near_cm")) or 80))
+    persist_s = max(5, min(120, _to_int(settings.get("radar_self_suppress_persist_s")) or 20))
+    jitter_cm = max(2, min(80, _to_int(settings.get("radar_self_suppress_jitter_cm")) or 15))
+
+    detect_now = _to_int(latest_radar_row["detect_cm"])
+    near_now = _near_from_row(latest_radar_row, near_cm)
+    if not near_now or detect_now is None or detect_now <= 0:
+        return result
+
+    rows = list(recent_radar_rows or [])
+    if not rows:
+        return result
+
+    detect_samples: List[int] = []
+    for row in rows:
+        detect_val = _to_int(row["detect_cm"] if row else None)
+        if detect_val is not None and detect_val > 0:
+            detect_samples.append(detect_val)
+    if not detect_samples:
+        return result
+
+    median_detect = float(statistics.median(detect_samples))
+    stable_now = abs(float(detect_now) - median_detect) <= float(jitter_cm)
+    if not stable_now:
+        return result
+
+    stable_near_times: List[datetime.datetime] = []
+    latest_ts: Optional[datetime.datetime] = None
+    for row in rows:
+        ts_raw = row["ts_utc"] if row else None
+        if not ts_raw:
+            continue
+        try:
+            ts_val = parse_iso8601_utc(str(ts_raw))
+        except Exception:
+            continue
+        if latest_ts is None:
+            latest_ts = ts_val
+        detect_val = _to_int(row["detect_cm"] if row else None)
+        if detect_val is None or detect_val <= 0:
+            continue
+        near = _near_from_row(row, near_cm)
+        stable = abs(float(detect_val) - median_detect) <= float(jitter_cm)
+        if near and stable:
+            stable_near_times.append(ts_val)
+
+    if latest_ts is None or not stable_near_times:
+        return result
+
+    oldest_stable_near = min(stable_near_times)
+    persisted_seconds = max(0.0, (latest_ts - oldest_stable_near).total_seconds())
+    if persisted_seconds < float(persist_s):
+        return result
+
+    target_now = _to_int(latest_radar_row["target"]) or 0
+    move_now = _to_int(latest_radar_row["move_cm"])
+    stat_now = _to_int(latest_radar_row["stat_cm"])
+    evidence_non_near = (
+        ((detect_now is not None and detect_now > near_cm) and target_now != 0)
+        or (move_now is not None and move_now > near_cm)
+        or (stat_now is not None and stat_now > near_cm)
+    )
+    if evidence_non_near:
+        return result
+
+    result["present_derived"] = False
+    result["self_suppressed"] = True
+    result["self_reason"] = "persistent_near_stable_signature"
+    return result
+
+
 @APP.get("/api/radar/latest")
 def api_radar_latest() -> Dict[str, object]:
     default = {
@@ -1655,23 +1846,45 @@ def api_radar_latest() -> Dict[str, object]:
         "move_en": 0,
         "stat_en": 0,
         "ts_utc": None,
+        "present_raw": False,
+        "present_derived": False,
+        "self_suppressed": False,
+        "self_reason": None,
     }
     if not DB_PATH.exists():
         return default
     try:
         with open_db() as conn:
             conn.row_factory = sqlite3.Row
+            settings_payload: Dict[str, object] = get_settings_payload(conn)
             row = conn.execute(
                 "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
                 "FROM radar ORDER BY id DESC LIMIT 1"
             ).fetchone()
+            recent_rows = []
+            if row and row["ts_utc"]:
+                try:
+                    latest_ts = parse_iso8601_utc(str(row["ts_utc"]))
+                    persist_s = int(settings_payload.get("radar_self_suppress_persist_s") or 20)
+                    window_s = max(60, min(120, persist_s * 2))
+                    cutoff_ts = (latest_ts - datetime.timedelta(seconds=window_s)).isoformat()
+                    recent_rows = conn.execute(
+                        "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+                        "FROM radar WHERE ts_utc >= ? ORDER BY ts_utc DESC LIMIT 400",
+                        (cutoff_ts,),
+                    ).fetchall()
+                except Exception:
+                    recent_rows = conn.execute(
+                        "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+                        "FROM radar ORDER BY ts_utc DESC LIMIT 200",
+                    ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
             return default
         raise
     if not row:
         return default
-    return {
+    payload = {
         "alive": int(row["alive"] or 0),
         "target": int(row["target"] or 0),
         "detect_cm": int(row["detect_cm"] or 0),
@@ -1681,6 +1894,19 @@ def api_radar_latest() -> Dict[str, object]:
         "stat_en": int(row["stat_en"] or 0),
         "ts_utc": row["ts_utc"],
     }
+    derived = compute_presence_derived(payload, settings_payload, recent_rows)
+    payload.update(derived)
+    mode = radar_presence_mode(settings_payload)
+    pred_sql, pred_params = radar_present_sql_predicate(settings_payload)
+    payload["presence_debug"] = {
+      "mode": mode,
+      "present_predicate_sql": pred_sql,
+      "present_predicate_params": pred_params,
+      "raw_present_bool": bool((int(payload.get("alive") or 0) == 1) and (int(payload.get("target") or 0) != 0)),
+      "derived_present_bool": bool(payload.get("present_derived")) if "present_derived" in payload else None,
+      "self_suppressed": bool(payload.get("self_suppressed")) if "self_suppressed" in payload else None,
+    }
+    return payload
 
 
 @APP.post("/api/radar/calibrate")
@@ -1778,15 +2004,17 @@ def api_radar_calibrate_status(session_id: str) -> Dict[str, object]:
       try:
         with open_db() as conn:
           conn.row_factory = sqlite3.Row
+          settings_payload = get_settings_payload(conn)
+          present_predicate, present_params = radar_present_sql_predicate(settings_payload)
           row = conn.execute(
-            """
+            f"""
             SELECT
               SUM(CASE WHEN alive=1 THEN 1 ELSE 0 END) AS samples,
-              SUM(CASE WHEN alive=1 AND target!=0 THEN 1 ELSE 0 END) AS false_presence_count
+              SUM(CASE WHEN {present_predicate} THEN 1 ELSE 0 END) AS false_presence_count
             FROM radar
             WHERE ts_utc >= ? AND ts_utc <= ?
             """,
-            (str(session.get("capture_start_ts_utc")), datetime.datetime.now(datetime.timezone.utc).isoformat()),
+            (*present_params, str(session.get("capture_start_ts_utc")), datetime.datetime.now(datetime.timezone.utc).isoformat()),
           ).fetchone()
           if row:
             samples = int(row["samples"] or 0)
@@ -1989,18 +2217,20 @@ def api_analytics_presence_by_hour(hours: int = Query(24, ge=1, le=168)) -> Dict
   with open_db() as conn:
     ensure_analytics_indexes(conn)
     conn.row_factory = sqlite3.Row
+    settings_payload = get_settings_payload(conn)
+    present_predicate, present_params = radar_present_sql_predicate(settings_payload)
     sample_sec = estimate_radar_sample_seconds(conn)
     rows = conn.execute(
-      """
+      f"""
       SELECT
         CAST(strftime('%H', COALESCE(ts_local, ts_utc)) AS INTEGER) AS hour_local,
         COUNT(*) AS present_samples
       FROM radar
-      WHERE ts_utc >= ? AND alive=1 AND target!=0
+      WHERE ts_utc >= ? AND {present_predicate}
       GROUP BY hour_local
       ORDER BY hour_local ASC
       """,
-      (cutoff_iso_utc,),
+      (cutoff_iso_utc, *present_params),
     ).fetchall()
 
   buckets = {hour: 0.0 for hour in range(24)}
@@ -2023,17 +2253,12 @@ def api_analytics_eco2_vs_presence(hours: int = Query(24, ge=1, le=168)) -> Dict
   with open_db() as conn:
     ensure_analytics_indexes(conn)
     conn.row_factory = sqlite3.Row
-    row = conn.execute(
-      """
-      WITH air_window AS (
-        SELECT ts_utc, eco2_ppm
-        FROM air
-        WHERE ts_utc >= ?
-      ),
-      classified AS (
-        SELECT
-          a.eco2_ppm AS eco2_ppm,
-          CASE
+    settings_payload = get_settings_payload(conn)
+    mode = radar_presence_mode(settings_payload)
+    near_cm = int(settings_payload.get("radar_self_suppress_near_cm") or 80)
+    near_cm = max(20, min(200, near_cm))
+    if mode == "derived":
+      present_case = """
             WHEN (
               SELECT COALESCE(r.alive, 0)
               FROM radar r
@@ -2048,6 +2273,45 @@ def api_analytics_eco2_vs_presence(hours: int = Query(24, ge=1, le=168)) -> Dict
               ORDER BY r.ts_utc DESC
               LIMIT 1
             ) != 0
+            AND (
+              SELECT COALESCE(r.detect_cm, 0)
+              FROM radar r
+              WHERE r.ts_utc <= a.ts_utc
+              ORDER BY r.ts_utc DESC
+              LIMIT 1
+            ) > ?
+      """
+      query_params = (cutoff_iso_utc, near_cm)
+    else:
+      present_case = """
+            WHEN (
+              SELECT COALESCE(r.alive, 0)
+              FROM radar r
+              WHERE r.ts_utc <= a.ts_utc
+              ORDER BY r.ts_utc DESC
+              LIMIT 1
+            ) = 1
+            AND (
+              SELECT COALESCE(r.target, 0)
+              FROM radar r
+              WHERE r.ts_utc <= a.ts_utc
+              ORDER BY r.ts_utc DESC
+              LIMIT 1
+            ) != 0
+      """
+      query_params = (cutoff_iso_utc,)
+    row = conn.execute(
+      f"""
+      WITH air_window AS (
+        SELECT ts_utc, eco2_ppm
+        FROM air
+        WHERE ts_utc >= ?
+      ),
+      classified AS (
+        SELECT
+          a.eco2_ppm AS eco2_ppm,
+          CASE
+            {present_case}
             THEN 1
             ELSE 0
           END AS present
@@ -2061,7 +2325,7 @@ def api_analytics_eco2_vs_presence(hours: int = Query(24, ge=1, le=168)) -> Dict
         SUM(CASE WHEN present=0 THEN 1 ELSE 0 END) AS samples_absent
       FROM classified
       """,
-      (cutoff_iso_utc,),
+      query_params,
     ).fetchone()
 
   avg_present = float(row["avg_present"]) if row and row["avg_present"] is not None else None
@@ -2184,18 +2448,20 @@ def api_reports_generate(payload: Dict[str, object] = Body(default={})) -> Dict[
     report_id = int(cur.lastrowid or 0)
     conn.commit()
 
+    settings_payload = get_settings_payload(conn)
+    present_predicate, present_params = radar_present_sql_predicate(settings_payload)
     sample_sec = estimate_radar_sample_seconds(conn)
     radar_row = conn.execute(
-      """
+      f"""
       SELECT
-        SUM(CASE WHEN alive=1 AND target!=0 THEN 1 ELSE 0 END) AS present_samples,
+        SUM(CASE WHEN {present_predicate} THEN 1 ELSE 0 END) AS present_samples,
         SUM(CASE WHEN alive=1 THEN 1 ELSE 0 END) AS alive_samples,
         SUM(CASE WHEN alive=1 AND move_en>0 THEN 1 ELSE 0 END) AS moving_samples,
         SUM(CASE WHEN alive=1 AND stat_en>0 THEN 1 ELSE 0 END) AS still_samples
       FROM radar
       WHERE ts_utc >= ? AND ts_utc <= ?
       """,
-      (range_info["start_utc"], range_info["end_utc"]),
+      (*present_params, range_info["start_utc"], range_info["end_utc"]),
     ).fetchone()
 
     present_samples = int(radar_row["present_samples"] or 0) if radar_row else 0
@@ -2872,6 +3138,10 @@ def render_field_page() -> str:
   body = """
   <div class=\"card\" style=\"padding:14px\">
     <div id=\"fieldStatus\" class=\"status-pill state-offline\">RADAR OFFLINE</div>
+    <div style=\"margin-top:8px;display:flex;align-items:center;gap:10px\">
+      <label class=\"muted\" style=\"display:flex;align-items:center;gap:6px\"><input id=\"fieldUseDerived\" type=\"checkbox\" /> Use derived presence</label>
+      <span id=\"fieldSelfSuppressed\" class=\"muted\" style=\"font-size:12px\"></span>
+    </div>
     <div style=\"margin-top:12px\">
       <div class=\"muted\">Detect Distance</div>
       <div id=\"fieldDetect\" style=\"font-size:64px;line-height:1.05;font-weight:750\">--</div>
@@ -2903,6 +3173,7 @@ def render_field_page() -> str:
   """
   script = """
   let unitDistance = 'cm';
+  let useDerivedPresence = false;
 
   function fmtDetect(cm) {
     const value = Number(cm || 0);
@@ -2911,9 +3182,13 @@ def render_field_page() -> str:
     return Math.round(value) + ' cm';
   }
 
-  function toPresenceStatus(radar) {
+  function toPresenceStatus(radar, useDerived) {
     const alive = Number(radar.alive || 0) === 1;
     if (!alive) return { text: 'RADAR OFFLINE', cls: 'state-offline' };
+    const hasDerived = Object.prototype.hasOwnProperty.call(radar || {}, 'present_derived');
+    if (useDerived && hasDerived && !Boolean(radar.present_derived)) {
+      return { text: 'NO PRESENCE', cls: 'state-none' };
+    }
     const target = Number(radar.target || 0);
     const moving = Number(radar.move_en || 0) > 0;
     const still = Number(radar.stat_en || 0) > 0;
@@ -2942,8 +3217,10 @@ def render_field_page() -> str:
     try {
       const settings = await fetchJson('/api/settings');
       unitDistance = String(settings.units_distance || 'cm') === 'm' ? 'm' : 'cm';
+      useDerivedPresence = !!settings.radar_self_suppress_enabled;
     } catch (_err) {
       unitDistance = 'cm';
+      useDerivedPresence = false;
     }
   }
 
@@ -2962,11 +3239,18 @@ def render_field_page() -> str:
     const esp = (espResp.rows || [])[0] || {};
     const freshness = (healthResp && healthResp.freshness) ? healthResp.freshness : {};
 
-    const st = toPresenceStatus(radar);
+    const useDerived = !!document.getElementById('fieldUseDerived')?.checked;
+    useDerivedPresence = useDerived;
+    const st = toPresenceStatus(radar, useDerived);
     const statusEl = document.getElementById('fieldStatus');
     if (statusEl) {
       statusEl.textContent = st.text;
       statusEl.className = 'status-pill ' + st.cls;
+    }
+    const selfNoteEl = document.getElementById('fieldSelfSuppressed');
+    if (selfNoteEl) {
+      const show = useDerived && !!radar.self_suppressed;
+      selfNoteEl.textContent = show ? 'Self suppressed' : '';
     }
 
     const detectEl = document.getElementById('fieldDetect');
@@ -3004,6 +3288,14 @@ def render_field_page() -> str:
 
   (async () => {
     await loadSettings();
+    const derivedEl = document.getElementById('fieldUseDerived');
+    if (derivedEl) {
+      derivedEl.checked = !!useDerivedPresence;
+      derivedEl.addEventListener('change', () => {
+        useDerivedPresence = !!derivedEl.checked;
+        refreshField().catch(() => {});
+      });
+    }
     await refreshField();
     setInterval(refreshField, 1000);
   })();
@@ -3060,6 +3352,26 @@ def render_settings_page() -> str:
       </label>
     </div>
   </div>
+  <div class=\"card\">
+    <b>Radar Self Suppression</b>
+    <div class=\"muted\" style=\"margin-top:4px\">Treat a persistent near-field signature as 'self' and ignore it in derived presence.</div>
+    <div style=\"display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px;margin-top:10px\">
+      <label style=\"display:flex;align-items:center;gap:8px\"><input id=\"radarSelfSuppressEnabled\" type=\"checkbox\" /> Enable self suppression</label>
+      <label>Presence mode
+        <select id=\"radarPresenceMode\" style=\"margin-left:8px\"><option value=\"raw\">Raw (default)</option><option value=\"derived\">Derived (ignore self)</option></select>
+      </label>
+      <div id=\"radarPresenceModeHelp\" class=\"muted\" style=\"grid-column:1 / -1\">Derived mode requires self suppression.</div>
+      <label>Near distance (cm)
+        <input id=\"radarSelfSuppressNearCm\" type=\"number\" min=\"20\" max=\"200\" step=\"1\" style=\"margin-left:8px;width:120px\" />
+      </label>
+      <label>Persist time (seconds)
+        <input id=\"radarSelfSuppressPersistS\" type=\"number\" min=\"5\" max=\"120\" step=\"1\" style=\"margin-left:8px;width:120px\" />
+      </label>
+      <label>Jitter threshold (cm)
+        <input id=\"radarSelfSuppressJitterCm\" type=\"number\" min=\"2\" max=\"80\" step=\"1\" style=\"margin-left:8px;width:120px\" />
+      </label>
+    </div>
+  </div>
   """
   script = """
   const trends = [
@@ -3111,6 +3423,9 @@ def render_settings_page() -> str:
   }
 
   function getPayload() {
+    const suppressEnabled = !!document.getElementById('radarSelfSuppressEnabled')?.checked;
+    const requestedMode = (String(document.getElementById('radarPresenceMode')?.value || 'raw').toLowerCase() === 'derived') ? 'derived' : 'raw';
+    const effectiveMode = suppressEnabled ? requestedMode : 'raw';
     return {
       field_mode_start: !!document.getElementById('fieldModeStart')?.checked,
       units_distance: document.getElementById('unitsDistance')?.value === 'm' ? 'm' : 'cm',
@@ -3121,7 +3436,26 @@ def render_settings_page() -> str:
       chime_event_air_spike: document.getElementById('chimeAirSpike')?.value || 'warn_radiation_spike',
       chime_event_wifi_drop: document.getElementById('chimeWifiDrop')?.value || 'warn_low_power',
       chime_event_reboot_detected: document.getElementById('chimeRebootDetected')?.value || 'warn_system_fault',
+      radar_self_suppress_enabled: suppressEnabled || (effectiveMode === 'derived'),
+      radar_presence_mode: effectiveMode,
+      radar_self_suppress_near_cm: Number(document.getElementById('radarSelfSuppressNearCm')?.value || 80),
+      radar_self_suppress_persist_s: Number(document.getElementById('radarSelfSuppressPersistS')?.value || 20),
+      radar_self_suppress_jitter_cm: Number(document.getElementById('radarSelfSuppressJitterCm')?.value || 15),
     };
+  }
+
+  function syncRadarPresenceModeUi() {
+    const enabledEl = document.getElementById('radarSelfSuppressEnabled');
+    const modeEl = document.getElementById('radarPresenceMode');
+    const helpEl = document.getElementById('radarPresenceModeHelp');
+    const enabled = !!enabledEl?.checked;
+    if (modeEl) {
+      modeEl.disabled = !enabled;
+      if (!enabled) modeEl.value = 'raw';
+    }
+    if (helpEl) {
+      helpEl.style.opacity = enabled ? '0.65' : '1';
+    }
   }
 
   function applySettings(s) {
@@ -3134,6 +3468,12 @@ def render_settings_page() -> str:
     document.getElementById('chimeAirSpike').value = s.chime_event_air_spike || 'warn_radiation_spike';
     document.getElementById('chimeWifiDrop').value = s.chime_event_wifi_drop || 'warn_low_power';
     document.getElementById('chimeRebootDetected').value = s.chime_event_reboot_detected || 'warn_system_fault';
+    document.getElementById('radarSelfSuppressEnabled').checked = !!s.radar_self_suppress_enabled;
+    document.getElementById('radarPresenceMode').value = String(s.radar_presence_mode || 'raw') === 'derived' ? 'derived' : 'raw';
+    document.getElementById('radarSelfSuppressNearCm').value = String(Number(s.radar_self_suppress_near_cm || 80));
+    document.getElementById('radarSelfSuppressPersistS').value = String(Number(s.radar_self_suppress_persist_s || 20));
+    document.getElementById('radarSelfSuppressJitterCm').value = String(Number(s.radar_self_suppress_jitter_cm || 15));
+    syncRadarPresenceModeUi();
   }
 
   async function saveSettings() {
@@ -3176,6 +3516,7 @@ def render_settings_page() -> str:
     ['chimeAirSpike', 'chimeWifiDrop', 'chimeRebootDetected'].forEach(fillChimeSelect);
     const data = await fetchJson('/api/settings');
     applySettings(data || {});
+    document.getElementById('radarSelfSuppressEnabled')?.addEventListener('change', () => syncRadarPresenceModeUi());
     document.getElementById('saveBtn')?.addEventListener('click', () => saveSettings().catch((e) => alert(String(e.message || e))));
     document.getElementById('resetBtn')?.addEventListener('click', () => resetSettings().catch((e) => alert(String(e.message || e))));
     document.getElementById('previewAirSpike')?.addEventListener('click', () => previewChimeBySelect('chimeAirSpike').catch((e) => alert(String(e.message || e))));
@@ -3587,8 +3928,11 @@ const dashboardSettingDefaults = {
   chart_slot_b: chartSlotDefaults.B,
   chart_slot_c: chartSlotDefaults.C,
   chart_slot_d: chartSlotDefaults.D,
+  radar_self_suppress_enabled: false,
+  radar_presence_mode: 'raw',
 };
 let dashboardSettings = { ...dashboardSettingDefaults };
+let useDerivedPresence = false;
 const radarNow = {
   enabled: true,
   view: 'now',
@@ -3695,6 +4039,7 @@ async function loadDashboardSettings() {
     if (!resp.ok) return;
     const data = await resp.json();
     dashboardSettings = { ...dashboardSettingDefaults, ...(data || {}) };
+    useDerivedPresence = !!dashboardSettings.radar_self_suppress_enabled;
     chartSlots.A = getTrendByKey(String(dashboardSettings.chart_slot_a || chartSlotDefaults.A)).key;
     chartSlots.B = getTrendByKey(String(dashboardSettings.chart_slot_b || chartSlotDefaults.B)).key;
     chartSlots.C = getTrendByKey(String(dashboardSettings.chart_slot_c || chartSlotDefaults.C)).key;
@@ -3703,6 +4048,16 @@ async function loadDashboardSettings() {
     applyFieldModeEntryVisibility();
   } catch (_err) {
   }
+}
+
+function bindPresenceToggleUi() {
+  const toggleEl = document.getElementById('radar-use-derived');
+  if (!toggleEl) return;
+  toggleEl.checked = !!useDerivedPresence;
+  toggleEl.addEventListener('change', () => {
+    useDerivedPresence = !!toggleEl.checked;
+    drawRadarScope(radarNow.state || {});
+  });
 }
 
 async function persistChartSlotsToSettings() {
@@ -4012,17 +4367,23 @@ function updateRadarReadout(state) {
 
   const stateEl = document.getElementById('radar-now-state');
   const statePillEl = document.getElementById('radar-now-state-pill');
+  const selfNoteEl = document.getElementById('radar-now-self-note');
   const bodiesEl = document.getElementById('radar-now-bodies');
   const detectEl = document.getElementById('radar-now-detect');
   const moveSigEl = document.getElementById('radar-now-move-sig');
   const statSigEl = document.getElementById('radar-now-stat-sig');
   const targetEl = document.getElementById('radar-now-target');
-  const moveState = moveMetric > 0;
-  const statState = statMetric > 0;
+  const hasDerived = Object.prototype.hasOwnProperty.call(state || {}, 'present_derived');
+  const derivedEnabled = !!useDerivedPresence && hasDerived;
+  const derivedPresent = derivedEnabled ? !!state.present_derived : false;
+  const selfSuppressed = derivedEnabled && !!state.self_suppressed;
+  const effectiveTarget = (derivedEnabled && !derivedPresent) ? 0 : target;
+  const moveState = (derivedEnabled && !derivedPresent) ? false : (moveMetric > 0);
+  const statState = (derivedEnabled && !derivedPresent) ? false : (statMetric > 0);
 
   if (stateEl) {
     if (!alive) stateEl.textContent = 'Radar offline';
-    else if (target === 0) stateEl.textContent = 'No presence';
+    else if (effectiveTarget === 0) stateEl.textContent = 'No presence';
     else if (moveState && !statState) stateEl.textContent = 'Moving presence';
     else if (!moveState && statState) stateEl.textContent = 'Still presence';
     else stateEl.textContent = 'Moving + still';
@@ -4032,7 +4393,7 @@ function updateRadarReadout(state) {
     if (!alive) {
       statePillEl.textContent = 'RADAR OFFLINE';
       statePillEl.classList.add('state-offline');
-    } else if (target === 0) {
+    } else if (effectiveTarget === 0) {
       statePillEl.textContent = 'NO PRESENCE';
       statePillEl.classList.add('state-none');
     } else if (moveState && !statState) {
@@ -4045,6 +4406,9 @@ function updateRadarReadout(state) {
       statePillEl.textContent = 'MOVING + STILL';
       statePillEl.classList.add('state-both');
     }
+  }
+  if (selfNoteEl) {
+    selfNoteEl.textContent = selfSuppressed ? 'Self suppressed' : '';
   }
   if (bodiesEl) bodiesEl.textContent = alive ? `${bodyCount}` : '--';
   if (detectEl) detectEl.textContent = alive && target !== 0 ? `${detectCm} cm` : '--';
@@ -4545,6 +4909,10 @@ function initTrends() {
       '</div>' +
       '<div class="radar-readout">' +
         '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
+        '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">' +
+          '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
+          '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
+        '</div>' +
         '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
         '<div class="radar-line"><span class="radar-label">Bodies</span><span id="radar-now-bodies">--</span></div>' +
         '<div class="radar-line"><span class="radar-label">Detect</span><span id="radar-now-detect">--</span></div>' +
@@ -5133,6 +5501,10 @@ async function pollTrends() {
       trendData[key] = data;
     }
     const radarLatest = await fetchJson('/api/radar/latest', controller);
+    const derivedToggleEl = document.getElementById('radar-use-derived');
+    if (derivedToggleEl) {
+      useDerivedPresence = !!derivedToggleEl.checked;
+    }
     radarNow.state = radarLatest || radarNow.state;
     drawRadarScope(radarNow.state);
 
@@ -5287,6 +5659,7 @@ async function pollEvents() {
   await loadDashboardSettings();
   renderChartSlotControls();
   initTrends();
+  bindPresenceToggleUi();
   setTrendMinutes(60);
   initTables();
   await pollReady();
