@@ -525,7 +525,8 @@ def build_report_html(
       "</section>"
     )
 
-  return """
+  sections_html = "\n".join(sections)
+  html_template = """
 <!doctype html>
 <html>
 <head>
@@ -544,10 +545,11 @@ def build_report_html(
 </head>
 <body>
   <h1>HERMES Report</h1>
-  %s
+  __SECTIONS__
 </body>
 </html>
-""" % ("\n".join(sections))
+"""
+  return html_template.replace("__SECTIONS__", sections_html)
 
 
 def insert_event_row(
