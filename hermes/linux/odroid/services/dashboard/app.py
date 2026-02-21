@@ -49,6 +49,7 @@ SERIES_MAP = {
   "esp_rssi": {"table": "esp_net", "column": "rssi", "label": "RSSI (dBm)", "color": "#ef5350", "stepped": False},
   "esp_wifist": {"table": "esp_net", "column": "wifist", "label": "WiFi State", "color": "#90a4ae", "stepped": True},
   "radar_target": {"table": "radar", "column": "target", "label": "Presence Target (0-3)", "color": "#66bb6a", "stepped": True},
+  "radar_detect_cm": {"table": "radar", "column": "detect_cm", "label": "Human Presenses (cm)", "color": "#66bb6a", "stepped": False},
 }
 
 CHART_CACHE_TTL_SECS = 5.0
@@ -611,14 +612,17 @@ def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, objec
 
           ax.set_ylim(lo, hi)
 
-      ax.plot(
-        x,
-        y,
-        color=cfg["color"],
-        linewidth=1.8,
-        drawstyle="steps-post" if cfg["stepped"] else "default",
-      )
-      ax.fill_between(x, y, color=cfg["color"], alpha=0.13)
+      if series == "radar_detect_cm":
+        ax.scatter(x, y, s=12, color=cfg["color"], alpha=0.95)
+      else:
+        ax.plot(
+          x,
+          y,
+          color=cfg["color"],
+          linewidth=1.8,
+          drawstyle="steps-post" if cfg["stepped"] else "default",
+        )
+        ax.fill_between(x, y, color=cfg["color"], alpha=0.13)
       last_v = y[-1]
       min_v = min(y)
       max_v = max(y)
@@ -1216,7 +1220,7 @@ const tableLabels = {
 };
 const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET','RADAR'];
 const trendSeries = [
-  { key: 'radar_target', title: 'Presence', unit: '', decimals: 0, table: 'radar' },
+  { key: 'radar_detect_cm', title: 'Human Presenses', unit: 'cm', decimals: 0, table: 'radar' },
   { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0, table: 'air' },
   { key: 'env_temp', title: 'Temp', unit: '°C', decimals: 1, table: 'env' },
   { key: 'env_hum', title: 'Humidity', unit: '%', decimals: 1, table: 'env' },
