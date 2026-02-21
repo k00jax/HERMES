@@ -50,7 +50,9 @@
 #ifndef ENABLE_CAMERA
 #define ENABLE_CAMERA 0
 #endif
+#ifndef ENABLE_MIC
 #define ENABLE_MIC 0
+#endif
 #define ENABLE_WIFI 1
 
 static const uint8_t UART_RX_PIN = D7;
@@ -348,6 +350,29 @@ static bool ntpConfigured = false;
 static int wifiStatus = -1;
 static uint32_t lastWifiReportMs = 0;
 static uint32_t wifiReportSeq = 0;
+
+static bool cameraOk = false;
+static int cameraErr = -2;
+static int cameraAddr = -1;
+static int cameraSda = CAM_PIN_SIOD;
+static int cameraScl = CAM_PIN_SIOC;
+static float cameraLight = NAN;
+static float cameraScene = NAN;
+static uint32_t lastCameraMs = 0;
+static bool scenePrevValid = false;
+static uint8_t scenePrev[SCENE_SAMPLES];
+
+static bool micOk = false;
+static int micErr = -2;
+static uint32_t lastMicMs = 0;
+static float micRms = NAN;
+static float micPeak = NAN;
+static float micNoiseFloor = NAN;
+static float micDelta = NAN;
+static int16_t micSamples[MIC_WINDOW_SAMPLES];
+#if HAS_ESP_I2S
+static I2SClass micI2S;
+#endif
 
 
 static char cmdBuffer[64];
@@ -928,16 +953,21 @@ static void updateWifi(uint32_t now) {
     } else {
       snprintf(ipField, sizeof(ipField), "none");
     }
-    char netLine[128];
+    char netLine[256];
     if (hasGw) {
       snprintf(
           netLine,
           sizeof(netLine),
-          "SENS,n=%lu,wifist=%d,rssi=%d,ntp=%lu,ip=%s,gw=%u.%u.%u.%u\n",
+          "ESP,NET,n=%lu,wifist=%d,rssi=%d,ntp=%lu,camok=%d,camerr=%d,micok=%d,micerr=%d,camaddr=%d,ip=%s,gw=%u.%u.%u.%u\n",
           static_cast<unsigned long>(++wifiReportSeq),
           wifiStatus,
           currentRssi,
           static_cast<unsigned long>(ntpEpoch),
+          cameraOk ? 1 : 0,
+          cameraErr,
+          micOk ? 1 : 0,
+          micErr,
+          cameraAddr,
           ipField,
           gatewayIp[0],
           gatewayIp[1],
@@ -947,11 +977,16 @@ static void updateWifi(uint32_t now) {
       snprintf(
           netLine,
           sizeof(netLine),
-          "SENS,n=%lu,wifist=%d,rssi=%d,ntp=%lu,ip=%s\n",
+          "ESP,NET,n=%lu,wifist=%d,rssi=%d,ntp=%lu,camok=%d,camerr=%d,micok=%d,micerr=%d,camaddr=%d,ip=%s\n",
           static_cast<unsigned long>(++wifiReportSeq),
           wifiStatus,
           currentRssi,
           static_cast<unsigned long>(ntpEpoch),
+          cameraOk ? 1 : 0,
+          cameraErr,
+          micOk ? 1 : 0,
+          micErr,
+          cameraAddr,
           ipField);
     }
     Serial1.print(netLine);
@@ -1004,14 +1039,19 @@ static void sendTelemetryLine() {
   } else {
     snprintf(ctBuffer, sizeof(ctBuffer), "%.2f", tempC);
   }
-  char line[220];
+  char line[260];
   snprintf(
       line,
       sizeof(line),
-      "%sup=%lu,n=%lu,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s\n",
+      "%sup=%lu,n=%lu,camok=%d,camerr=%d,micok=%d,micerr=%d,camaddr=%d,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s\n",
       SENS_PREFIX,
       static_cast<unsigned long>(uptimeSec),
       static_cast<unsigned long>(frame),
+      cameraOk ? 1 : 0,
+      cameraErr,
+      micOk ? 1 : 0,
+      micErr,
+      cameraAddr,
       rssi,
       static_cast<unsigned long>(ntpEpoch),
       static_cast<unsigned long>(heap),
@@ -1045,7 +1085,7 @@ void setup() {
   Serial.println("ESP32 telemetry sender ready");
   scanCameraBus();
   initCamera();
-  initMic();
+  micOk = initMic();
   initWifi();
 }
 
