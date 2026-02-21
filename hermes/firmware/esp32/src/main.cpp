@@ -124,17 +124,19 @@ static void parseAndPrintLd2410Frame(const uint8_t *frame, size_t frameLen) {
   const uint8_t reportType = payload[0];
   const uint8_t reportMarker = payload[1];
   const uint8_t targetState = payload[2];
-  const uint16_t movingDistanceCm = static_cast<uint16_t>(payload[3])
+    const uint16_t movingDistanceCm = static_cast<uint16_t>(payload[3])
       | (static_cast<uint16_t>(payload[4]) << 8);
-  const uint16_t stationaryDistanceCm = static_cast<uint16_t>(payload[5])
-      | (static_cast<uint16_t>(payload[6]) << 8);
-  const uint8_t movingEnergy = payload[7];
-  const uint8_t stationaryEnergy = payload[8];
-  const uint16_t detectDistanceCm = static_cast<uint16_t>(payload[9])
+    const uint8_t movingEnergy = payload[5];
+    const uint16_t stationaryDistanceCm = static_cast<uint16_t>(payload[6])
+      | (static_cast<uint16_t>(payload[7]) << 8);
+    const uint8_t stationaryEnergy = payload[8];
+    const uint16_t detectDistanceCm = static_cast<uint16_t>(payload[9])
       | (static_cast<uint16_t>(payload[10]) << 8);
+    const uint16_t trailerWord = static_cast<uint16_t>(payload[11])
+      | (static_cast<uint16_t>(payload[12]) << 8);
 
   Serial.printf(
-      "[ld2410] type=0x%02X marker=0x%02X target=%u(%s) move_cm=%u stat_cm=%u move_en=%u stat_en=%u detect_cm=%u\n",
+      "[ld2410] type=0x%02X marker=0x%02X target=%u(%s) move_cm=%u stat_cm=%u move_en=%u stat_en=%u detect_cm=%u trail=0x%04X\n",
       reportType,
       reportMarker,
       targetState,
@@ -143,7 +145,8 @@ static void parseAndPrintLd2410Frame(const uint8_t *frame, size_t frameLen) {
       static_cast<unsigned>(stationaryDistanceCm),
       static_cast<unsigned>(movingEnergy),
       static_cast<unsigned>(stationaryEnergy),
-      static_cast<unsigned>(detectDistanceCm));
+      static_cast<unsigned>(detectDistanceCm),
+      static_cast<unsigned>(trailerWord));
 }
 
 static void processLd2410Byte(uint8_t byteValue) {
