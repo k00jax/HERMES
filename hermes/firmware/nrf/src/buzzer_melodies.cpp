@@ -18,3 +18,11 @@ void play_melody(const Note* notes, size_t count, int gap_ms) {
   }
   noTone(BUZZER_PIN);
 }
+
+void play_warning_chime() {
+  play_melody(MELODY_WARN_RADIATION_SPIKE, MELODY_WARN_RADIATION_SPIKE_COUNT);
+}
+
+void play_error_chime() {
+  play_melody(MELODY_WARN_SYSTEM_FAULT, MELODY_WARN_SYSTEM_FAULT_COUNT);
+}

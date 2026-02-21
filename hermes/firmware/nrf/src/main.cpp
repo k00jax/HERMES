@@ -9,6 +9,7 @@
 #include <PDM.h>
 
 #include "hermes_protocol.h"
+#include "buzzer_melodies.h"
 
 // Forward declarations to ensure functions are known before use
 static void renderDisplays(uint32_t now);
@@ -22,6 +23,7 @@ static void handleLine(char *line, uint32_t now);
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
 #define HERMES_INPUT_BUZZER_TEST 0
+#define HERMES_STARTUP_CHIME 1
 
 #define SR_DATA   D8
 #define SR_CLOCK  D9
@@ -3048,6 +3050,9 @@ void setup() {
 
   initHistory();
   initDisplays();
+#if HERMES_STARTUP_CHIME
+  play_melody(MELODY_STARTUP_VAULT_BOOT, MELODY_STARTUP_VAULT_BOOT_COUNT);
+#endif
 }
 
 void loop() {

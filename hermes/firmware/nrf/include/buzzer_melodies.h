@@ -72,3 +72,5 @@ inline constexpr Note MELODY_WARN_LOW_POWER[] = {
 inline constexpr size_t MELODY_WARN_LOW_POWER_COUNT = sizeof(MELODY_WARN_LOW_POWER) / sizeof(MELODY_WARN_LOW_POWER[0]);
 
 void play_melody(const Note* notes, size_t count, int gap_ms = 30);
+void play_warning_chime();
+void play_error_chime();
