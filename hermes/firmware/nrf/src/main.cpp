@@ -47,10 +47,10 @@ static const uint8_t OLED_ADDR_ESP = 0x3D;
 static const uint8_t SCREEN_WIDTH = 128;
 static const uint8_t SCREEN_HEIGHT = 64;
 
-static const int STATUS_LED_PIN = D1;
-static const int DEBUG_LED_PIN = D3;
-static const int PIN_BTN = D0;
-static const int PIN_SW = D2;
+static const int STATUS_LED_PIN = -1;
+static const int DEBUG_LED_PIN = -1;
+static const int PIN_BTN = D2;
+static const int PIN_SW = -1;
 
 static const uint32_t BTN_DEBOUNCE_MS = 25;
 static const uint32_t BTN_DOUBLE_WINDOW_MS = 350;
@@ -804,6 +804,18 @@ static void emitNack(const char *op, const char *reason) {
   emitFrame("NACK", pairs);
 }
 
+static void emitAckKind(const char *kind, const char *op) {
+  char pairs[64];
+  snprintf(pairs, sizeof(pairs), "kind=%s,op=%s", kind, op);
+  emitFrame("ACK", pairs);
+}
+
+static void emitNackKind(const char *kind, const char *op, const char *reason) {
+  char pairs[96];
+  snprintf(pairs, sizeof(pairs), "kind=%s,op=%s,reason=%s", kind, op, reason);
+  emitFrame("NACK", pairs);
+}
+
 static const char *getDebugPageName(int index) {
   const int idx = (index < 0) ? 0 : (index % DEBUG_PAGE_COUNT);
   switch (idx) {
@@ -917,25 +929,70 @@ static void trimWhitespace(char *line) {
   }
 }
 
+static void playBuzzerBeep(uint16_t durMs) {
+  if (durMs < 20) {
+    durMs = 20;
+  }
+  if (durMs > 2000) {
+    durMs = 2000;
+  }
+  pinMode(BUZZER_PIN, OUTPUT);
+  tone(BUZZER_PIN, 2000, durMs);
+}
+
+static void playBuzzerJingle(const char *name) {
+  pinMode(BUZZER_PIN, OUTPUT);
+  if (name && strcasecmp(name, "cal_done") == 0) {
+    tone(BUZZER_PIN, 1568, 90);
+    delay(110);
+    tone(BUZZER_PIN, 1976, 110);
+    delay(130);
+    tone(BUZZER_PIN, 2637, 140);
+    return;
+  }
+  tone(BUZZER_PIN, 1200, 90);
+  delay(110);
+  tone(BUZZER_PIN, 1700, 120);
+}
+
 static void handleLine(char *line, uint32_t now) {
   trimWhitespace(line);
   if (line[0] == '\0') {
     return;
   }
 
-  if (strncmp(line, "OLED,", 5) != 0) {
+  const bool isOled = (strncmp(line, "OLED,", 5) == 0);
+  const bool isBuzzer = (strncmp(line, "BUZZER,", 7) == 0);
+  if (!isOled && !isBuzzer) {
     return;
-    
   }
 
   char opGuess[24];
   extractOpGuess(line, opGuess, sizeof(opGuess));
 
-  char *payload = line + 5;
+  char *payload = line + (isOled ? 5 : 7);
   char *savePtr = nullptr;
   char *token = strtok_r(payload, ",", &savePtr);
   if (!token) {
     emitNack("UNKNOWN", "unknown_cmd");
+    return;
+  }
+
+  if (isBuzzer) {
+    if (strcasecmp(token, "BEEP") == 0) {
+      char *durToken = strtok_r(nullptr, ",", &savePtr);
+      const uint16_t durMs = durToken ? static_cast<uint16_t>(atoi(durToken)) : 100;
+      playBuzzerBeep(durMs);
+      emitAckKind("BUZZER", "BEEP");
+      return;
+    }
+    if (strcasecmp(token, "JINGLE") == 0) {
+      char *nameToken = strtok_r(nullptr, ",", &savePtr);
+      playBuzzerJingle(nameToken);
+      emitAckKind("BUZZER", "JINGLE");
+      return;
+    }
+    emitNackKind("BUZZER", opGuess, "unknown_cmd");
     return;
   }
 
@@ -1684,6 +1741,9 @@ static void softResetState(uint32_t now) {
 }
 
 static void updateSwitch(uint32_t now) {
+  if (PIN_SW < 0) {
+    return;
+  }
   const bool rawState = digitalRead(PIN_SW);
   if (rawState != swState && (now - swLastChangeMs) > 50) {
     swState = rawState;
@@ -2772,6 +2832,36 @@ static void handleLongPress(uint32_t now) {
 }
 
 static void updateButton(uint32_t now) {
+  const bool prevRaw = digitalRead(BTN_PREV);
+  if (prevRaw != inputLastPrev && (now - inputPrevEdgeMs >= INPUT_DEBOUNCE_MS)) {
+    inputPrevEdgeMs = now;
+    inputLastPrev = prevRaw;
+    if (prevRaw == LOW) {
+      if (uiStack == UI_DEBUG) {
+        debugPageIndex = (debugPageIndex + DEBUG_PAGE_COUNT - 1) % DEBUG_PAGE_COUNT;
+      } else {
+        userPageIndex = (userPageIndex + USER_PAGE_COUNT - 1) % USER_PAGE_COUNT;
+      }
+      lastDisplayMs = now;
+      renderDisplays(now);
+    }
+  }
+
+  const bool nextRaw = digitalRead(BTN_NEXT);
+  if (nextRaw != inputLastNext && (now - inputNextEdgeMs >= INPUT_DEBOUNCE_MS)) {
+    inputNextEdgeMs = now;
+    inputLastNext = nextRaw;
+    if (nextRaw == LOW) {
+      if (uiStack == UI_DEBUG) {
+        debugPageIndex = (debugPageIndex + 1) % DEBUG_PAGE_COUNT;
+      } else {
+        userPageIndex = (userPageIndex + 1) % USER_PAGE_COUNT;
+      }
+      lastDisplayMs = now;
+      renderDisplays(now);
+    }
+  }
+
   const bool rawLevel = digitalRead(PIN_BTN);
   if (rawLevel != btnRawState) {
     btnRawState = rawLevel;
@@ -2857,8 +2947,12 @@ static void updateLed(uint32_t now) {
     hermesSetStatusColor(STATUS_GREEN);
   }
 
-  digitalWrite(STATUS_LED_PIN, ledOn ? HIGH : LOW);
-  digitalWrite(DEBUG_LED_PIN, debugLedOn ? HIGH : LOW);
+  if (STATUS_LED_PIN >= 0) {
+    digitalWrite(STATUS_LED_PIN, ledOn ? HIGH : LOW);
+  }
+  if (DEBUG_LED_PIN >= 0) {
+    digitalWrite(DEBUG_LED_PIN, debugLedOn ? HIGH : LOW);
+  }
 }
 
 static void updateDisplays(uint32_t now) {
@@ -2909,21 +3003,39 @@ void setup() {
   Serial1.begin(UART_BAUD);
   Wire.begin();
 
-  pinMode(STATUS_LED_PIN, OUTPUT);
-  digitalWrite(STATUS_LED_PIN, LOW);
-  pinMode(DEBUG_LED_PIN, OUTPUT);
-  digitalWrite(DEBUG_LED_PIN, LOW);
+  if (STATUS_LED_PIN >= 0) {
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    digitalWrite(STATUS_LED_PIN, LOW);
+  }
+  if (DEBUG_LED_PIN >= 0) {
+    pinMode(DEBUG_LED_PIN, OUTPUT);
+    digitalWrite(DEBUG_LED_PIN, LOW);
+  }
+  pinMode(BUZZER_PIN, OUTPUT);
   hermesInitShiftRegisterLEDs();
+  pinMode(BTN_PREV, INPUT_PULLUP);
+  pinMode(BTN_SELECT, INPUT_PULLUP);
+  pinMode(BTN_NEXT, INPUT_PULLUP);
+  inputLastPrev = digitalRead(BTN_PREV);
+  inputLastSelect = digitalRead(BTN_SELECT);
+  inputLastNext = digitalRead(BTN_NEXT);
   pinMode(PIN_BTN, INPUT_PULLUP);
-  pinMode(PIN_SW, INPUT_PULLUP);
   btnRawState = digitalRead(PIN_BTN);
   btnStableState = btnRawState;
   btnLastChangeMs = millis();
-  swState = digitalRead(PIN_SW);
   swLastChangeMs = millis();
-  debugMode = !swState;
-  usbExportEnabled = debugMode;
-  uiStack = debugMode ? UI_DEBUG : UI_USER;
+  if (PIN_SW >= 0) {
+    pinMode(PIN_SW, INPUT_PULLUP);
+    swState = digitalRead(PIN_SW);
+    debugMode = !swState;
+    usbExportEnabled = debugMode;
+    uiStack = debugMode ? UI_DEBUG : UI_USER;
+  } else {
+    swState = true;
+    debugMode = false;
+    usbExportEnabled = false;
+    uiStack = UI_USER;
+  }
 
   shtOk = sht31.begin(0x44);
   if (!shtOk) {

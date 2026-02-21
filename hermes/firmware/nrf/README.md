@@ -27,7 +27,12 @@ If your Odroid IP changes:
 
 ## OLED Command Protocol (USB CDC)
 
-Commands arrive over the USB CDC device (Odroid `/dev/hermes-nrf`) and responses are emitted on the same stream. Only lines starting with `OLED,` are treated as commands; all other telemetry lines are ignored by the command parser.
+Commands arrive over the USB CDC device (Odroid `/dev/hermes-nrf`) and responses are emitted on the same stream.
+
+Supported command prefixes:
+
+- `OLED,...` for UI/status commands
+- `BUZZER,...` for passive buzzer control
 
 Supported commands:
 
@@ -39,7 +44,19 @@ Supported commands:
 - `OLED,ALERT,STALE,ON` -> enables D3 stale alert pattern (3 quick flashes, 3s off), `ACK,kind=OLED,op=ALERT`
 - `OLED,ALERT,STALE,OFF` -> disables stale alert pattern, `ACK,kind=OLED,op=ALERT`
 
+- `BUZZER,BEEP,<dur_ms>` -> short 2kHz beep, `ACK,kind=BUZZER,op=BEEP`
+- `BUZZER,JINGLE,cal_done` -> calibration-complete jingle, `ACK,kind=BUZZER,op=JINGLE`
+- `BUZZER,JINGLE,<name>` -> fallback jingle, `ACK,kind=BUZZER,op=JINGLE`
+
 Errors:
 
 - Unknown or malformed OLED commands -> `NACK,kind=OLED,op=<OP>,reason=unknown_cmd`
+- Unknown or malformed BUZZER commands -> `NACK,kind=BUZZER,op=<OP>,reason=unknown_cmd`
 - RX buffer overflow -> `NACK,kind=OLED,reason=overflow`
+
+## Input/Feedback Pin Roles
+
+- D0: passive buzzer
+- D1: left button
+- D2: select/cycle button
+- D3: right button
