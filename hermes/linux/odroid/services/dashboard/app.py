@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import os
 import io
+import csv
 import math
 import time
 import uuid
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 import matplotlib
@@ -36,8 +37,10 @@ BASE_DIR = Path("/home/odroid/hermes-src/hermes")
 CLIENT_PATH = BASE_DIR / "linux/logger/client.py"
 DOCTOR_PATH = BASE_DIR / "tools/hermes-doctor.sh"
 DB_PATH = Path("/home/odroid/hermes-data/db/hermes.sqlite3")
+REPORTS_DIR = Path(os.environ.get("HERMES_REPORTS_DIR", "/home/odroid/hermes-data/reports"))
 DB_TIMEOUT_SECS = float(os.environ.get("HERMES_DB_TIMEOUT_SECS", "2.0"))
 MAX_CACHE_KEYS = int(os.environ.get("HERMES_CHART_CACHE_KEYS", "64"))
+MAX_RANGE_DAYS = 31
 
 TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net", "radar")
 READY_TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
@@ -358,6 +361,193 @@ def reset_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
       (key, json.dumps(value, separators=(",", ":"), ensure_ascii=False), now_ts),
     )
   return dict(SETTINGS_DEFAULTS)
+
+
+def ensure_reports_table(conn: sqlite3.Connection) -> None:
+  conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts_utc TEXT NOT NULL,
+      ts_local TEXT,
+      range_start_utc TEXT NOT NULL,
+      range_end_utc TEXT NOT NULL,
+      preset TEXT NOT NULL,
+      options_json TEXT NOT NULL,
+      file_path TEXT,
+      status TEXT NOT NULL,
+      notes TEXT
+    );
+    """
+  )
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_ts ON reports(ts_utc);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_range ON reports(range_start_utc, range_end_utc);")
+
+
+def now_local_iso() -> str:
+  return datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def parse_local_datetime_input(value: str) -> datetime.datetime:
+  text = str(value or "").strip()
+  if not text:
+    raise ValueError("empty local datetime")
+  dt = datetime.datetime.fromisoformat(text)
+  if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=datetime.datetime.now().astimezone().tzinfo)
+  return dt.astimezone()
+
+
+def resolve_range_utc_from_request(
+    *,
+    preset: str,
+    start_local: Optional[str] = None,
+    end_local: Optional[str] = None,
+) -> Dict[str, str]:
+  preset_norm = str(preset or "24h").strip().lower()
+  now_local = datetime.datetime.now().astimezone().replace(microsecond=0)
+  if preset_norm == "24h":
+    start = now_local - datetime.timedelta(hours=24)
+    end = now_local
+  elif preset_norm == "3d":
+    start = now_local - datetime.timedelta(days=3)
+    end = now_local
+  elif preset_norm == "1w":
+    start = now_local - datetime.timedelta(days=7)
+    end = now_local
+  elif preset_norm == "1m":
+    start = now_local - datetime.timedelta(days=30)
+    end = now_local
+  elif preset_norm == "custom":
+    if not start_local or not end_local:
+      raise HTTPException(status_code=400, detail="custom range requires start_local and end_local")
+    try:
+      start = parse_local_datetime_input(start_local)
+      end = parse_local_datetime_input(end_local)
+    except Exception as exc:
+      raise HTTPException(status_code=400, detail=f"invalid custom datetime: {exc}")
+  else:
+    raise HTTPException(status_code=400, detail="invalid preset")
+
+  if end <= start:
+    raise HTTPException(status_code=400, detail="end must be after start")
+  if (end - start) > datetime.timedelta(days=MAX_RANGE_DAYS):
+    raise HTTPException(status_code=400, detail=f"range exceeds {MAX_RANGE_DAYS} days")
+
+  start_utc = start.astimezone(datetime.timezone.utc)
+  end_utc = end.astimezone(datetime.timezone.utc)
+  return {
+    "preset": preset_norm,
+    "start_local": start.isoformat(),
+    "end_local": end.isoformat(),
+    "start_utc": start_utc.isoformat(),
+    "end_utc": end_utc.isoformat(),
+  }
+
+
+def html_escape(text: object) -> str:
+  s = str(text or "")
+  return (
+    s.replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+    .replace('"', "&quot;")
+    .replace("'", "&#39;")
+  )
+
+
+def build_report_html(
+    *,
+    range_info: Dict[str, str],
+    include_presence: bool,
+    include_air: bool,
+    include_events: bool,
+    include_rssi: bool,
+    device_summary: Dict[str, object],
+    presence_summary: Dict[str, object],
+    air_summary: Dict[str, object],
+    events_summary: Dict[str, object],
+    rssi_summary: Dict[str, object],
+) -> str:
+  created_utc = now_utc_iso()
+  created_local = now_local_iso()
+  sections: List[str] = []
+
+  sections.append(
+    "<section><h2>Header</h2>"
+    f"<p><b>Created:</b> {html_escape(created_local)} ({html_escape(created_utc)})</p>"
+    f"<p><b>Range:</b> {html_escape(range_info['start_local'])} → {html_escape(range_info['end_local'])}</p>"
+    f"<p><b>Preset:</b> {html_escape(range_info['preset'])}</p>"
+    f"<p><b>Device summary:</b> {html_escape(json.dumps(device_summary, ensure_ascii=False))}</p>"
+    "</section>"
+  )
+
+  if include_presence:
+    sections.append(
+      "<section><h2>Presence Summary</h2>"
+      f"<p>Total minutes present: <b>{presence_summary.get('minutes_present', 0):.2f}</b></p>"
+      f"<p>Percent time present: <b>{presence_summary.get('percent_present', 0):.2f}%</b></p>"
+      f"<p>Moving minutes: <b>{presence_summary.get('moving_minutes', 0):.2f}</b> | Still minutes: <b>{presence_summary.get('still_minutes', 0):.2f}</b></p>"
+      "</section>"
+    )
+
+  if include_air:
+    sections.append(
+      "<section><h2>Air Quality Summary</h2>"
+      f"<p>Avg ECO2: <b>{air_summary.get('avg_eco2_ppm')}</b> ppm | Max ECO2: <b>{air_summary.get('max_eco2_ppm')}</b> ppm</p>"
+      f"<p>Avg Temp: <b>{air_summary.get('avg_temp_c')}</b> °C | Avg Humidity: <b>{air_summary.get('avg_hum_pct')}</b> %</p>"
+      "</section>"
+    )
+
+  if include_events:
+    top_rows = events_summary.get("top_events", []) or []
+    rows_html = "".join(
+      "<tr>"
+      f"<td>{html_escape(row.get('ts_local') or row.get('ts_utc') or '')}</td>"
+      f"<td>{html_escape(row.get('severity') or '')}</td>"
+      f"<td>{html_escape(row.get('kind') or '')}</td>"
+      f"<td>{html_escape(row.get('message') or '')}</td>"
+      "</tr>"
+      for row in top_rows
+    )
+    sections.append(
+      "<section><h2>Events Summary</h2>"
+      f"<p>By severity: {html_escape(json.dumps(events_summary.get('by_severity', {}), ensure_ascii=False))}</p>"
+      "<table><thead><tr><th>When</th><th>Severity</th><th>Kind</th><th>Message</th></tr></thead>"
+      f"<tbody>{rows_html}</tbody></table>"
+      "</section>"
+    )
+
+  if include_rssi:
+    sections.append(
+      "<section><h2>RSSI Summary</h2>"
+      f"<p>Avg RSSI: <b>{rssi_summary.get('avg_rssi_dbm')}</b> dBm | Min RSSI: <b>{rssi_summary.get('min_rssi_dbm')}</b> dBm | Max RSSI: <b>{rssi_summary.get('max_rssi_dbm')}</b> dBm</p>"
+      "</section>"
+    )
+
+  return """
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <title>HERMES Report</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; margin: 18px; color: #1e2937; }
+    h1 { margin-bottom: 8px; }
+    h2 { margin: 18px 0 6px 0; font-size: 18px; }
+    section { border: 1px solid #d6dee8; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+    p { margin: 6px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+    th, td { border-bottom: 1px solid #d6dee8; text-align: left; padding: 6px 8px; }
+    th { background: #f8fbff; }
+  </style>
+</head>
+<body>
+  <h1>HERMES Report</h1>
+  %s
+</body>
+</html>
+""" % ("\n".join(sections))
 
 
 def insert_event_row(
@@ -1794,6 +1984,313 @@ def api_analytics_event_counts(days: int = Query(7, ge=1, le=90)) -> Dict[str, o
   }
 
 
+@APP.post("/api/buzzer/chime")
+def api_buzzer_chime(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+  pattern = str(payload.get("pattern") or "cal_done").strip().lower()
+  if pattern != "cal_done":
+    raise HTTPException(status_code=400, detail="unsupported pattern")
+  result = trigger_radar_calibration_jingle()
+  return {"ok": bool(result.get("ok")), "pattern": pattern, "result": result}
+
+
+@APP.post("/api/reports/generate")
+def api_reports_generate(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+  preset = str(payload.get("preset") or "24h")
+  start_local = payload.get("start_local")
+  end_local = payload.get("end_local")
+  include = payload.get("include") if isinstance(payload.get("include"), dict) else {}
+  include_presence = bool(include.get("presence", True))
+  include_air = bool(include.get("air", True))
+  include_events = bool(include.get("events", True))
+  include_rssi = bool(include.get("rssi", False))
+
+  range_info = resolve_range_utc_from_request(
+    preset=preset,
+    start_local=str(start_local) if start_local is not None else None,
+    end_local=str(end_local) if end_local is not None else None,
+  )
+
+  REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+  with open_db() as conn:
+    ensure_reports_table(conn)
+    ensure_analytics_indexes(conn)
+    ensure_events_table(conn)
+    conn.row_factory = sqlite3.Row
+
+    options_json = json.dumps(
+      {
+        "include": {
+          "presence": include_presence,
+          "air": include_air,
+          "events": include_events,
+          "rssi": include_rssi,
+        }
+      },
+      separators=(",", ":"),
+      ensure_ascii=False,
+    )
+    cur = conn.execute(
+      """
+      INSERT INTO reports (
+        ts_utc, ts_local, range_start_utc, range_end_utc, preset, options_json, file_path, status, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      """,
+      (
+        now_utc_iso(),
+        now_local_iso(),
+        range_info["start_utc"],
+        range_info["end_utc"],
+        range_info["preset"],
+        options_json,
+        "",
+        "running",
+        "",
+      ),
+    )
+    report_id = int(cur.lastrowid or 0)
+    conn.commit()
+
+    sample_sec = estimate_radar_sample_seconds(conn)
+    radar_row = conn.execute(
+      """
+      SELECT
+        SUM(CASE WHEN alive=1 AND target!=0 THEN 1 ELSE 0 END) AS present_samples,
+        SUM(CASE WHEN alive=1 THEN 1 ELSE 0 END) AS alive_samples,
+        SUM(CASE WHEN alive=1 AND move_en>0 THEN 1 ELSE 0 END) AS moving_samples,
+        SUM(CASE WHEN alive=1 AND stat_en>0 THEN 1 ELSE 0 END) AS still_samples
+      FROM radar
+      WHERE ts_utc >= ? AND ts_utc <= ?
+      """,
+      (range_info["start_utc"], range_info["end_utc"]),
+    ).fetchone()
+
+    present_samples = int(radar_row["present_samples"] or 0) if radar_row else 0
+    alive_samples = int(radar_row["alive_samples"] or 0) if radar_row else 0
+    moving_samples = int(radar_row["moving_samples"] or 0) if radar_row else 0
+    still_samples = int(radar_row["still_samples"] or 0) if radar_row else 0
+    minutes_present = (present_samples * sample_sec) / 60.0
+    total_minutes = max(1e-9, (parse_iso8601_utc(range_info["end_utc"]) - parse_iso8601_utc(range_info["start_utc"])).total_seconds() / 60.0)
+    percent_present = (minutes_present / total_minutes) * 100.0
+    presence_summary = {
+      "minutes_present": round(minutes_present, 2),
+      "percent_present": round(percent_present, 2),
+      "moving_minutes": round((moving_samples * sample_sec) / 60.0, 2),
+      "still_minutes": round((still_samples * sample_sec) / 60.0, 2),
+      "alive_samples": alive_samples,
+    }
+
+    air_row = conn.execute(
+      """
+      SELECT
+        AVG(a.eco2_ppm) AS avg_eco2,
+        MAX(a.eco2_ppm) AS max_eco2,
+        AVG(e.temp_c) AS avg_temp,
+        AVG(e.hum_pct) AS avg_hum
+      FROM air a
+      LEFT JOIN env e ON e.ts_utc = (
+        SELECT e2.ts_utc FROM env e2 WHERE e2.ts_utc <= a.ts_utc ORDER BY e2.ts_utc DESC LIMIT 1
+      )
+      WHERE a.ts_utc >= ? AND a.ts_utc <= ?
+      """,
+      (range_info["start_utc"], range_info["end_utc"]),
+    ).fetchone()
+    air_summary = {
+      "avg_eco2_ppm": round(float(air_row["avg_eco2"]), 2) if air_row and air_row["avg_eco2"] is not None else None,
+      "max_eco2_ppm": int(air_row["max_eco2"]) if air_row and air_row["max_eco2"] is not None else None,
+      "avg_temp_c": round(float(air_row["avg_temp"]), 2) if air_row and air_row["avg_temp"] is not None else None,
+      "avg_hum_pct": round(float(air_row["avg_hum"]), 2) if air_row and air_row["avg_hum"] is not None else None,
+    }
+
+    sev_rows = conn.execute(
+      "SELECT severity, COUNT(*) AS count FROM events WHERE ts_utc >= ? AND ts_utc <= ? GROUP BY severity",
+      (range_info["start_utc"], range_info["end_utc"]),
+    ).fetchall()
+    by_severity = {str(row["severity"] or "unknown"): int(row["count"] or 0) for row in sev_rows}
+    top_events = conn.execute(
+      """
+      SELECT ts_utc, ts_local, kind, severity, message
+      FROM events
+      WHERE ts_utc >= ? AND ts_utc <= ?
+      ORDER BY id DESC
+      LIMIT 10
+      """,
+      (range_info["start_utc"], range_info["end_utc"]),
+    ).fetchall()
+    events_summary = {
+      "by_severity": by_severity,
+      "top_events": [dict(row) for row in top_events],
+    }
+
+    rssi_row = conn.execute(
+      """
+      SELECT AVG(rssi) AS avg_rssi, MIN(rssi) AS min_rssi, MAX(rssi) AS max_rssi
+      FROM esp_net
+      WHERE ts_utc >= ? AND ts_utc <= ? AND rssi IS NOT NULL AND rssi != ?
+      """,
+      (range_info["start_utc"], range_info["end_utc"], RSSI_NOT_CONNECTED),
+    ).fetchone()
+    rssi_summary = {
+      "avg_rssi_dbm": round(float(rssi_row["avg_rssi"]), 2) if rssi_row and rssi_row["avg_rssi"] is not None else None,
+      "min_rssi_dbm": int(rssi_row["min_rssi"]) if rssi_row and rssi_row["min_rssi"] is not None else None,
+      "max_rssi_dbm": int(rssi_row["max_rssi"]) if rssi_row and rssi_row["max_rssi"] is not None else None,
+    }
+
+    health = api_health()
+    device_summary = {
+      "freshness": health.get("freshness", {}),
+      "ok": bool(health.get("ok")),
+    }
+
+    html_content = build_report_html(
+      range_info=range_info,
+      include_presence=include_presence,
+      include_air=include_air,
+      include_events=include_events,
+      include_rssi=include_rssi,
+      device_summary=device_summary,
+      presence_summary=presence_summary,
+      air_summary=air_summary,
+      events_summary=events_summary,
+      rssi_summary=rssi_summary,
+    )
+
+    filename = f"report_{report_id}_{int(time.time())}.html"
+    out_path = REPORTS_DIR / filename
+    out_path.write_text(html_content, encoding="utf-8")
+
+    conn.execute(
+      "UPDATE reports SET file_path=?, status=?, notes=? WHERE id=?",
+      (str(out_path), "done", "", report_id),
+    )
+    conn.commit()
+
+  return {
+    "report_id": report_id,
+    "status": "done",
+    "download_url": f"/api/reports/{report_id}/download",
+  }
+
+
+@APP.get("/api/reports")
+def api_reports_list(limit: int = Query(10, ge=1, le=50)) -> Dict[str, object]:
+  with open_db() as conn:
+    ensure_reports_table(conn)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+      """
+      SELECT id, ts_utc, ts_local, range_start_utc, range_end_utc, preset, options_json, file_path, status, notes
+      FROM reports
+      ORDER BY id DESC
+      LIMIT ?
+      """,
+      (limit,),
+    ).fetchall()
+  out = []
+  for row in rows:
+    item = dict(row)
+    item["download_url"] = f"/api/reports/{item['id']}/download"
+    out.append(item)
+  return {"rows": out}
+
+
+@APP.get("/api/reports/{report_id}/download")
+def api_reports_download(report_id: int) -> FileResponse:
+  with open_db() as conn:
+    ensure_reports_table(conn)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+      "SELECT id, file_path, status FROM reports WHERE id=?",
+      (int(report_id),),
+    ).fetchone()
+  if not row:
+    raise HTTPException(status_code=404, detail="report not found")
+  if str(row["status"] or "") != "done":
+    raise HTTPException(status_code=409, detail="report not ready")
+  file_path = Path(str(row["file_path"] or ""))
+  if not file_path.exists() or not file_path.is_file():
+    raise HTTPException(status_code=404, detail="report file missing")
+  return FileResponse(path=str(file_path), media_type="text/html", filename=file_path.name)
+
+
+@APP.get("/api/history")
+def api_history(
+    kind: str = Query("radar"),
+    range: str = Query("24h"),
+    limit: int = Query(500, ge=1, le=5000),
+    q: str = Query(""),
+    start_local: str = Query(""),
+    end_local: str = Query(""),
+) -> Dict[str, object]:
+  table_by_kind = {
+    "radar": "radar",
+    "events": "events",
+    "env": "env",
+  }
+  kind_norm = str(kind or "radar").strip().lower()
+  if kind_norm not in table_by_kind:
+    raise HTTPException(status_code=400, detail="kind must be one of radar, events, env")
+
+  range_info = resolve_range_utc_from_request(
+    preset=str(range or "24h"),
+    start_local=start_local or None,
+    end_local=end_local or None,
+  )
+
+  table = table_by_kind[kind_norm]
+  with open_db() as conn:
+    conn.row_factory = sqlite3.Row
+    where = ["ts_utc >= ?", "ts_utc <= ?"]
+    params: List[object] = [range_info["start_utc"], range_info["end_utc"]]
+    q_norm = str(q or "").strip()
+    if q_norm:
+      like = f"%{q_norm}%"
+      if table == "events":
+        where.append("(message LIKE ? OR kind LIKE ? OR source LIKE ?)")
+        params.extend([like, like, like])
+      elif table == "radar":
+        where.append("(CAST(target AS TEXT) LIKE ? OR CAST(detect_cm AS TEXT) LIKE ? OR CAST(move_en AS TEXT) LIKE ? OR CAST(stat_en AS TEXT) LIKE ?)")
+        params.extend([like, like, like, like])
+      else:
+        where.append("(CAST(temp_c AS TEXT) LIKE ? OR CAST(hum_pct AS TEXT) LIKE ?)")
+        params.extend([like, like])
+
+    sql = f"SELECT * FROM {table} WHERE " + " AND ".join(where) + " ORDER BY id DESC LIMIT ?"
+    rows = conn.execute(sql, (*params, int(limit))).fetchall()
+  return {
+    "kind": kind_norm,
+    "range": range_info,
+    "limit": int(limit),
+    "rows": [dict(row) for row in rows],
+  }
+
+
+@APP.get("/api/history/export.csv")
+def api_history_export_csv(
+    kind: str = Query("radar"),
+    range: str = Query("24h"),
+    limit: int = Query(500, ge=1, le=5000),
+    q: str = Query(""),
+    start_local: str = Query(""),
+    end_local: str = Query(""),
+) -> Response:
+  payload = api_history(kind=kind, range=range, limit=limit, q=q, start_local=start_local, end_local=end_local)
+  rows = payload.get("rows", []) or []
+  output = io.StringIO()
+  if rows:
+    fieldnames = list(rows[0].keys())
+  else:
+    fieldnames = ["id", "ts_utc"]
+  writer = csv.DictWriter(output, fieldnames=fieldnames)
+  writer.writeheader()
+  for row in rows:
+    writer.writerow({k: row.get(k) for k in fieldnames})
+  csv_text = output.getvalue()
+  filename = f"history_{payload.get('kind', 'data')}_{int(time.time())}.csv"
+  headers = {"Content-Disposition": f"attachment; filename={filename}"}
+  return Response(content=csv_text, media_type="text/csv", headers=headers)
+
+
 HTML_PAGE = """
 <!doctype html>
 <html>
@@ -2011,6 +2508,7 @@ HTML_PAGE = """
         <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
       </div>
       <div id=\"chartSlotControls\" class=\"chart-slot-controls\"></div>
+      <div style=\"margin-top:10px\"><button onclick=\"window.location.href='/reports'\">Generate report</button></div>
     </div>
   </div>
 
@@ -2144,6 +2642,7 @@ def render_shell_page(active_path: str, title: str, body_html: str, script_js: s
 
 def render_analytics_page() -> str:
   body = """
+  <div class=\"card\"><button onclick=\"window.location.href='/reports'\">Report</button></div>
   <div class=\"card\">
     <b>Presence Minutes by Hour (last 24h)</b>
     <div class=\"muted\" style=\"margin-top:4px\">Estimated minutes with alive presence by local hour.</div>
@@ -2473,6 +2972,376 @@ def render_settings_page() -> str:
   })();
   """
   return render_shell_page("/settings", "HERMES Settings", body, script)
+
+
+def render_reports_page() -> str:
+  body = """
+  <div class=\"card\">
+    <div style=\"display:grid;grid-template-columns:repeat(2,minmax(240px,1fr));gap:10px\">
+      <label>Preset
+        <select id=\"reportPreset\">
+          <option value=\"24h\">24h</option>
+          <option value=\"3d\">3d</option>
+          <option value=\"1w\">1w</option>
+          <option value=\"1m\">1m</option>
+          <option value=\"custom\">Custom</option>
+        </select>
+      </label>
+      <label>Start (custom)
+        <input id=\"reportStart\" type=\"datetime-local\" />
+      </label>
+      <label>End (custom)
+        <input id=\"reportEnd\" type=\"datetime-local\" />
+      </label>
+    </div>
+    <div style=\"margin-top:10px;display:flex;gap:12px;flex-wrap:wrap\">
+      <label><input id=\"incPresence\" type=\"checkbox\" checked /> Presence summary</label>
+      <label><input id=\"incAir\" type=\"checkbox\" checked /> Air quality</label>
+      <label><input id=\"incEvents\" type=\"checkbox\" checked /> Events summary</label>
+      <label><input id=\"incRssi\" type=\"checkbox\" /> RSSI summary</label>
+    </div>
+    <div style=\"margin-top:12px;display:flex;gap:8px;align-items:center\">
+      <button id=\"genReportBtn\">Generate</button>
+      <span id=\"reportMsg\" class=\"muted\"></span>
+    </div>
+  </div>
+
+  <div class=\"card\">
+    <b>Recent reports</b>
+    <div id=\"reportsList\" style=\"margin-top:10px\" class=\"muted\">loading...</div>
+  </div>
+  """
+  script = """
+  function customVisible() {
+    const custom = (document.getElementById('reportPreset')?.value || '') === 'custom';
+    document.getElementById('reportStart').disabled = !custom;
+    document.getElementById('reportEnd').disabled = !custom;
+  }
+
+  async function fetchJson(url, opts) {
+    const r = await fetch(url, opts || { cache: 'no-store' });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error('HTTP ' + r.status + ' ' + url + ' :: ' + txt.slice(0, 200));
+    }
+    return await r.json();
+  }
+
+  async function loadReports() {
+    const data = await fetchJson('/api/reports?limit=10');
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const root = document.getElementById('reportsList');
+    if (!root) return;
+    if (!rows.length) {
+      root.textContent = 'No reports yet.';
+      return;
+    }
+    root.innerHTML = rows.map((row) =>
+      '<div style="border-bottom:1px solid #26313d;padding:8px 0">'
+      + '<div><b>#' + row.id + '</b> · ' + (row.preset || '?') + ' · ' + (row.range_start_utc || '') + ' → ' + (row.range_end_utc || '') + '</div>'
+      + '<div class="muted">Created ' + (row.ts_local || row.ts_utc || '') + ' · status=' + (row.status || '') + '</div>'
+      + '<div style="margin-top:4px"><a href="' + row.download_url + '">Download</a></div>'
+      + '</div>'
+    ).join('');
+  }
+
+  async function generateReport() {
+    const msg = document.getElementById('reportMsg');
+    if (msg) msg.textContent = 'Generating...';
+    const payload = {
+      preset: document.getElementById('reportPreset')?.value || '24h',
+      start_local: document.getElementById('reportStart')?.value || null,
+      end_local: document.getElementById('reportEnd')?.value || null,
+      include: {
+        presence: !!document.getElementById('incPresence')?.checked,
+        air: !!document.getElementById('incAir')?.checked,
+        events: !!document.getElementById('incEvents')?.checked,
+        rssi: !!document.getElementById('incRssi')?.checked,
+      },
+    };
+    const out = await fetchJson('/api/reports/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (msg) msg.innerHTML = 'Done. <a href="' + out.download_url + '">Download report</a>';
+    await loadReports();
+  }
+
+  (async () => {
+    const preset = document.getElementById('reportPreset');
+    if (preset) preset.addEventListener('change', customVisible);
+    document.getElementById('genReportBtn')?.addEventListener('click', () => generateReport().catch((e) => {
+      const msg = document.getElementById('reportMsg');
+      if (msg) msg.textContent = 'Failed: ' + String(e.message || e);
+    }));
+    customVisible();
+    await loadReports();
+  })();
+  """
+  return render_shell_page("/reports", "HERMES Reports", body, script)
+
+
+def render_calibration_page() -> str:
+  body = """
+  <div class=\"card\">
+    <b>Empty-room calibration</b>
+    <div class=\"muted\" style=\"margin-top:5px\">Clear humans within 6m for 60 seconds.</div>
+    <div style=\"margin-top:10px;display:flex;gap:8px;flex-wrap:wrap\">
+      <button id=\"calStart\">Start</button>
+      <button id=\"calCancel\">Cancel</button>
+      <button id=\"calSelfCheck\">Run quick sensor self-check</button>
+      <span id=\"calMsg\" class=\"muted\"></span>
+    </div>
+    <div style=\"margin-top:12px;border:1px solid #26313d;border-radius:999px;height:12px;background:#111820;overflow:hidden\"><div id=\"calBar\" style=\"height:100%;width:0%;background:#4ca9ff\"></div></div>
+    <div style=\"margin-top:10px;display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:10px\">
+      <div><span class=\"muted\">Status</span><div id=\"calStatus\">idle</div></div>
+      <div><span class=\"muted\">Countdown</span><div id=\"calRemain\">--</div></div>
+      <div><span class=\"muted\">Samples</span><div id=\"calSamples\">0</div></div>
+      <div><span class=\"muted\">False positives</span><div id=\"calFalse\">0</div></div>
+    </div>
+    <div style=\"margin-top:10px\"><span class=\"muted\">Result</span><div id=\"calResult\">-</div></div>
+  </div>
+
+  <div class=\"card\">
+    <b>Calibration history (last 10)</b>
+    <div id=\"calHistory\" style=\"margin-top:10px\" class=\"muted\">loading...</div>
+  </div>
+  """
+  script = """
+  let calSessionId = '';
+  let calPoll = null;
+  let calTotal = 70;
+
+  async function fetchJson(url, opts) {
+    const r = await fetch(url, opts || { cache: 'no-store' });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error('HTTP ' + r.status + ' ' + url + ' :: ' + txt.slice(0, 200));
+    }
+    return await r.json();
+  }
+
+  function renderProgress(data) {
+    const st = String(data.status || 'idle');
+    const rem = Number(data.remaining_s || 0);
+    const pre = Number(data.pre_remaining_s || 0);
+    const phase = String(data.phase || st);
+    const elapsed = phase === 'prepare' ? (10 - pre) : (10 + (Number(data.duration_s || 60) - rem));
+    const pct = Math.max(0, Math.min(100, (elapsed / Math.max(1, calTotal)) * 100));
+    const bar = document.getElementById('calBar');
+    if (bar) bar.style.width = pct.toFixed(1) + '%';
+    const statusEl = document.getElementById('calStatus');
+    if (statusEl) statusEl.textContent = phase;
+    const remEl = document.getElementById('calRemain');
+    if (remEl) remEl.textContent = String(rem);
+    const sEl = document.getElementById('calSamples');
+    if (sEl) sEl.textContent = String(data.samples || 0);
+    const fEl = document.getElementById('calFalse');
+    if (fEl) fEl.textContent = String(data.false_presence_count || 0);
+    if (st === 'done' && data.result) {
+      const r = data.result;
+      const resultEl = document.getElementById('calResult');
+      if (resultEl) resultEl.textContent = 'baseline=' + (r.baseline_detect_cm ?? 'n/a') + 'cm, noise=' + (r.noise_detect_cm ?? 'n/a') + ', false=' + (r.false_presence_count ?? 0);
+    }
+  }
+
+  async function loadHistory() {
+    const data = await fetchJson('/api/radar/calibration/history?limit=10');
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const el = document.getElementById('calHistory');
+    if (!el) return;
+    if (!rows.length) {
+      el.textContent = 'No calibration rows yet.';
+      return;
+    }
+    el.innerHTML = rows.map((row) =>
+      '<div style="border-bottom:1px solid #26313d;padding:6px 0">#' + row.id
+      + ' · ' + (row.ts_local || row.ts_utc || '')
+      + ' · baseline ' + (row.baseline_detect_cm ?? 'n/a')
+      + ' · noise ' + (row.noise_detect_cm ?? 'n/a')
+      + ' · false ' + (row.false_presence_count ?? 0)
+      + '</div>'
+    ).join('');
+  }
+
+  async function pollCal() {
+    if (!calSessionId) return;
+    const data = await fetchJson('/api/radar/calibrate/' + calSessionId);
+    renderProgress(data);
+    if (String(data.status || '') === 'done' || String(data.status || '') === 'cancelled' || String(data.status || '') === 'error') {
+      if (calPoll) { clearInterval(calPoll); calPoll = null; }
+      calSessionId = '';
+      await loadHistory();
+    }
+  }
+
+  async function startCal() {
+    const msg = document.getElementById('calMsg');
+    if (msg) msg.textContent = 'Starting...';
+    const data = await fetchJson('/api/radar/calibrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ duration_s: 60, max_range_cm: 600 }),
+    });
+    calSessionId = String(data.session_id || '');
+    calTotal = Number((data.duration_s || 60) + (data.pre_countdown_s || 10));
+    if (calPoll) clearInterval(calPoll);
+    calPoll = setInterval(() => pollCal().catch((e) => {
+      const msg2 = document.getElementById('calMsg');
+      if (msg2) msg2.textContent = 'Poll failed: ' + String(e.message || e);
+    }), 1000);
+    await pollCal();
+    if (msg) msg.textContent = 'Running.';
+  }
+
+  async function cancelCal() {
+    if (!calSessionId) return;
+    await fetchJson('/api/radar/calibrate/' + calSessionId + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    await pollCal();
+  }
+
+  async function selfCheck() {
+    const [radar, env, health] = await Promise.all([
+      fetchJson('/api/radar/latest'),
+      fetchJson('/api/latest/env?limit=1'),
+      fetchJson('/api/health'),
+    ]);
+    const okRadar = Number(radar.alive || 0) === 1;
+    const okEnv = Array.isArray(env.rows) && env.rows.length > 0;
+    const f = health.freshness || {};
+    const okHealth = String(f['RADAR'] || '') === 'ok' || String(f['RADAR'] || '') === 'stale';
+    const msg = document.getElementById('calMsg');
+    if (msg) msg.textContent = (okRadar && okEnv && okHealth) ? 'Self-check: GREEN' : 'Self-check: RED';
+  }
+
+  (async () => {
+    document.getElementById('calStart')?.addEventListener('click', () => startCal().catch((e) => {
+      const msg = document.getElementById('calMsg');
+      if (msg) msg.textContent = 'Start failed: ' + String(e.message || e);
+    }));
+    document.getElementById('calCancel')?.addEventListener('click', () => cancelCal().catch((e) => {
+      const msg = document.getElementById('calMsg');
+      if (msg) msg.textContent = 'Cancel failed: ' + String(e.message || e);
+    }));
+    document.getElementById('calSelfCheck')?.addEventListener('click', () => selfCheck().catch((e) => {
+      const msg = document.getElementById('calMsg');
+      if (msg) msg.textContent = 'Self-check failed: ' + String(e.message || e);
+    }));
+    await loadHistory();
+  })();
+  """
+  return render_shell_page("/calibration", "HERMES Calibration", body, script)
+
+
+def render_history_page() -> str:
+  body = """
+  <div class=\"card\">
+    <div style=\"display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:10px\">
+      <label>Kind
+        <select id=\"histKind\"><option value=\"radar\">radar</option><option value=\"events\">events</option><option value=\"env\">env</option></select>
+      </label>
+      <label>Range
+        <select id=\"histRange\"><option value=\"24h\">24h</option><option value=\"3d\">3d</option><option value=\"1w\">1w</option><option value=\"1m\">1m</option><option value=\"custom\">Custom</option></select>
+      </label>
+      <label>Limit
+        <select id=\"histLimit\"><option>200</option><option selected>500</option><option>1000</option><option>5000</option></select>
+      </label>
+      <label>Custom start
+        <input id=\"histStart\" type=\"datetime-local\" />
+      </label>
+      <label>Custom end
+        <input id=\"histEnd\" type=\"datetime-local\" />
+      </label>
+      <label>Search
+        <input id=\"histQ\" type=\"text\" placeholder=\"message/fields\" />
+      </label>
+    </div>
+    <div style=\"margin-top:10px;display:flex;gap:8px;align-items:center\">
+      <button id=\"histRun\">Run</button>
+      <button id=\"histCsv\">Export CSV</button>
+      <span id=\"histMsg\" class=\"muted\"></span>
+    </div>
+  </div>
+  <div class=\"card\">
+    <div id=\"histMeta\" class=\"muted\"></div>
+    <div style=\"overflow:auto;margin-top:8px\"><table id=\"histTable\" style=\"width:100%;border-collapse:collapse\"></table></div>
+  </div>
+  """
+  script = """
+  function customEnabled() {
+    const custom = (document.getElementById('histRange')?.value || '') === 'custom';
+    document.getElementById('histStart').disabled = !custom;
+    document.getElementById('histEnd').disabled = !custom;
+  }
+
+  function buildParams() {
+    const p = new URLSearchParams();
+    p.set('kind', document.getElementById('histKind')?.value || 'radar');
+    p.set('range', document.getElementById('histRange')?.value || '24h');
+    p.set('limit', document.getElementById('histLimit')?.value || '500');
+    const q = document.getElementById('histQ')?.value || '';
+    if (q.trim()) p.set('q', q.trim());
+    const start = document.getElementById('histStart')?.value || '';
+    const end = document.getElementById('histEnd')?.value || '';
+    if (start) p.set('start_local', start);
+    if (end) p.set('end_local', end);
+    return p;
+  }
+
+  async function fetchJson(url) {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error('HTTP ' + r.status + ' ' + url + ' :: ' + txt.slice(0, 200));
+    }
+    return await r.json();
+  }
+
+  function renderRows(rows) {
+    const table = document.getElementById('histTable');
+    if (!table) return;
+    if (!rows.length) {
+      table.innerHTML = '<tr><td class="muted">No rows.</td></tr>';
+      return;
+    }
+    const cols = Object.keys(rows[0]);
+    const head = '<thead><tr>' + cols.map((c) => '<th style="text-align:left;border-bottom:1px solid #26313d;padding:6px 8px">' + c + '</th>').join('') + '</tr></thead>';
+    const body = '<tbody>' + rows.map((row) => '<tr>' + cols.map((c) => '<td style="border-bottom:1px solid #26313d;padding:6px 8px;white-space:nowrap">' + String(row[c] ?? '') + '</td>').join('') + '</tr>').join('') + '</tbody>';
+    table.innerHTML = head + body;
+  }
+
+  async function runHistory() {
+    const msg = document.getElementById('histMsg');
+    if (msg) msg.textContent = 'Loading...';
+    const params = buildParams();
+    const data = await fetchJson('/api/history?' + params.toString());
+    renderRows(Array.isArray(data.rows) ? data.rows : []);
+    const meta = document.getElementById('histMeta');
+    if (meta) {
+      const r = data.range || {};
+      meta.textContent = 'Rows: ' + (data.rows || []).length + ' · Range: ' + (r.start_local || '') + ' → ' + (r.end_local || '');
+    }
+    if (msg) msg.textContent = 'Done.';
+  }
+
+  function exportCsv() {
+    const params = buildParams();
+    window.location.href = '/api/history/export.csv?' + params.toString();
+  }
+
+  (async () => {
+    document.getElementById('histRange')?.addEventListener('change', customEnabled);
+    document.getElementById('histRun')?.addEventListener('click', () => runHistory().catch((e) => {
+      const msg = document.getElementById('histMsg');
+      if (msg) msg.textContent = 'Failed: ' + String(e.message || e);
+    }));
+    document.getElementById('histCsv')?.addEventListener('click', exportCsv);
+    customEnabled();
+    await runHistory();
+  })();
+  """
+  return render_shell_page("/history", "HERMES History", body, script)
 
 
 JS_BUNDLE = r"""
@@ -4236,7 +5105,7 @@ def index() -> HTMLResponse:
 
 @APP.get("/history", response_class=HTMLResponse)
 def history_page() -> HTMLResponse:
-  return HTMLResponse(render_dashboard_page("/history"))
+  return HTMLResponse(render_history_page())
 
 
 @APP.get("/events", response_class=HTMLResponse)
@@ -4251,7 +5120,12 @@ def analytics_page() -> HTMLResponse:
 
 @APP.get("/calibration", response_class=HTMLResponse)
 def calibration_page() -> HTMLResponse:
-  return HTMLResponse(render_dashboard_page("/calibration"))
+  return HTMLResponse(render_calibration_page())
+
+
+@APP.get("/reports", response_class=HTMLResponse)
+def reports_page() -> HTMLResponse:
+  return HTMLResponse(render_reports_page())
 
 
 @APP.get("/settings", response_class=HTMLResponse)
