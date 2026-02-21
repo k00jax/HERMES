@@ -46,6 +46,7 @@ EXPECTED_PREFIXES = {
     "LIGHT": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
     "MIC": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
     "ESP,NET": {"period_s": 5.0, "stale_s": 20.0, "dead_s": 60.0},
+    "RADAR": {"period_s": 0.1, "stale_s": 2.0, "dead_s": 10.0},
 }
 
 WIFI_CONNECTED_STATES = {1, 3}
@@ -267,6 +268,21 @@ def init_db(conn: sqlite3.Connection):
         );
         """)
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS radar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            ts_local TEXT,
+            alive INTEGER,
+            target INTEGER,
+            move_cm INTEGER,
+            stat_cm INTEGER,
+            detect_cm INTEGER,
+            move_en INTEGER,
+            stat_en INTEGER,
+            frame_ts_ms INTEGER
+        );
+        """)
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS parse_fail (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_utc TEXT NOT NULL,
@@ -304,6 +320,15 @@ def init_db(conn: sqlite3.Connection):
         ensure_column(conn, "light", "ts_local", "TEXT")
         ensure_column(conn, "mic_noise", "ts_local", "TEXT")
         ensure_column(conn, "esp_net", "ts_local", "TEXT")
+        ensure_column(conn, "radar", "ts_local", "TEXT")
+        ensure_column(conn, "radar", "alive", "INTEGER")
+        ensure_column(conn, "radar", "target", "INTEGER")
+        ensure_column(conn, "radar", "move_cm", "INTEGER")
+        ensure_column(conn, "radar", "stat_cm", "INTEGER")
+        ensure_column(conn, "radar", "detect_cm", "INTEGER")
+        ensure_column(conn, "radar", "move_en", "INTEGER")
+        ensure_column(conn, "radar", "stat_en", "INTEGER")
+        ensure_column(conn, "radar", "frame_ts_ms", "INTEGER")
         ensure_column(conn, "parse_fail", "ts_local", "TEXT")
         ensure_column(conn, "events", "ts_local", "TEXT")
         ensure_column(conn, "events", "kind", "TEXT")
@@ -326,6 +351,8 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mic_noise_local ON mic_noise(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_esp_net_ts ON esp_net(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_esp_net_local ON esp_net(ts_local);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_radar_ts ON radar(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_radar_local ON radar(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_ts ON oled_status(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oled_status_local ON oled_status(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_fail_ts ON parse_fail(ts_utc);")
@@ -458,7 +485,7 @@ def record_ingest_health(
         bump_counter(ingest_health["frame_counts_window"], prefix)
         ingest_health["last_seen_by_prefix"][prefix] = ts
         stats["last_seen_nrf"] = ts
-        if prefix in {"SENS", "LOG", "LIGHT", "ESP,NET"}:
+        if prefix in {"SENS", "LOG", "LIGHT", "ESP,NET", "RADAR"}:
             stats["last_seen_esp"] = ts
 
         if corrupt:
@@ -598,6 +625,25 @@ def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: 
             (ts, ts_local, wifist, rssi, ntp, ip),
         )
         return
+    if kind == "RADAR":
+        alive = parse_int(kvs.get("alive"))
+        target = parse_int(kvs.get("target"))
+        move_cm = parse_int(kvs.get("move_cm"))
+        stat_cm = parse_int(kvs.get("stat_cm"))
+        detect_cm = parse_int(kvs.get("detect_cm"))
+        move_en = parse_int(kvs.get("move_en"))
+        stat_en = parse_int(kvs.get("stat_en"))
+        frame_ts_ms = parse_int(kvs.get("frame_ts_ms"))
+        if all(
+            value is None
+            for value in [alive, target, move_cm, stat_cm, detect_cm, move_en, stat_en, frame_ts_ms]
+        ):
+            return
+        conn.execute(
+            "INSERT INTO radar (ts_utc, ts_local, alive, target, move_cm, stat_cm, detect_cm, move_en, stat_en, frame_ts_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, ts_local, alive, target, move_cm, stat_cm, detect_cm, move_en, stat_en, frame_ts_ms),
+        )
+        return
     if kind == "HB":
         tick = parse_int(kvs.get("tick"))
         seq = parse_int(kvs.get("seq"))
@@ -706,6 +752,46 @@ def classify_parse_failure(line: str):
         if wifist in WIFI_CONNECTED_STATES and not valid_rssi_dbm(rssi):
             return "bad_range", "ESP,NET"
         return None, "ESP,NET"
+
+    if prefix == "RADAR":
+        alive_raw = kvs.get("alive")
+        target_raw = kvs.get("target")
+        move_cm_raw = kvs.get("move_cm")
+        stat_cm_raw = kvs.get("stat_cm")
+        detect_cm_raw = kvs.get("detect_cm")
+        move_en_raw = kvs.get("move_en")
+        stat_en_raw = kvs.get("stat_en")
+        frame_ts_ms_raw = kvs.get("frame_ts_ms")
+
+        alive = parse_int(alive_raw)
+        target = parse_int(target_raw)
+        move_cm = parse_int(move_cm_raw)
+        stat_cm = parse_int(stat_cm_raw)
+        detect_cm = parse_int(detect_cm_raw)
+        move_en = parse_int(move_en_raw)
+        stat_en = parse_int(stat_en_raw)
+        frame_ts_ms = parse_int(frame_ts_ms_raw)
+
+        if all(raw is None for raw in [alive_raw, target_raw, move_cm_raw, stat_cm_raw, detect_cm_raw, move_en_raw, stat_en_raw, frame_ts_ms_raw]):
+            return "missing_fields", prefix
+        for raw, parsed in [
+            (alive_raw, alive),
+            (target_raw, target),
+            (move_cm_raw, move_cm),
+            (stat_cm_raw, stat_cm),
+            (detect_cm_raw, detect_cm),
+            (move_en_raw, move_en),
+            (stat_en_raw, stat_en),
+            (frame_ts_ms_raw, frame_ts_ms),
+        ]:
+            if raw is not None and parsed is None:
+                return "bad_int", prefix
+
+        if alive is not None and alive not in {0, 1}:
+            return "bad_range", prefix
+        if target is not None and target not in {0, 1, 2, 3}:
+            return "bad_range", prefix
+        return None, prefix
 
     if prefix == "HB":
         tick_raw = kvs.get("tick")

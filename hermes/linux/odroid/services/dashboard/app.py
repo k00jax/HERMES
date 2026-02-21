@@ -37,8 +37,9 @@ DB_PATH = Path("/home/odroid/hermes-data/db/hermes.sqlite3")
 DB_TIMEOUT_SECS = float(os.environ.get("HERMES_DB_TIMEOUT_SECS", "2.0"))
 MAX_CACHE_KEYS = int(os.environ.get("HERMES_CHART_CACHE_KEYS", "64"))
 
-TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
-FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "ESP,NET")
+TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net", "radar")
+READY_TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
+FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "ESP,NET", "RADAR")
 
 SERIES_MAP = {
   "env_temp": {"table": "env", "column": "temp_c", "label": "Temp (C)", "color": "#4fc3f7", "stepped": False},
@@ -47,6 +48,7 @@ SERIES_MAP = {
   "air_tvoc": {"table": "air", "column": "tvoc_ppb", "label": "TVOC (ppb)", "color": "#ba68c8", "stepped": False},
   "esp_rssi": {"table": "esp_net", "column": "rssi", "label": "RSSI (dBm)", "color": "#ef5350", "stepped": False},
   "esp_wifist": {"table": "esp_net", "column": "wifist", "label": "WiFi State", "color": "#90a4ae", "stepped": True},
+  "radar_target": {"table": "radar", "column": "target", "label": "Presence Target (0-3)", "color": "#66bb6a", "stepped": True},
 }
 
 CHART_CACHE_TTL_SECS = 5.0
@@ -154,7 +156,13 @@ def current_table_ages(conn: sqlite3.Connection) -> Dict[str, float]:
   now = datetime.datetime.now(datetime.timezone.utc)
   ages: Dict[str, float] = {}
   for table in TABLES:
-    row = conn.execute(f"SELECT ts_utc FROM {table} ORDER BY id DESC LIMIT 1").fetchone()
+    try:
+      row = conn.execute(f"SELECT ts_utc FROM {table} ORDER BY id DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError as exc:
+      if "no such table" in str(exc).lower():
+        ages[table] = -1.0
+        continue
+      raise
     if not row or row[0] is None:
       ages[table] = -1.0
       continue
@@ -461,7 +469,8 @@ def build_ready_state() -> Dict[str, object]:
     except Exception:
       failures.append("db_unreadable")
 
-  for table, age in table_age_seconds.items():
+  for table in READY_TABLES:
+    age = table_age_seconds.get(table, -1.0)
     if age < 0:
       failures.append(f"stale_{table}:missing")
       continue
@@ -512,6 +521,8 @@ def query_series(series: str, minutes: int) -> List[Dict[str, object]]:
       with open_db() as conn:
         rows = conn.execute(sql, (cutoff,)).fetchall()
     except sqlite3.OperationalError as exc:
+      if "no such table" in str(exc).lower():
+        return []
       if "locked" in str(exc).lower():
         global db_locked_count
         with db_locked_count_lock:
@@ -563,6 +574,7 @@ def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, objec
             "air_eco2": 60.0,
             "air_tvoc": 40.0,
             "esp_rssi": 10.0,
+            "radar_target": 3.0,
           }
           robust_q_by_series = {
             "esp_rssi": 0.90,
@@ -1192,7 +1204,7 @@ HTML_PAGE = """
 
 
 JS_BUNDLE = r"""
-const tables = ['hb','env','air','light','mic_noise','esp_net'];
+const tables = ['hb','env','air','light','mic_noise','esp_net','radar'];
 const tableLabels = {
   hb: 'Heartbeat',
   env: 'Environment',
@@ -1200,9 +1212,11 @@ const tableLabels = {
   light: 'Light',
   mic_noise: 'Microphone',
   esp_net: 'Wi-Fi',
+  radar: 'Human Presence',
 };
-const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET'];
+const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET','RADAR'];
 const trendSeries = [
+  { key: 'radar_target', title: 'Presence', unit: '', decimals: 0, table: 'radar' },
   { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0, table: 'air' },
   { key: 'env_temp', title: 'Temp', unit: '°C', decimals: 1, table: 'env' },
   { key: 'env_hum', title: 'Humidity', unit: '%', decimals: 1, table: 'env' },

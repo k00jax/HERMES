@@ -698,6 +698,11 @@ static void handleSerial1() {
           } else {
             parseFail++;
           }
+        } else if (strncmp(rxBuffer, "RADAR,", 6) == 0) {
+          const uint32_t now = millis();
+          emitFrame("RADAR", rxBuffer + 6);
+          lastLineMs = now;
+          linesOk++;
         }
       }
       rxLen = 0;
