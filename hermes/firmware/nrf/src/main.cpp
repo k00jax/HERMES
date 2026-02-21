@@ -21,7 +21,7 @@ static void handleLine(char *line, uint32_t now);
 #define HERMES_SERIAL Serial
 #define ENABLE_USB_EXPORT 1
 #define ENABLE_ESP_CMD 1
-#define HERMES_INPUT_BUZZER_TEST 1
+#define HERMES_INPUT_BUZZER_TEST 0
 
 #define SR_DATA   D8
 #define SR_CLOCK  D9
