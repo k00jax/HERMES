@@ -65,6 +65,20 @@ SETTINGS_DEFAULTS = {
   "chart_slot_b": "env_temp",
   "chart_slot_c": "env_hum",
   "chart_slot_d": "air_tvoc",
+  "chime_event_air_spike": "warn_radiation_spike",
+  "chime_event_wifi_drop": "warn_low_power",
+  "chime_event_reboot_detected": "warn_system_fault",
+}
+
+VALID_CHIME_KEYS = {
+  "none",
+  "startup_vault_boot",
+  "startup_atomic_sunrise",
+  "startup_radiant_bootloader",
+  "startup_field_unit_online",
+  "warn_radiation_spike",
+  "warn_system_fault",
+  "warn_low_power",
 }
 
 SERIES_MAP = {
@@ -307,6 +321,14 @@ def get_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
   ):
     chosen = str(result.get(slot_key) or fallback)
     result[slot_key] = chosen if chosen in valid_chart else fallback
+
+  for chime_key, fallback in (
+      ("chime_event_air_spike", "warn_radiation_spike"),
+      ("chime_event_wifi_drop", "warn_low_power"),
+      ("chime_event_reboot_detected", "warn_system_fault"),
+  ):
+    chosen = str(result.get(chime_key) or fallback)
+    result[chime_key] = chosen if chosen in VALID_CHIME_KEYS else fallback
   return result
 
 
@@ -335,6 +357,15 @@ def save_settings_payload(conn: sqlite3.Connection, updates: Dict[str, object]) 
     if slot_key in updates:
       chosen = str(updates.get(slot_key) or fallback)
       merged[slot_key] = chosen if chosen in valid_chart else fallback
+
+  for chime_key, fallback in (
+      ("chime_event_air_spike", "warn_radiation_spike"),
+      ("chime_event_wifi_drop", "warn_low_power"),
+      ("chime_event_reboot_detected", "warn_system_fault"),
+  ):
+    if chime_key in updates:
+      chosen = str(updates.get(chime_key) or fallback)
+      merged[chime_key] = chosen if chosen in VALID_CHIME_KEYS else fallback
 
   now_ts = now_utc_iso()
   for key in SETTINGS_DEFAULTS:
@@ -2928,6 +2959,15 @@ def render_settings_page() -> str:
       <span id=\"saveMsg\" class=\"muted\"></span>
     </div>
   </div>
+  <div class=\"card\">
+    <b>Chime assignments</b>
+    <div class=\"muted\" style=\"margin-top:4px\">Assign a melody to each event type.</div>
+    <div style=\"display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px;margin-top:10px\">
+      <label>Air spike <select id=\"chimeAirSpike\"></select></label>
+      <label>WiFi drop <select id=\"chimeWifiDrop\"></select></label>
+      <label>Reboot detected <select id=\"chimeRebootDetected\"></select></label>
+    </div>
+  </div>
   """
   script = """
   const trends = [
@@ -2935,6 +2975,17 @@ def render_settings_page() -> str:
     { key: 'env_temp', title: 'Temp' },
     { key: 'env_hum', title: 'Humidity' },
     { key: 'air_tvoc', title: 'TVOC' },
+  ];
+
+  const chimeOptions = [
+    { key: 'none', title: 'None' },
+    { key: 'startup_vault_boot', title: 'Startup · Vault Boot' },
+    { key: 'startup_atomic_sunrise', title: 'Startup · Atomic Sunrise' },
+    { key: 'startup_radiant_bootloader', title: 'Startup · Radiant Bootloader' },
+    { key: 'startup_field_unit_online', title: 'Startup · Field Unit Online' },
+    { key: 'warn_radiation_spike', title: 'Warning · Radiation Spike' },
+    { key: 'warn_system_fault', title: 'Warning · System Fault' },
+    { key: 'warn_low_power', title: 'Warning · Low Power' },
   ];
 
   function fillTrendSelect(id) {
@@ -2945,6 +2996,18 @@ def render_settings_page() -> str:
       const opt = document.createElement('option');
       opt.value = t.key;
       opt.textContent = t.title;
+      el.appendChild(opt);
+    }
+  }
+
+  function fillChimeSelect(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = '';
+    for (const c of chimeOptions) {
+      const opt = document.createElement('option');
+      opt.value = c.key;
+      opt.textContent = c.title;
       el.appendChild(opt);
     }
   }
@@ -2963,6 +3026,9 @@ def render_settings_page() -> str:
       chart_slot_b: document.getElementById('slotB')?.value || 'env_temp',
       chart_slot_c: document.getElementById('slotC')?.value || 'env_hum',
       chart_slot_d: document.getElementById('slotD')?.value || 'air_tvoc',
+      chime_event_air_spike: document.getElementById('chimeAirSpike')?.value || 'warn_radiation_spike',
+      chime_event_wifi_drop: document.getElementById('chimeWifiDrop')?.value || 'warn_low_power',
+      chime_event_reboot_detected: document.getElementById('chimeRebootDetected')?.value || 'warn_system_fault',
     };
   }
 
@@ -2973,6 +3039,9 @@ def render_settings_page() -> str:
     document.getElementById('slotB').value = s.chart_slot_b || 'env_temp';
     document.getElementById('slotC').value = s.chart_slot_c || 'env_hum';
     document.getElementById('slotD').value = s.chart_slot_d || 'air_tvoc';
+    document.getElementById('chimeAirSpike').value = s.chime_event_air_spike || 'warn_radiation_spike';
+    document.getElementById('chimeWifiDrop').value = s.chime_event_wifi_drop || 'warn_low_power';
+    document.getElementById('chimeRebootDetected').value = s.chime_event_reboot_detected || 'warn_system_fault';
   }
 
   async function saveSettings() {
@@ -2995,6 +3064,7 @@ def render_settings_page() -> str:
 
   (async () => {
     ['slotA', 'slotB', 'slotC', 'slotD'].forEach(fillTrendSelect);
+    ['chimeAirSpike', 'chimeWifiDrop', 'chimeRebootDetected'].forEach(fillChimeSelect);
     const data = await fetchJson('/api/settings');
     applySettings(data || {});
     document.getElementById('saveBtn')?.addEventListener('click', () => saveSettings().catch((e) => alert(String(e.message || e))));
