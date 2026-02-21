@@ -2955,6 +2955,18 @@ HTML_PAGE = """
       text-decoration: none;
     }
     .nav-link.active { background: #1f5f99; border-color: #1f5f99; color: #fff; }
+    .nav-ticker { margin-left: auto; max-width: 620px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; opacity: 0.9; padding: 6px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; }
+    .ticker-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background: rgba(120,180,255,0.9); margin-right: 8px; vertical-align: middle; }
+    .home-top-grid { display: grid; grid-template-columns: 1fr 360px; gap: 14px; align-items: start; }
+    .section-title { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; margin: 6px 0 10px; }
+    .sys-cards { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 12px; }
+    .card-compact { padding: 12px 14px; min-height: 86px; }
+    .card-compact .card-title { font-size: 12px; opacity: 0.85; margin-bottom: 6px; }
+    .card-compact .card-value { font-size: 22px; font-weight: 700; }
+    .card-compact .card-sub { font-size: 12px; opacity: 0.75; margin-top: 4px; }
+    .health-side { position: sticky; top: 16px; }
+    .stream-row { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 10px; }
+    .stream-row .tile { width: auto; }
     .field-entry { margin: 6px 0 12px 0; }
     .field-entry a {
       display: inline-flex;
@@ -2986,6 +2998,16 @@ HTML_PAGE = """
 
     @media (max-width: 700px) {
       .tables-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 1400px) {
+      .sys-cards { grid-template-columns: repeat(3, minmax(160px, 1fr)); }
+    }
+    @media (max-width: 1100px) {
+      .home-top-grid { grid-template-columns: 1fr; }
+      .stream-row { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+    }
+    @media (max-width: 900px) {
+      .sys-cards { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
     }
     .status { min-width: 240px; }
     .tile { width: 110px; text-align: center; }
@@ -3105,11 +3127,6 @@ HTML_PAGE = """
     .integrity-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
     .integrity-table td { padding: 2px 4px; font-size: 12px; border-bottom: 1px solid #22303d; }
     .integrity-table td:last-child { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .state-timeline { margin-top: 8px; max-height: 180px; overflow: auto; display: grid; gap: 6px; }
-    .state-item { border: 1px solid #273443; border-radius: 8px; padding: 6px 8px; background: #0f1721; }
-    .state-item .meta { font-size: 11px; color: #93a8be; margin-bottom: 2px; }
-    .state-item .title { font-size: 12px; color: #d8e6f4; font-weight: 600; }
-    .state-item .detail { font-size: 11px; color: #b8c7d8; margin-top: 2px; }
     .state-offline { border-color: #5a6775; color: #bdc8d4; }
     .state-none { border-color: #2f5f9b; color: #a7c4e5; }
     .state-moving { border-color: #4ca9ff; color: #c8e6ff; }
@@ -3134,26 +3151,42 @@ HTML_PAGE = """
     origin: <span id="dbg-origin">?</span> |
     last fetch: <span id="dbg-fetch">none</span>
   </div>
-  <div class=\"row\">
-    <div class=\"card status\"><b>Daemon</b><div id=\"daemon\">loading...</div></div>
-    <div class=\"card status\"><b>Port</b><div id=\"port\">-</div></div>
-    <div class=\"card status\"><b>Lines In</b><div id=\"lines\">-</div></div>
-    <div class=\"card status\"><b>Last Error</b><div id=\"error\">-</div></div>
-    <div id=\"rssiBox\" class=\"card status rssi-box\"><b>RSSI</b><div id=\"top-rssi\">--</div></div>
-    <div class="card">
-      <b>State Timeline</b>
-      <div class="muted small">Latest transitions</div>
-      <div id="stateTimeline" class="state-timeline"></div>
+  <div class="home-top-grid">
+    <div class="home-top-main">
+      <div class="section-title">System Health</div>
+      <div class="sys-cards">
+        <div class="card status card-compact">
+          <div class="card-title">Daemon</div>
+          <div class="card-value" id="daemon">loading...</div>
+        </div>
+        <div class="card status card-compact">
+          <div class="card-title">Port</div>
+          <div class="card-value" id="port">-</div>
+        </div>
+        <div class="card status card-compact">
+          <div class="card-title">Lines In</div>
+          <div class="card-value" id="lines">-</div>
+        </div>
+        <div class="card status card-compact">
+          <div class="card-title">Last Error</div>
+          <div class="card-value" id="error">-</div>
+        </div>
+        <div id="rssiBox" class="card status rssi-box card-compact">
+          <div class="card-title">RSSI</div>
+          <div class="card-value" id="top-rssi">--</div>
+        </div>
+      </div>
+      <div style="height: 10px"></div>
+      <div class="section-title">Telemetry Streams</div>
+      <div id="freshness" class="stream-row"></div>
     </div>
-  </div>
-
-  <div class=\"row\" id=\"freshness\"></div>
-
-  <div class=\"row\">
-    <div class=\"card\">
-      <b>Telemetry Integrity</b>
-      <div id=\"integrityMeta\" class=\"muted small\" style=\"margin-top:6px\">loading...</div>
-      <div id=\"integrityFps\"></div>
+    <div class="home-top-side health-side">
+      <div class="section-title">Telemetry Integrity</div>
+      <div class="card">
+        <div class="card-title"><span class="ticker-dot" id="integrityDot"></span>Telemetry Integrity</div>
+        <div id="integrityMeta" class="muted small" style="margin-top:6px">loading...</div>
+        <div id="integrityFps"></div>
+      </div>
     </div>
   </div>
 
@@ -3244,7 +3277,10 @@ def render_top_nav(active_path: str) -> str:
     cls = "nav-link active" if is_active else "nav-link"
     links.append(f'<a href="{href}" class="{cls}">{label}</a>')
   brand = '<a href="/" class="brand-link" aria-label="HERMES Home"><img src="/static/hermes-logo-h.jpg" class="brand-logo" alt="HERMES logo" /></a>'
-  return '<nav class="top-nav" aria-label="Primary">' + brand + "".join(links) + "</nav>"
+  ticker = ""
+  if active_path == "/":
+    ticker = '<div class="nav-ticker" id="navTicker"><span class="ticker-dot" id="tickerDot"></span><span class="ticker-text" id="tickerText">Loading transitions…</span></div>'
+  return '<nav class="top-nav" aria-label="Primary">' + brand + "".join(links) + ticker + "</nav>"
 
 
 def render_dashboard_page(active_path: str) -> str:
@@ -4260,7 +4296,7 @@ let trendController = null;
 let readyController = null;
 let eventsController = null;
 let integrityController = null;
-let stateTimelineController = null;
+let tickerController = null;
 let lastUpdatedMs = 0;
 let trendMinutes = 60;
 let chartResizeObserver = null;
@@ -4278,6 +4314,21 @@ const radarBodiesState = {
   pendingBodies: 0,
   pendingSinceMs: 0,
 };
+let integrityWarningActive = false;
+let tickerHealthy = true;
+
+function updateTickerDots() {
+  const tickerDot = document.getElementById('tickerDot');
+  const integrityDot = document.getElementById('integrityDot');
+  let color = 'rgba(120,180,255,0.9)';
+  if (integrityWarningActive) {
+    color = 'rgba(255,180,0,0.95)';
+  } else if (!tickerHealthy) {
+    color = 'rgba(140,150,165,0.55)';
+  }
+  if (tickerDot) tickerDot.style.background = color;
+  if (integrityDot) integrityDot.style.background = color;
+}
 
 function formatAgeShort(seconds) {
   const s = Number(seconds);
@@ -4916,7 +4967,9 @@ function renderIntegrity(data) {
   if (!metaEl || !fpsEl) return;
   const parseFail = Number(data && data.parse_fail || 0);
   const truncated = Number(data && data.truncated || 0);
-  metaEl.textContent = 'parse_fail: ' + parseFail + ' · truncated: ' + truncated;
+  metaEl.textContent = 'parse_fail: ' + parseFail + ' | truncated: ' + truncated;
+  integrityWarningActive = parseFail > 0 || truncated > 0;
+  updateTickerDots();
 
   const windows = data && data.windows && typeof data.windows === 'object' ? data.windows : {};
   const w10 = windows['10'] && typeof windows['10'] === 'object' ? windows['10'] : {};
@@ -4964,58 +5017,54 @@ function renderIntegrity(data) {
     '</tbody></table>';
 }
 
-function renderStateTimeline(rows) {
-  const root = document.getElementById('stateTimeline');
-  if (!root) return;
-  const items = Array.isArray(rows) ? rows : [];
-  if (!items.length) {
-    root.innerHTML = '<div class="muted small">No state transitions yet.</div>';
-    return;
-  }
-  root.innerHTML = items.map((row) => {
-    const ts = row && row.ts_utc ? relativeAge(row.ts_utc) : 'n/a';
-    const rawType = row && row.event_type ? String(row.event_type) : 'unknown';
-    const typeLabel = rawType.replaceAll('_', ' ');
-    let detail = '';
-    if (row && row.detail && typeof row.detail === 'object') {
-      if (Object.prototype.hasOwnProperty.call(row.detail, 'from') || Object.prototype.hasOwnProperty.call(row.detail, 'to')) {
-        const from = Object.prototype.hasOwnProperty.call(row.detail, 'from') ? String(row.detail.from) : '?';
-        const to = Object.prototype.hasOwnProperty.call(row.detail, 'to') ? String(row.detail.to) : '?';
-        detail = from + ' → ' + to;
-      } else {
-        detail = JSON.stringify(row.detail);
-      }
-    } else if (row && row.detail != null) {
-      detail = String(row.detail);
+function summarizeTickerTransition(row) {
+  if (!row || typeof row !== 'object') return 'No transitions';
+  const tsText = row.ts_utc ? relativeAge(row.ts_utc) : 'n/a';
+  const typeText = String(row.event_type || 'unknown').replaceAll('_', ' ');
+  let detailText = '';
+  if (row.detail && typeof row.detail === 'object') {
+    if (Object.prototype.hasOwnProperty.call(row.detail, 'from') || Object.prototype.hasOwnProperty.call(row.detail, 'to')) {
+      const from = Object.prototype.hasOwnProperty.call(row.detail, 'from') ? String(row.detail.from) : '?';
+      const to = Object.prototype.hasOwnProperty.call(row.detail, 'to') ? String(row.detail.to) : '?';
+      detailText = from + ' → ' + to;
+    } else {
+      detailText = JSON.stringify(row.detail);
     }
-    return '<div class="state-item">'
-      + '<div class="meta">' + escapeHtml(ts) + '</div>'
-      + '<div class="title">' + escapeHtml(typeLabel) + '</div>'
-      + '<div class="detail">' + escapeHtml(detail || 'no detail') + '</div>'
-      + '</div>';
-  }).join('');
+  } else if (row.detail != null) {
+    detailText = String(row.detail);
+  }
+  if (detailText.length > 80) detailText = detailText.slice(0, 77) + '...';
+  return tsText + ' · ' + typeText + (detailText ? (' · ' + detailText) : '');
 }
 
-async function pollStateTimeline() {
+async function refreshTicker() {
   if (document.visibilityState === 'hidden') {
     return;
   }
-  if (stateTimelineController) {
-    stateTimelineController.abort();
+  if (tickerController) {
+    tickerController.abort();
   }
   const controller = new AbortController();
-  stateTimelineController = controller;
+  tickerController = controller;
   try {
-    const data = await fetchJson('/api/state_events?limit=50', controller);
-    renderStateTimeline((data && data.rows) ? data.rows : []);
+    const data = await fetchJson('/api/state_events?limit=5', controller);
+    const rows = (data && Array.isArray(data.rows)) ? data.rows : [];
+    const tickerText = document.getElementById('tickerText');
+    if (tickerText) {
+      tickerText.textContent = rows.length ? summarizeTickerTransition(rows[0]) : 'No transitions';
+    }
+    tickerHealthy = true;
+    updateTickerDots();
   } catch (err) {
     if (!(err instanceof DOMException && err.name === 'AbortError')) {
-      const root = document.getElementById('stateTimeline');
-      if (root) root.innerHTML = '<div class="muted small">state timeline fetch failed</div>';
+      const tickerText = document.getElementById('tickerText');
+      if (tickerText) tickerText.textContent = 'No transitions';
+      tickerHealthy = false;
+      updateTickerDots();
     }
   } finally {
-    if (stateTimelineController === controller) {
-      stateTimelineController = null;
+    if (tickerController === controller) {
+      tickerController = null;
     }
   }
 }
@@ -6196,7 +6245,7 @@ async function pollEvents() {
   await pollTables();
   await pollEvents();
   await pollIntegrity();
-  await pollStateTimeline();
+  await refreshTicker();
   await loadRadarCalibrationHistory();
   setInterval(pollStatus, 1000);
   setInterval(pollReady, 3000);
@@ -6204,7 +6253,7 @@ async function pollEvents() {
   setInterval(pollTrends, 7000);
   setInterval(pollEvents, 4000);
   setInterval(pollIntegrity, 5000);
-  setInterval(pollStateTimeline, 5000);
+  setInterval(refreshTicker, 4000);
   setInterval(refreshRelativeTimes, 1000);
   setInterval(refreshLastUpdatedLabel, 1000);
 })();
