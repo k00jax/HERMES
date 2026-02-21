@@ -1121,10 +1121,16 @@ HTML_PAGE = """
     .ts-main { display: block; }
     .ts-sub { display: block; font-size: 11px; color: #8ea1b3; }
     td.changed { background: #213447; transition: background-color 0.5s ease; }
-    .trend-card { min-width: 220px; flex: 1 1 260px; }
+    .trend-card { min-width: 220px; flex: 1 1 260px; display: flex; flex-direction: column; gap: 6px; }
+    .card.chart { min-height: 320px; }
+    .trend-card.chart { min-height: 320px; }
+    @media (min-width: 1400px) {
+      .trend-card.chart { min-height: 340px; }
+    }
     .trend-value { font-size: 18px; font-weight: 700; margin: 4px 0 6px 0; }
-    .trend-img { width: 100%; border-radius: 8px; border: 1px solid #26313d; display: block; }
-    .trend-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .chart-wrap { height: calc(100% - 92px); min-height: 220px; }
+    .trend-img { width: 100%; height: 100%; border-radius: 8px; border: 1px solid #26313d; display: block; }
+    .trend-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
     .trend-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
     .badge { font-size: 11px; color: #9fb3c8; border: 1px solid #26313d; padding: 2px 6px; border-radius: 999px; background: #111820; }
     .seg { display: inline-flex; border: 1px solid #26313d; border-radius: 999px; overflow: hidden; }
@@ -1149,9 +1155,14 @@ HTML_PAGE = """
     .chip-note { border-color: #4a5f80; color: #b9cbe3; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-actions { display: inline-flex; gap: 6px; }
     .event-actions button { padding: 4px 8px; font-size: 11px; }
-    .radar-tabs { margin-left: auto; }
-    .radar-now-wrap { margin-top: 6px; }
-    .radar-canvas { width: 100%; height: 190px; border-radius: 8px; border: 1px solid #26313d; background: #0f1620; display: block; }
+    .hp-card { min-width: 320px; }
+    .hp-head { align-items: center; }
+    .hp-tabs { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+    .hp-tab { flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; white-space: nowrap; background: #111820; color: #9fb3c8; border: 1px solid #26313d; cursor: pointer; }
+    .hp-tab.active { background: #1f5f99; color: #fff; border-color: #1f5f99; }
+    .hp-badges { justify-content: flex-start; }
+    .radar-now-wrap { margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
+    .radar-canvas { width: 100%; height: 220px; border-radius: 8px; border: 1px solid #26313d; background: #0f1620; display: block; }
     .radar-readout { margin-top: 8px; font-size: 12px; color: #b8c7d8; line-height: 1.6; }
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
@@ -1277,6 +1288,7 @@ const radarNow = {
   enabled: true,
   view: 'now',
   maxRangeCm: 300,
+  blipAngleDeg: 225,
   sweepAngleDeg: 0,
   state: {
     alive: 0,
@@ -1379,6 +1391,13 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, v));
 }
 
+function angleDiffDeg(a, b) {
+  let diff = (a - b) % 360;
+  if (diff > 180) diff -= 360;
+  if (diff < -180) diff += 360;
+  return Math.abs(diff);
+}
+
 function radarViewButtonsActive() {
   const nowBtn = document.getElementById('radar-view-now');
   const historyBtn = document.getElementById('radar-view-history');
@@ -1438,11 +1457,8 @@ function drawRadarScope(state) {
 
   const alive = Number(state.alive || 0) === 1;
   const target = Number(state.target || 0);
-  const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
-  const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
-  const moveActive = moveMetric > 0 || target === 1 || target === 3;
-  const statActive = statMetric > 0 || target === 2 || target === 3;
   const noContact = (!alive || target === 0);
+  const detectCm = clamp(Number(state.detect_cm || 0), 0, radarNow.maxRangeCm);
 
   const cx = width * 0.5;
   const cy = height * 0.5;
@@ -1478,38 +1494,17 @@ function drawRadarScope(state) {
   ctx.stroke();
 
   if (!noContact) {
-    const pulse = 0.6 + 0.4 * Math.sin((Date.now() / (moveActive ? 220 : 480)) * Math.PI * 2);
-    const angle = sweepRad;
-    const primaryR = radius * 0.52;
-    const secondaryR = radius * 0.72;
-    const bx = cx + Math.cos(angle) * primaryR;
-    const by = cy + Math.sin(angle) * primaryR;
-
-    const baseColor = 'rgba(96, 220, 145, 1.0)';
-    ctx.lineWidth = 2;
-
-    if (target === 3) {
-      ctx.beginPath();
-      ctx.arc(bx, by, 5 + (2 * pulse), 0, Math.PI * 2);
-      ctx.fillStyle = baseColor;
-      ctx.fill();
-      const bx2 = cx + Math.cos(angle + Math.PI / 5) * secondaryR;
-      const by2 = cy + Math.sin(angle + Math.PI / 5) * secondaryR;
-      ctx.beginPath();
-      ctx.arc(bx2, by2, 4 + (2 * pulse), 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(130, 255, 180, 0.85)';
-      ctx.stroke();
-    } else if (moveActive || target === 1) {
-      ctx.beginPath();
-      ctx.arc(bx, by, 5 + (3 * pulse), 0, Math.PI * 2);
-      ctx.fillStyle = baseColor;
-      ctx.fill();
-    } else if (statActive || target === 2) {
-      ctx.beginPath();
-      ctx.arc(bx, by, 7 + (2 * pulse), 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(130, 255, 180, 0.9)';
-      ctx.stroke();
-    }
+    const theta = (radarNow.blipAngleDeg * Math.PI) / 180;
+    const blipR = clamp((detectCm / radarNow.maxRangeCm) * (radius - 10), 8, radius - 10);
+    const bx = cx + Math.cos(theta) * blipR;
+    const by = cy + Math.sin(theta) * blipR;
+    const crossing = angleDiffDeg(radarNow.sweepAngleDeg, radarNow.blipAngleDeg) < 6;
+    const pulse = 0.72 + 0.28 * Math.sin((Date.now() / 320) * Math.PI * 2);
+    const alpha = crossing ? 1.0 : pulse;
+    ctx.beginPath();
+    ctx.arc(bx, by, 6, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(96, 220, 145, ' + alpha.toFixed(3) + ')';
+    ctx.fill();
   }
 
   updateRadarReadout(state);
@@ -1912,17 +1907,18 @@ function initTrends() {
   root.innerHTML = '';
   for (const trend of trendSeries) {
     const card = document.createElement('div');
-    card.className = 'card trend-card';
+    card.className = 'card trend-card chart';
     if (trend.key === 'radar_bodies') {
+      card.classList.add('hp-card');
       card.innerHTML =
-        '<div class="trend-top">' +
+        '<div class="trend-top hp-head">' +
           '<div><b>' + trend.title + '</b></div>' +
-          '<div class="seg radar-tabs">' +
-            '<button id="radar-view-now" class="active" onclick="setRadarView(\'now\')">Now</button>' +
-            '<button id="radar-view-history" onclick="setRadarView(\'history\')">History</button>' +
+          '<div class="hp-tabs">' +
+            '<button id="radar-view-now" class="hp-tab active" onclick="setRadarView(\'now\')">Now</button>' +
+            '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
           '</div>' +
-          '<div id="trend-badges-' + trend.key + '" class="trend-badges"></div>' +
         '</div>' +
+        '<div id="trend-badges-' + trend.key + '" class="trend-badges hp-badges"></div>' +
         '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
         '<div id="radar-now-pane" class="radar-now-wrap">' +
           '<canvas id="radar-now-canvas" class="radar-canvas"></canvas>' +
@@ -1935,7 +1931,9 @@ function initTrends() {
           '</div>' +
         '</div>' +
         '<div id="radar-history-pane" class="hidden">' +
-          '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
+          '<div class="chart-wrap">' +
+            '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
+          '</div>' +
         '</div>';
     } else {
       card.innerHTML =
@@ -1944,7 +1942,9 @@ function initTrends() {
           '<div id="trend-badges-' + trend.key + '" class="trend-badges"></div>' +
         '</div>' +
         '<div id="trend-value-' + trend.key + '" class="trend-value">n/a</div>' +
-        '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />';
+        '<div class="chart-wrap">' +
+          '<img id="trend-img-' + trend.key + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
+        '</div>';
     }
     root.appendChild(card);
   }
