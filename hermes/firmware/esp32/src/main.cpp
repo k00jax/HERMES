@@ -131,9 +131,6 @@ static void emitRadarStateLine(bool alive, uint32_t now) {
       static_cast<unsigned long>(ld2410State.frameTsMs),
       static_cast<unsigned long>(now));
   Serial1.print(line);
-#if LD2410_DEBUG
-  Serial.print(line);
-#endif
 }
 
 static bool parseLd2410Frame(const uint8_t *frame, size_t frameLen) {
@@ -292,7 +289,8 @@ static void ld2410EmitIfNeeded(uint32_t now) {
     return;
   }
 
-  if (ld2410State.alive && ld2410State.hasValidFrame
+    if (ld2410State.alive && ld2410State.hasValidFrame
+      && (now >= ld2410State.frameTsMs)
       && (now - ld2410State.frameTsMs > LD2410_ALIVE_TIMEOUT_MS)) {
     ld2410State.alive = false;
     ld2410State.aliveAnnouncePending = true;
@@ -1062,8 +1060,8 @@ void loop() {
   delay(1000);
   return;
 #endif
-  const uint32_t now = millis();
   ld2410Poll();
+  const uint32_t now = millis();
   ld2410EmitIfNeeded(now);
   handleSerial1Commands();
   sampleCamera(now);
