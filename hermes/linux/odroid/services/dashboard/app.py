@@ -49,7 +49,7 @@ SERIES_MAP = {
   "esp_rssi": {"table": "esp_net", "column": "rssi", "label": "RSSI (dBm)", "color": "#ef5350", "stepped": False},
   "esp_wifist": {"table": "esp_net", "column": "wifist", "label": "WiFi State", "color": "#90a4ae", "stepped": True},
   "radar_target": {"table": "radar", "column": "target", "label": "Presence Target (0-3)", "color": "#66bb6a", "stepped": True},
-  "radar_detect_cm": {"table": "radar", "column": "detect_cm", "label": "Human Presences (cm)", "color": "#66bb6a", "stepped": False},
+  "radar_bodies": {"table": "radar", "column": "(CASE WHEN target = 3 THEN 2 WHEN target IN (1, 2) THEN 1 ELSE 0 END)", "label": "Human Presences (bodies)", "color": "#66bb6a", "stepped": True},
 }
 
 CHART_CACHE_TTL_SECS = 5.0
@@ -576,6 +576,7 @@ def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, objec
             "air_tvoc": 40.0,
             "esp_rssi": 10.0,
             "radar_target": 3.0,
+            "radar_bodies": 2.0,
           }
           robust_q_by_series = {
             "esp_rssi": 0.90,
@@ -993,42 +994,42 @@ def api_ts(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Dict[str,
     return {"series": series, "minutes": minutes, "points": points, "stats": stats}
 
 
-  @APP.get("/api/radar/latest")
-  def api_radar_latest() -> Dict[str, object]:
+@APP.get("/api/radar/latest")
+def api_radar_latest() -> Dict[str, object]:
     default = {
-      "alive": 0,
-      "target": 0,
-      "detect_cm": 0,
-      "move_cm": 0,
-      "stat_cm": 0,
-      "move_en": 0,
-      "stat_en": 0,
-      "ts_utc": None,
+        "alive": 0,
+        "target": 0,
+        "detect_cm": 0,
+        "move_cm": 0,
+        "stat_cm": 0,
+        "move_en": 0,
+        "stat_en": 0,
+        "ts_utc": None,
     }
     if not DB_PATH.exists():
-      return default
-    try:
-      with open_db() as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-          "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
-          "FROM radar ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-    except sqlite3.OperationalError as exc:
-      if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
         return default
-      raise
+    try:
+        with open_db() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+                "FROM radar ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+            return default
+        raise
     if not row:
-      return default
+        return default
     return {
-      "alive": int(row["alive"] or 0),
-      "target": int(row["target"] or 0),
-      "detect_cm": int(row["detect_cm"] or 0),
-      "move_cm": int(row["move_cm"] or 0),
-      "stat_cm": int(row["stat_cm"] or 0),
-      "move_en": int(row["move_en"] or 0),
-      "stat_en": int(row["stat_en"] or 0),
-      "ts_utc": row["ts_utc"],
+        "alive": int(row["alive"] or 0),
+        "target": int(row["target"] or 0),
+        "detect_cm": int(row["detect_cm"] or 0),
+        "move_cm": int(row["move_cm"] or 0),
+        "stat_cm": int(row["stat_cm"] or 0),
+        "move_en": int(row["move_en"] or 0),
+        "stat_en": int(row["stat_en"] or 0),
+        "ts_utc": row["ts_utc"],
     }
 
 
@@ -1266,7 +1267,7 @@ const tableLabels = {
 };
 const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET','RADAR'];
 const trendSeries = [
-  { key: 'radar_detect_cm', title: 'Human Presences', unit: 'cm', decimals: 0, table: 'radar' },
+  { key: 'radar_bodies', title: 'Human Presences', unit: 'bodies', decimals: 0, table: 'radar' },
   { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0, table: 'air' },
   { key: 'env_temp', title: 'Temp', unit: '°C', decimals: 1, table: 'env' },
   { key: 'env_hum', title: 'Humidity', unit: '%', decimals: 1, table: 'env' },
@@ -1398,14 +1399,12 @@ window.setRadarView = function setRadarView(view) {
 function updateRadarReadout(state) {
   const alive = Number(state.alive || 0) === 1;
   const target = Number(state.target || 0);
-  const detectCm = Number(state.detect_cm || 0);
-  const moveCm = Number(state.move_cm || 0);
-  const statCm = Number(state.stat_cm || 0);
-  const moveEn = Number(state.move_en || 0) === 1;
-  const statEn = Number(state.stat_en || 0) === 1;
+  const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
+  const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
+  const bodyCount = target === 3 ? 2 : (target === 0 ? 0 : 1);
 
   const stateEl = document.getElementById('radar-now-state');
-  const detectEl = document.getElementById('radar-now-detect');
+  const bodiesEl = document.getElementById('radar-now-bodies');
   const moveEl = document.getElementById('radar-now-move');
   const statEl = document.getElementById('radar-now-stat');
   const targetEl = document.getElementById('radar-now-target');
@@ -1415,9 +1414,9 @@ function updateRadarReadout(state) {
     else if (target === 0) stateEl.textContent = 'No presence';
     else stateEl.textContent = 'Presence detected';
   }
-  if (detectEl) detectEl.textContent = `${detectCm} cm`;
-  if (moveEl) moveEl.textContent = moveEn ? `${moveCm} cm` : '--';
-  if (statEl) statEl.textContent = statEn ? `${statCm} cm` : '--';
+  if (bodiesEl) bodiesEl.textContent = alive ? `${bodyCount}` : '--';
+  if (moveEl) moveEl.textContent = alive ? `${moveMetric}/100` : '--';
+  if (statEl) statEl.textContent = alive ? `${statMetric}/100` : '--';
   if (targetEl) targetEl.textContent = `${target}/3`;
 }
 
@@ -1439,9 +1438,10 @@ function drawRadarScope(state) {
 
   const alive = Number(state.alive || 0) === 1;
   const target = Number(state.target || 0);
-  const detectCmRaw = Number(state.detect_cm || 0);
-  const moveEn = Number(state.move_en || 0) === 1;
-  const statEn = Number(state.stat_en || 0) === 1;
+  const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
+  const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
+  const moveActive = moveMetric > 0 || target === 1 || target === 3;
+  const statActive = statMetric > 0 || target === 2 || target === 3;
   const noContact = (!alive || target === 0);
 
   const cx = width * 0.5;
@@ -1478,13 +1478,12 @@ function drawRadarScope(state) {
   ctx.stroke();
 
   if (!noContact) {
-    const detectCm = clamp(detectCmRaw, 0, radarNow.maxRangeCm);
-    let blipR = (detectCm / radarNow.maxRangeCm) * (radius - 10);
-    if (detectCmRaw <= 0) blipR = Math.max(8, radius * 0.1);
-    const pulse = 0.6 + 0.4 * Math.sin((Date.now() / (moveEn ? 220 : 480)) * Math.PI * 2);
+    const pulse = 0.6 + 0.4 * Math.sin((Date.now() / (moveActive ? 220 : 480)) * Math.PI * 2);
     const angle = sweepRad;
-    const bx = cx + Math.cos(angle) * blipR;
-    const by = cy + Math.sin(angle) * blipR;
+    const primaryR = radius * 0.52;
+    const secondaryR = radius * 0.72;
+    const bx = cx + Math.cos(angle) * primaryR;
+    const by = cy + Math.sin(angle) * primaryR;
 
     const baseColor = 'rgba(96, 220, 145, 1.0)';
     ctx.lineWidth = 2;
@@ -1494,16 +1493,18 @@ function drawRadarScope(state) {
       ctx.arc(bx, by, 5 + (2 * pulse), 0, Math.PI * 2);
       ctx.fillStyle = baseColor;
       ctx.fill();
+      const bx2 = cx + Math.cos(angle + Math.PI / 5) * secondaryR;
+      const by2 = cy + Math.sin(angle + Math.PI / 5) * secondaryR;
       ctx.beginPath();
-      ctx.arc(bx, by, 10 + (3 * pulse), 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(130, 255, 180, 0.8)';
+      ctx.arc(bx2, by2, 4 + (2 * pulse), 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(130, 255, 180, 0.85)';
       ctx.stroke();
-    } else if (moveEn || target === 1) {
+    } else if (moveActive || target === 1) {
       ctx.beginPath();
       ctx.arc(bx, by, 5 + (3 * pulse), 0, Math.PI * 2);
       ctx.fillStyle = baseColor;
       ctx.fill();
-    } else if (statEn || target === 2) {
+    } else if (statActive || target === 2) {
       ctx.beginPath();
       ctx.arc(bx, by, 7 + (2 * pulse), 0, Math.PI * 2);
       ctx.strokeStyle = 'rgba(130, 255, 180, 0.9)';
@@ -1912,7 +1913,7 @@ function initTrends() {
   for (const trend of trendSeries) {
     const card = document.createElement('div');
     card.className = 'card trend-card';
-    if (trend.key === 'radar_detect_cm') {
+    if (trend.key === 'radar_bodies') {
       card.innerHTML =
         '<div class="trend-top">' +
           '<div><b>' + trend.title + '</b></div>' +
@@ -1927,9 +1928,9 @@ function initTrends() {
           '<canvas id="radar-now-canvas" class="radar-canvas"></canvas>' +
           '<div class="radar-readout">' +
             '<div id="radar-now-state" class="radar-state">RADAR offline</div>' +
-            '<div class="radar-line"><span class="radar-label">Detect</span><span id="radar-now-detect">--</span></div>' +
-            '<div class="radar-line"><span class="radar-label">Moving</span><span id="radar-now-move">--</span></div>' +
-            '<div class="radar-line"><span class="radar-label">Stationary</span><span id="radar-now-stat">--</span></div>' +
+            '<div class="radar-line"><span class="radar-label">Bodies</span><span id="radar-now-bodies">--</span></div>' +
+            '<div class="radar-line"><span class="radar-label">Moving Metric</span><span id="radar-now-move">--</span></div>' +
+            '<div class="radar-line"><span class="radar-label">Stationary Metric</span><span id="radar-now-stat">--</span></div>' +
             '<div class="radar-line"><span class="radar-label">Target</span><span id="radar-now-target">0/3</span></div>' +
           '</div>' +
         '</div>' +
