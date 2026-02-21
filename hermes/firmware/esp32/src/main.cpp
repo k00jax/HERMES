@@ -39,7 +39,11 @@
 #endif
 
 #ifndef LD2410_UART_BRINGUP_MODE
-#define LD2410_UART_BRINGUP_MODE 1
+#define LD2410_UART_BRINGUP_MODE 0
+#endif
+
+#ifndef LD2410_DEBUG
+#define LD2410_DEBUG 0
 #endif
 
 #define ENABLE_ESP_CMD 1
@@ -52,17 +56,36 @@
 static const uint8_t UART_RX_PIN = D7;
 static const uint8_t UART_TX_PIN = D6;
 static const int LD2410_UART_RX_PIN = UART_RX_PIN;
-static const int LD2410_UART_TX_PIN = UART_TX_PIN;
 static const uint32_t LD2410_UART_BAUD = 256000;
 static const uint8_t LD2410_HEADER[4] = {0xF4, 0xF3, 0xF2, 0xF1};
 static const uint8_t LD2410_FOOTER[4] = {0xF8, 0xF7, 0xF6, 0xF5};
 static const size_t LD2410_MAX_FRAME = 64;
+static const uint32_t LD2410_EMIT_MIN_INTERVAL_MS = 100;
+static const uint32_t LD2410_ALIVE_TIMEOUT_MS = 1000;
 HardwareSerial RadarSerial(2);
+
+struct Ld2410State {
+  bool hasValidFrame = false;
+  bool alive = false;
+  bool deadAnnounced = false;
+  bool aliveAnnouncePending = false;
+  bool targetChangedPending = false;
+  uint8_t target = 0;
+  uint16_t moveCm = 0;
+  uint16_t statCm = 0;
+  uint16_t detectCm = 0;
+  uint8_t moveEn = 0;
+  uint8_t statEn = 0;
+  uint32_t initTsMs = 0;
+  uint32_t frameTsMs = 0;
+  uint32_t lastEmitMs = 0;
+};
 
 static uint8_t ld2410Frame[LD2410_MAX_FRAME];
 static size_t ld2410FrameLen = 0;
 static uint8_t ld2410HeaderMatch = 0;
 static bool ld2410InFrame = false;
+static Ld2410State ld2410State;
 
 static bool endsWithFooter(const uint8_t *buffer, size_t len) {
   if (len < sizeof(LD2410_FOOTER)) {
@@ -92,49 +115,96 @@ static const char *targetStateText(uint8_t state) {
   }
 }
 
-static void parseAndPrintLd2410Frame(const uint8_t *frame, size_t frameLen) {
+static void emitRadarStateLine(bool alive, uint32_t now) {
+  char line[192];
+  snprintf(
+      line,
+      sizeof(line),
+      "RADAR,alive=%d,target=%u,move_cm=%u,stat_cm=%u,detect_cm=%u,move_en=%u,stat_en=%u,frame_ts_ms=%lu,ts=%lu\n",
+      alive ? 1 : 0,
+      static_cast<unsigned>(ld2410State.target),
+      static_cast<unsigned>(ld2410State.moveCm),
+      static_cast<unsigned>(ld2410State.statCm),
+      static_cast<unsigned>(ld2410State.detectCm),
+      static_cast<unsigned>(ld2410State.moveEn),
+      static_cast<unsigned>(ld2410State.statEn),
+      static_cast<unsigned long>(ld2410State.frameTsMs),
+      static_cast<unsigned long>(now));
+  Serial1.print(line);
+#if LD2410_DEBUG
+  Serial.print(line);
+#endif
+}
+
+static bool parseLd2410Frame(const uint8_t *frame, size_t frameLen) {
   if (frameLen < 10) {
-    return;
+    return false;
   }
 
   const uint16_t payloadLen = static_cast<uint16_t>(frame[4])
       | (static_cast<uint16_t>(frame[5]) << 8);
   const size_t expectedFrameLen = 4 + 2 + payloadLen + 4;
   if (frameLen != expectedFrameLen) {
+#if LD2410_DEBUG
     Serial.print("[ld2410] frame_len_mismatch got=");
     Serial.print(static_cast<unsigned long>(frameLen));
     Serial.print(" expected=");
     Serial.println(static_cast<unsigned long>(expectedFrameLen));
-    return;
+#endif
+    return false;
   }
-
-  Serial.print("[ld2410] frame ");
-  for (size_t index = 0; index < frameLen; ++index) {
-    Serial.printf("%02X ", frame[index]);
-  }
-  Serial.println();
 
   if (payloadLen < 13) {
+#if LD2410_DEBUG
     Serial.print("[ld2410] payload_len=");
     Serial.println(static_cast<unsigned long>(payloadLen));
-    return;
+#endif
+    return false;
   }
 
   const uint8_t *payload = frame + 6;
   const uint8_t reportType = payload[0];
   const uint8_t reportMarker = payload[1];
+  if (reportType != 0x02 || reportMarker != 0xAA) {
+    return false;
+  }
+
   const uint8_t targetState = payload[2];
-    const uint16_t movingDistanceCm = static_cast<uint16_t>(payload[3])
+  const uint16_t movingDistanceCm = static_cast<uint16_t>(payload[3])
       | (static_cast<uint16_t>(payload[4]) << 8);
-    const uint8_t movingEnergy = payload[5];
-    const uint16_t stationaryDistanceCm = static_cast<uint16_t>(payload[6])
+  const uint8_t movingEnergy = payload[5];
+  const uint16_t stationaryDistanceCm = static_cast<uint16_t>(payload[6])
       | (static_cast<uint16_t>(payload[7]) << 8);
-    const uint8_t stationaryEnergy = payload[8];
-    const uint16_t detectDistanceCm = static_cast<uint16_t>(payload[9])
+  const uint8_t stationaryEnergy = payload[8];
+  const uint16_t detectDistanceCm = static_cast<uint16_t>(payload[9])
       | (static_cast<uint16_t>(payload[10]) << 8);
-    const uint16_t trailerWord = static_cast<uint16_t>(payload[11])
+  const uint16_t trailerWord = static_cast<uint16_t>(payload[11])
       | (static_cast<uint16_t>(payload[12]) << 8);
 
+  const bool targetChanged = (!ld2410State.hasValidFrame || ld2410State.target != targetState);
+  ld2410State.target = targetState;
+  ld2410State.moveCm = movingDistanceCm;
+  ld2410State.statCm = stationaryDistanceCm;
+  ld2410State.detectCm = detectDistanceCm;
+  ld2410State.moveEn = movingEnergy;
+  ld2410State.statEn = stationaryEnergy;
+  ld2410State.frameTsMs = millis();
+  ld2410State.hasValidFrame = true;
+  ld2410State.deadAnnounced = false;
+  if (!ld2410State.alive) {
+    ld2410State.alive = true;
+    ld2410State.aliveAnnouncePending = true;
+  }
+  if (targetChanged) {
+    ld2410State.targetChangedPending = true;
+  }
+
+#if LD2410_DEBUG
+  Serial.print("[ld2410] frame ");
+  for (size_t index = 0; index < frameLen; ++index) {
+    Serial.printf("%02X ", frame[index]);
+  }
+  Serial.println();
   Serial.printf(
       "[ld2410] type=0x%02X marker=0x%02X target=%u(%s) move_cm=%u stat_cm=%u move_en=%u stat_en=%u detect_cm=%u trail=0x%04X\n",
       reportType,
@@ -147,6 +217,9 @@ static void parseAndPrintLd2410Frame(const uint8_t *frame, size_t frameLen) {
       static_cast<unsigned>(stationaryEnergy),
       static_cast<unsigned>(detectDistanceCm),
       static_cast<unsigned>(trailerWord));
+  (void)trailerWord;
+#endif
+  return true;
 }
 
 static void processLd2410Byte(uint8_t byteValue) {
@@ -173,7 +246,9 @@ static void processLd2410Byte(uint8_t byteValue) {
     ld2410InFrame = false;
     ld2410FrameLen = 0;
     ld2410HeaderMatch = 0;
+#if LD2410_DEBUG
     Serial.println("[ld2410] frame overflow, reset parser");
+#endif
     return;
   }
 
@@ -181,10 +256,69 @@ static void processLd2410Byte(uint8_t byteValue) {
     return;
   }
 
-  parseAndPrintLd2410Frame(ld2410Frame, ld2410FrameLen);
+  parseLd2410Frame(ld2410Frame, ld2410FrameLen);
   ld2410InFrame = false;
   ld2410FrameLen = 0;
   ld2410HeaderMatch = 0;
+}
+
+static void ld2410Init() {
+  ld2410State = Ld2410State{};
+  ld2410State.initTsMs = millis();
+  RadarSerial.begin(LD2410_UART_BAUD, SERIAL_8N1, LD2410_UART_RX_PIN, -1);
+#if LD2410_DEBUG
+  Serial.println("LD2410 parser active");
+  Serial.print("Radar UART RX pin = ");
+  Serial.println(LD2410_UART_RX_PIN);
+  Serial.print("Radar UART baud = ");
+  Serial.println(static_cast<unsigned long>(LD2410_UART_BAUD));
+#endif
+}
+
+static void ld2410Poll() {
+  while (RadarSerial.available() > 0) {
+    const uint8_t byteValue = static_cast<uint8_t>(RadarSerial.read());
+    processLd2410Byte(byteValue);
+  }
+}
+
+static void ld2410EmitIfNeeded(uint32_t now) {
+  if (!ld2410State.hasValidFrame) {
+    if (!ld2410State.deadAnnounced && (now - ld2410State.initTsMs) > LD2410_ALIVE_TIMEOUT_MS) {
+      emitRadarStateLine(false, now);
+      ld2410State.deadAnnounced = true;
+      ld2410State.lastEmitMs = now;
+    }
+    return;
+  }
+
+  if (ld2410State.alive && ld2410State.hasValidFrame
+      && (now - ld2410State.frameTsMs > LD2410_ALIVE_TIMEOUT_MS)) {
+    ld2410State.alive = false;
+    ld2410State.aliveAnnouncePending = true;
+    ld2410State.deadAnnounced = true;
+  }
+
+  if (ld2410State.aliveAnnouncePending) {
+    emitRadarStateLine(ld2410State.alive, now);
+    ld2410State.aliveAnnouncePending = false;
+    ld2410State.lastEmitMs = now;
+    ld2410State.targetChangedPending = false;
+    return;
+  }
+
+  if (!ld2410State.alive || !ld2410State.hasValidFrame) {
+    return;
+  }
+
+  const bool throttledReady = (now - ld2410State.lastEmitMs) >= LD2410_EMIT_MIN_INTERVAL_MS;
+  if (!throttledReady && !ld2410State.targetChangedPending) {
+    return;
+  }
+
+  emitRadarStateLine(true, now);
+  ld2410State.lastEmitMs = now;
+  ld2410State.targetChangedPending = false;
 }
 
 static const uint32_t CAMERA_INTERVAL_MS = 2000;
@@ -895,15 +1029,7 @@ void setup() {
   delay(200);
   waitForSerial(1500);
   Serial.println("LD2410 UART bring-up starting...");
-
-  RadarSerial.begin(LD2410_UART_BAUD, SERIAL_8N1, LD2410_UART_RX_PIN, LD2410_UART_TX_PIN);
-
-  Serial.print("Radar UART RX pin = ");
-  Serial.println(LD2410_UART_RX_PIN);
-  Serial.print("Radar UART TX pin = ");
-  Serial.println(LD2410_UART_TX_PIN);
-  Serial.print("Radar UART baud = ");
-  Serial.println(static_cast<unsigned long>(LD2410_UART_BAUD));
+  ld2410Init();
   Serial.println("Waiting for radar bytes...");
   return;
 #endif
@@ -917,6 +1043,7 @@ void setup() {
   Serial1.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   delay(50);
   waitForSerial(1500);
+  ld2410Init();
   Serial.println("ESP32 telemetry sender ready");
   scanCameraBus();
   initCamera();
@@ -926,10 +1053,8 @@ void setup() {
 
 void loop() {
 #if LD2410_UART_BRINGUP_MODE
-  while (RadarSerial.available() > 0) {
-    const uint8_t byteValue = static_cast<uint8_t>(RadarSerial.read());
-    processLd2410Byte(byteValue);
-  }
+  ld2410Poll();
+  ld2410EmitIfNeeded(millis());
   delay(10);
   return;
 #endif
@@ -938,6 +1063,8 @@ void loop() {
   return;
 #endif
   const uint32_t now = millis();
+  ld2410Poll();
+  ld2410EmitIfNeeded(now);
   handleSerial1Commands();
   sampleCamera(now);
   sampleMic(now);
