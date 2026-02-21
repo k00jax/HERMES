@@ -1094,7 +1094,14 @@ HTML_PAGE = """
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>HERMES Dashboard</title>
   <style>
-    body { font-family: sans-serif; margin: 16px; background: #0b0f14; color: #e8eef5; }
+    body {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      font-weight: 450;
+      letter-spacing: 0.2px;
+      margin: 16px;
+      background: #0b0f14;
+      color: #e8eef5;
+    }
     h1 { margin: 0 0 4px 0; }
     .row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
     .card { background: #151c24; border: 1px solid #26313d; border-radius: 10px; padding: 10px 12px; }
@@ -1143,17 +1150,22 @@ HTML_PAGE = """
     .ts-sub { display: block; font-size: 11px; color: #8ea1b3; }
     td.changed { background: #213447; transition: background-color 0.5s ease; }
     .trend-card { min-width: 260px; flex: 1 1 320px; display: flex; flex-direction: column; gap: 6px; }
-    .card.chart { min-height: 360px; }
-    .trend-card.chart { min-height: 360px; }
+    .card.chart { height: 360px; }
+    .trend-card.chart { height: 360px; }
     @media (min-width: 1400px) {
-      .trend-card.chart { min-height: 380px; }
+      .trend-card.chart { height: 380px; }
     }
-    .trend-value { font-size: 18px; font-weight: 700; margin: 2px 0 4px 0; }
+    .metric-value, .card h2 { font-weight: 650; }
+    .trend-value { font-size: 18px; font-weight: 650; margin: 2px 0 4px 0; }
+    .card.chart .card-header { padding: 12px 14px 6px 14px; margin: -10px -12px 0 -12px; }
     .chart-wrap { flex: 1 1 auto; min-height: 260px; }
+    .card.chart .plot { height: 260px; min-height: 260px; }
+    .card.chart canvas, .card.chart svg { height: 100% !important; width: 100% !important; }
     .trend-img { width: 100%; height: 100%; border-radius: 8px; border: 1px solid #26313d; display: block; }
     .trend-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
     .trend-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
-    .badge { font-size: 11px; color: #9fb3c8; border: 1px solid #26313d; padding: 2px 6px; border-radius: 999px; background: #111820; }
+    .pill-row { gap: 6px; }
+    .badge, .pill { font-size: 12px; color: #9fb3c8; border: 1px solid #26313d; padding: 3px 8px; border-radius: 999px; background: #111820; }
     .seg { display: inline-flex; border: 1px solid #26313d; border-radius: 999px; overflow: hidden; }
     .seg button { background: #111820; color: #9fb3c8; border: 0; padding: 6px 10px; cursor: pointer; }
     .seg button.active { background: #1f5f99; color: #fff; }
@@ -1183,7 +1195,29 @@ HTML_PAGE = """
     .hp-tab.active { background: #1f5f99; color: #fff; border-color: #1f5f99; }
     .hp-badges { justify-content: flex-start; }
     .radar-now-wrap { margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
-    .radar-canvas { width: 100%; height: 220px; border-radius: 8px; border: 1px solid #26313d; background: #0f1620; display: block; }
+    .range-strip { position: relative; padding: 14px 8px 22px 8px; border-radius: 8px; border: 1px solid #26313d; background: #0f1620; }
+    .range-track { height: 8px; border-radius: 999px; background: #0b121b; border: 1px solid #1d2a38; }
+    .marker { position: absolute; pointer-events: none; }
+    .marker.hidden { display: none; }
+    .marker.detect { top: 8px; width: 14px; height: 14px; border-radius: 999px; background: rgba(132, 210, 255, 0.95); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.18); }
+    .marker.detect.pulse-fast { animation: detectPulseFast 0.95s infinite ease-in-out; }
+    .marker.detect.pulse-slow { animation: detectPulseSlow 1.8s infinite ease-in-out; }
+    .marker.move { top: 2px; width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 9px solid rgba(140, 210, 255, 0.95); }
+    .marker.stat { top: 22px; width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-top: 9px solid rgba(62, 112, 182, 0.98); }
+    .range-labels { margin-top: 8px; display: flex; justify-content: space-between; font-size: 11px; color: #8ea1b3; }
+    .conf-row { display: grid; grid-template-columns: 95px 1fr 52px; align-items: center; gap: 8px; }
+    .conf-bar { height: 8px; border-radius: 999px; background: #0b121b; border: 1px solid #1d2a38; overflow: hidden; }
+    .conf-fill { height: 100%; width: 0%; }
+    .conf-fill.move { background: linear-gradient(90deg, #69b8ff, #9dd9ff); }
+    .conf-fill.stat { background: linear-gradient(90deg, #2f5f9b, #5b82be); }
+    @keyframes detectPulseFast {
+      0%, 100% { transform: scale(1.0); box-shadow: 0 0 0 3px rgba(76, 153, 220, 0.14); }
+      50% { transform: scale(1.16); box-shadow: 0 0 0 8px rgba(76, 153, 220, 0.20); }
+    }
+    @keyframes detectPulseSlow {
+      0%, 100% { transform: scale(1.0); box-shadow: 0 0 0 3px rgba(54, 110, 182, 0.14); }
+      50% { transform: scale(1.10); box-shadow: 0 0 0 6px rgba(54, 110, 182, 0.20); }
+    }
     .radar-readout { margin-top: 8px; font-size: 12px; color: #b8c7d8; line-height: 1.6; }
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
@@ -1359,6 +1393,12 @@ let readyController = null;
 let eventsController = null;
 let lastUpdatedMs = 0;
 let trendMinutes = 60;
+const radarBodiesState = {
+  initialized: false,
+  stableBodies: 0,
+  pendingBodies: 0,
+  pendingSinceMs: 0,
+};
 
 function formatAgeShort(seconds) {
   const s = Number(seconds);
@@ -1488,6 +1528,41 @@ function angleDiffDeg(a, b) {
   return Math.abs(diff);
 }
 
+function stableBodiesFromTarget(target) {
+  return target === 3 ? 2 : (target === 0 ? 0 : 1);
+}
+
+function getStableBodies(target) {
+  const now = Date.now();
+  const rawBodies = stableBodiesFromTarget(target);
+  if (!radarBodiesState.initialized) {
+    radarBodiesState.initialized = true;
+    radarBodiesState.stableBodies = rawBodies;
+    radarBodiesState.pendingBodies = rawBodies;
+    radarBodiesState.pendingSinceMs = now;
+    return rawBodies;
+  }
+  if (rawBodies === radarBodiesState.stableBodies) {
+    radarBodiesState.pendingBodies = rawBodies;
+    radarBodiesState.pendingSinceMs = now;
+    return radarBodiesState.stableBodies;
+  }
+  if (rawBodies !== radarBodiesState.pendingBodies) {
+    radarBodiesState.pendingBodies = rawBodies;
+    radarBodiesState.pendingSinceMs = now;
+    return radarBodiesState.stableBodies;
+  }
+  if ((now - radarBodiesState.pendingSinceMs) >= 500) {
+    radarBodiesState.stableBodies = rawBodies;
+  }
+  return radarBodiesState.stableBodies;
+}
+
+function markerLeft(cm, maxRange, markerHalfPx) {
+  const pct = clamp((Number(cm || 0) / maxRange) * 100, 0, 100);
+  return `calc(${pct}% - ${markerHalfPx}px)`;
+}
+
 function radarViewButtonsActive() {
   const nowBtn = document.getElementById('radar-view-now');
   const historyBtn = document.getElementById('radar-view-history');
@@ -1510,136 +1585,91 @@ function updateRadarReadout(state) {
   const target = Number(state.target || 0);
   const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
   const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
-  const bodyCount = target === 3 ? 2 : (target === 0 ? 0 : 1);
+  const detectCm = Math.round(clamp(Number(state.detect_cm || 0), 0, radarNow.maxRangeCm));
+  const moveCm = Math.round(clamp(Number(state.move_cm || 0), 0, radarNow.maxRangeCm));
+  const statCm = Math.round(clamp(Number(state.stat_cm || 0), 0, radarNow.maxRangeCm));
+  const moveActive = alive && (moveMetric > 0 || target === 1 || target === 3);
+  const statActive = alive && (statMetric > 0 || target === 2 || target === 3);
+  const bodyCount = getStableBodies(target);
 
   const stateEl = document.getElementById('radar-now-state');
   const bodiesEl = document.getElementById('radar-now-bodies');
   const moveEl = document.getElementById('radar-now-move');
   const statEl = document.getElementById('radar-now-stat');
+  const detectEl = document.getElementById('radar-now-detect');
+  const moveSigEl = document.getElementById('radar-now-move-sig');
+  const statSigEl = document.getElementById('radar-now-stat-sig');
   const targetEl = document.getElementById('radar-now-target');
+  const moveConfFillEl = document.getElementById('radar-conf-move');
+  const statConfFillEl = document.getElementById('radar-conf-stat');
+  const moveConfValEl = document.getElementById('radar-conf-move-val');
+  const statConfValEl = document.getElementById('radar-conf-stat-val');
 
   if (stateEl) {
     if (!alive) stateEl.textContent = 'RADAR offline';
     else if (target === 0) stateEl.textContent = 'No presence';
-    else if (target === 3) stateEl.textContent = 'Moving + stationary signature';
-    else if (target === 1) stateEl.textContent = 'Moving signature';
-    else if (target === 2) stateEl.textContent = 'Stationary signature';
     else stateEl.textContent = 'Presence detected';
   }
   if (bodiesEl) bodiesEl.textContent = alive ? `${bodyCount}` : '--';
   if (moveEl) moveEl.textContent = alive ? `${Math.round(moveMetric)}%` : '--';
   if (statEl) statEl.textContent = alive ? `${Math.round(statMetric)}%` : '--';
+  if (detectEl) detectEl.textContent = alive && target !== 0 ? `${detectCm} cm` : '--';
+  if (moveSigEl) moveSigEl.textContent = moveActive ? `${moveCm} cm` : '--';
+  if (statSigEl) statSigEl.textContent = statActive ? `${statCm} cm` : '--';
   if (targetEl) targetEl.textContent = `${target}/3`;
+  if (moveConfFillEl) moveConfFillEl.style.width = `${Math.round(moveMetric)}%`;
+  if (statConfFillEl) statConfFillEl.style.width = `${Math.round(statMetric)}%`;
+  if (moveConfValEl) moveConfValEl.textContent = alive ? `${Math.round(moveMetric)}%` : '--';
+  if (statConfValEl) statConfValEl.textContent = alive ? `${Math.round(statMetric)}%` : '--';
 }
 
 function drawRadarScope(state) {
-  const canvas = document.getElementById('radar-now-canvas');
-  if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(260, Math.floor(rect.width || 260));
-  const height = Math.max(170, Math.floor(rect.height || 190));
-  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-  }
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, width, height);
-
   const alive = Number(state.alive || 0) === 1;
   const target = Number(state.target || 0);
   const noContact = (!alive || target === 0);
   const detectCm = clamp(Number(state.detect_cm || 0), 0, radarNow.maxRangeCm);
+  const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
+  const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
+  const moveCm = clamp(Number(state.move_cm || detectCm), 0, radarNow.maxRangeCm);
+  const statCm = clamp(Number(state.stat_cm || detectCm), 0, radarNow.maxRangeCm);
+  const moveActive = alive && (moveMetric > 0 || target === 1 || target === 3);
+  const statActive = alive && (statMetric > 0 || target === 2 || target === 3);
 
-  const cx = width * 0.5;
-  const cy = height * 0.5;
-  const radius = Math.max(45, Math.min(width, height) * 0.44);
+  const stripEl = document.getElementById('range-strip');
+  const detectMarkerEl = document.getElementById('range-marker-detect');
+  const moveMarkerEl = document.getElementById('range-marker-move');
+  const statMarkerEl = document.getElementById('range-marker-stat');
+  const maxRangeEl = document.getElementById('range-max-label');
 
-  ctx.fillStyle = alive ? '#0d1721' : '#182029';
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.strokeStyle = alive ? 'rgba(96, 173, 126, 0.35)' : 'rgba(130, 140, 150, 0.25)';
-  ctx.lineWidth = 1;
-  [0.25, 0.5, 0.75, 1.0].forEach((scale) => {
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius * scale, 0, Math.PI * 2);
-    ctx.stroke();
-  });
-
-  const sweepRad = (radarNow.sweepAngleDeg * Math.PI) / 180;
-  const gx = cx + Math.cos(sweepRad) * radius;
-  const gy = cy + Math.sin(sweepRad) * radius;
-  const grad = ctx.createLinearGradient(cx, cy, gx, gy);
-  if (alive) {
-    grad.addColorStop(0, 'rgba(120, 210, 150, 0.05)');
-    grad.addColorStop(1, 'rgba(120, 210, 150, 0.45)');
-  } else {
-    grad.addColorStop(0, 'rgba(170, 170, 170, 0.04)');
-    grad.addColorStop(1, 'rgba(170, 170, 170, 0.18)');
+  if (maxRangeEl) maxRangeEl.textContent = `${radarNow.maxRangeCm}cm`;
+  if (!stripEl || !detectMarkerEl || !moveMarkerEl || !statMarkerEl) {
+    updateRadarReadout(state);
+    return;
   }
-  ctx.strokeStyle = grad;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(gx, gy);
-  ctx.stroke();
 
-  const drawPresenceBlip = (style) => {
-    const angleDeg = radarNow.blipAngleDeg;
-    const rangeCm = detectCm;
-    const theta = (angleDeg * Math.PI) / 180;
-    const blipR = clamp((rangeCm / radarNow.maxRangeCm) * (radius - 10), 8, radius - 10);
-    const bx = cx + Math.cos(theta) * blipR;
-    const by = cy + Math.sin(theta) * blipR;
-    const crossing = angleDiffDeg(radarNow.sweepAngleDeg, angleDeg) < 6;
-    if (style === 'moving') {
-      const pulse = 0.72 + 0.28 * Math.sin((Date.now() / 300) * Math.PI * 2);
-      const alpha = crossing ? 1.0 : pulse;
-      ctx.beginPath();
-      ctx.arc(bx, by, 6, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(140, 210, 255, ' + alpha.toFixed(3) + ')';
-      ctx.fill();
-      return;
-    }
-    if (style === 'stationary') {
-      const pulse = 0.60 + 0.20 * Math.sin((Date.now() / 520) * Math.PI * 2);
-      const alpha = crossing ? 0.95 : pulse;
-      ctx.beginPath();
-      ctx.arc(bx, by, 7, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(62, 112, 182, ' + alpha.toFixed(3) + ')';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      return;
-    }
-    const pulse = 0.70 + 0.25 * Math.sin((Date.now() / 360) * Math.PI * 2);
-    const alpha = crossing ? 1.0 : pulse;
-    ctx.beginPath();
-    ctx.arc(bx, by, 6, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(140, 210, 255, ' + alpha.toFixed(3) + ')';
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(bx, by, 9, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(62, 112, 182, ' + Math.max(0.45, alpha * 0.9).toFixed(3) + ')';
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(bx, by, 12 + (2 * pulse), 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(110, 170, 230, ' + Math.max(0.20, alpha * 0.35).toFixed(3) + ')';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  };
+  if (noContact) {
+    detectMarkerEl.classList.add('hidden');
+    moveMarkerEl.classList.add('hidden');
+    statMarkerEl.classList.add('hidden');
+  } else {
+    detectMarkerEl.classList.remove('hidden');
+    detectMarkerEl.style.left = markerLeft(detectCm, radarNow.maxRangeCm, 7);
+    detectMarkerEl.classList.remove('pulse-fast', 'pulse-slow');
+    if (moveActive) detectMarkerEl.classList.add('pulse-fast');
+    else detectMarkerEl.classList.add('pulse-slow');
 
-  if (!noContact) {
-    if (target === 1) {
-      drawPresenceBlip('moving');
-    } else if (target === 2) {
-      drawPresenceBlip('stationary');
-    } else if (target === 3) {
-      drawPresenceBlip('both');
+    if (moveActive) {
+      moveMarkerEl.classList.remove('hidden');
+      moveMarkerEl.style.left = markerLeft(moveCm, radarNow.maxRangeCm, 6);
     } else {
-      drawPresenceBlip('moving');
+      moveMarkerEl.classList.add('hidden');
+    }
+
+    if (statActive) {
+      statMarkerEl.classList.remove('hidden');
+      statMarkerEl.style.left = markerLeft(statCm, radarNow.maxRangeCm, 6);
+    } else {
+      statMarkerEl.classList.add('hidden');
     }
   }
 
@@ -1647,9 +1677,7 @@ function drawRadarScope(state) {
 }
 
 function animateRadarScope() {
-  if (!radarNow.enabled) return;
-  radarNow.sweepAngleDeg = (radarNow.sweepAngleDeg + 4) % 360;
-  drawRadarScope(radarNow.state);
+  return;
 }
 
 function renderBadgesToEl(el, trend, stats, decimals, unit) {
@@ -2048,27 +2076,38 @@ function initTrends() {
   const radarCard = document.createElement('div');
   radarCard.className = 'card trend-card chart hp-card';
   radarCard.innerHTML =
-    '<div class="trend-top hp-head">' +
+    '<div class="trend-top card-header hp-head">' +
       '<div><b>' + radarTrend.title + '</b></div>' +
       '<div class="hp-tabs">' +
         '<button id="radar-view-now" class="hp-tab active" onclick="setRadarView(\'now\')">Now</button>' +
         '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
       '</div>' +
     '</div>' +
-    '<div id="trend-badges-' + radarTrend.key + '" class="trend-badges hp-badges"></div>' +
-    '<div id="trend-value-' + radarTrend.key + '" class="trend-value">n/a</div>' +
+    '<div id="trend-badges-' + radarTrend.key + '" class="trend-badges hp-badges pill-row"></div>' +
+    '<div id="trend-value-' + radarTrend.key + '" class="trend-value metric-value">n/a</div>' +
     '<div id="radar-now-pane" class="radar-now-wrap">' +
-      '<canvas id="radar-now-canvas" class="radar-canvas"></canvas>' +
+      '<div id="range-strip" class="range-strip">' +
+        '<div class="range-track"></div>' +
+        '<div id="range-marker-detect" class="marker detect hidden"></div>' +
+        '<div id="range-marker-move" class="marker move hidden"></div>' +
+        '<div id="range-marker-stat" class="marker stat hidden"></div>' +
+        '<div class="range-labels"><span>0cm</span><span id="range-max-label">300cm</span></div>' +
+      '</div>' +
+      '<div class="conf-row"><span class="radar-label">Moving Conf</span><div class="conf-bar"><div id="radar-conf-move" class="conf-fill move"></div></div><span id="radar-conf-move-val">--</span></div>' +
+      '<div class="conf-row"><span class="radar-label">Stationary Conf</span><div class="conf-bar"><div id="radar-conf-stat" class="conf-fill stat"></div></div><span id="radar-conf-stat-val">--</span></div>' +
       '<div class="radar-readout">' +
         '<div id="radar-now-state" class="radar-state">RADAR offline</div>' +
         '<div class="radar-line"><span class="radar-label">Bodies</span><span id="radar-now-bodies">--</span></div>' +
         '<div class="radar-line"><span class="radar-label">Moving Confidence</span><span id="radar-now-move">--</span></div>' +
         '<div class="radar-line"><span class="radar-label">Stationary Confidence</span><span id="radar-now-stat">--</span></div>' +
+        '<div class="radar-line"><span class="radar-label">Detect</span><span id="radar-now-detect">--</span></div>' +
+        '<div class="radar-line"><span class="radar-label">Motion signature</span><span id="radar-now-move-sig">--</span></div>' +
+        '<div class="radar-line"><span class="radar-label">Still signature</span><span id="radar-now-stat-sig">--</span></div>' +
         '<div class="radar-line"><span class="radar-label">Target</span><span id="radar-now-target">0/3</span></div>' +
       '</div>' +
     '</div>' +
     '<div id="radar-history-pane" class="hidden">' +
-      '<div class="chart-wrap">' +
+      '<div class="chart-wrap plot">' +
         '<img id="trend-img-' + radarTrend.key + '" class="trend-img" alt="' + radarTrend.title + ' trend" src="/chart/' + radarTrend.key + '.png?minutes=60" />' +
       '</div>' +
     '</div>';
@@ -2081,12 +2120,12 @@ function initTrends() {
     card.dataset.slot = slot;
     card.dataset.trendKey = trend.key;
     card.innerHTML =
-      '<div class="trend-top">' +
+      '<div class="trend-top card-header">' +
         '<div><b id="trend-title-slot-' + slot + '">' + trend.title + '</b></div>' +
-        '<div id="trend-badges-slot-' + slot + '" class="trend-badges"></div>' +
+        '<div id="trend-badges-slot-' + slot + '" class="trend-badges pill-row"></div>' +
       '</div>' +
-      '<div id="trend-value-slot-' + slot + '" class="trend-value">n/a</div>' +
-      '<div class="chart-wrap">' +
+      '<div id="trend-value-slot-' + slot + '" class="trend-value metric-value">n/a</div>' +
+      '<div class="chart-wrap plot">' +
         '<img id="trend-img-slot-' + slot + '" class="trend-img" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
       '</div>';
     root.appendChild(card);
@@ -2795,7 +2834,6 @@ async function pollEvents() {
   await pollStatus();
   await pollTables();
   await pollEvents();
-  setInterval(animateRadarScope, 100);
   setInterval(pollStatus, 1000);
   setInterval(pollReady, 3000);
   setInterval(pollTables, 3000);
