@@ -12,6 +12,7 @@ import uuid
 import statistics
 import datetime
 import threading
+import importlib.util
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -934,6 +935,66 @@ def ensure_event_state_table(conn: sqlite3.Connection) -> None:
   conn.execute("CREATE INDEX IF NOT EXISTS idx_event_state_updated ON event_state(updated_ts_utc);")
 
 
+def ensure_state_events_table(conn: sqlite3.Connection) -> None:
+  conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS state_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts_utc TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      detail TEXT
+    );
+    """
+  )
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_state_events_ts ON state_events(ts_utc);")
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_state_events_type ON state_events(event_type);")
+
+
+def insert_state_event(conn: sqlite3.Connection, *, event_type: str, detail: Dict[str, object]) -> int:
+  ensure_state_events_table(conn)
+  payload = json.dumps(detail or {}, separators=(",", ":"), ensure_ascii=False)
+  cur = conn.execute(
+    "INSERT INTO state_events (ts_utc, event_type, detail) VALUES (?, ?, ?)",
+    (now_utc_iso(), str(event_type), payload),
+  )
+  return int(cur.lastrowid or 0)
+
+
+def compute_air_anomaly_level_for_row(conn: sqlite3.Connection, row: Optional[sqlite3.Row]) -> str:
+  if row is None:
+    return "none"
+  eco2 = row["eco2_ppm"]
+  ts_utc = row["ts_utc"]
+  if eco2 is None or not ts_utc:
+    return "none"
+  try:
+    current_eco2 = float(eco2)
+  except Exception:
+    return "none"
+  baseline_row = conn.execute(
+    """
+    SELECT AVG(eco2_ppm) AS avg_eco2
+    FROM air
+    WHERE eco2_ppm IS NOT NULL
+      AND ts_utc >= datetime(?, '-30 minutes')
+      AND ts_utc < ?
+    """,
+    (str(ts_utc), str(ts_utc)),
+  ).fetchone()
+  if not baseline_row or baseline_row[0] is None:
+    return "none"
+  try:
+    baseline_eco2 = float(baseline_row[0])
+  except Exception:
+    return "none"
+  delta = current_eco2 - baseline_eco2
+  if delta > 300.0:
+    return "high"
+  if delta > 150.0:
+    return "moderate"
+  return "none"
+
+
 def now_utc_iso() -> str:
   return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -1712,6 +1773,74 @@ def api_diag() -> PlainTextResponse:
     return PlainTextResponse(str(output))
 
 
+@APP.get("/api/integrity")
+def api_integrity() -> Dict[str, object]:
+  cmd = run_cmd(["python3", str(CLIENT_PATH), "INTEGRITY"], timeout_sec=2)
+  if cmd.get("ok"):
+    out = str(cmd.get("stdout") or "").strip()
+    if out.startswith("{"):
+      try:
+        data = json.loads(out)
+        if isinstance(data, dict):
+          return data
+      except Exception:
+        pass
+  try:
+    from hermes.linux.logger.daemon import get_ingest_snapshot  # type: ignore
+    return get_ingest_snapshot()
+  except Exception:
+    try:
+      daemon_path = Path(__file__).resolve().parents[3] / "logger" / "daemon.py"
+      spec = importlib.util.spec_from_file_location("hermes_logger_daemon_runtime", str(daemon_path))
+      if spec is None or spec.loader is None:
+        raise RuntimeError("spec_load_failed")
+      module = importlib.util.module_from_spec(spec)
+      spec.loader.exec_module(module)
+      getter = getattr(module, "get_ingest_snapshot", None)
+      if callable(getter):
+        return getter()
+    except Exception as exc:
+      return {"fps_1m": {}, "parse_fail": 0, "truncated": 0, "error": str(exc)}
+  return {"fps_1m": {}, "parse_fail": 0, "truncated": 0}
+
+
+@APP.get("/api/state_events")
+def api_state_events(limit: int = Query(50, ge=1, le=200)) -> Dict[str, object]:
+  if not DB_PATH.exists():
+    return {"rows": []}
+  try:
+    with open_db() as conn:
+      conn.row_factory = sqlite3.Row
+      ensure_state_events_table(conn)
+      rows = conn.execute(
+        "SELECT id, ts_utc, event_type, detail FROM state_events ORDER BY id DESC LIMIT ?",
+        (int(limit),),
+      ).fetchall()
+  except sqlite3.OperationalError as exc:
+    if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+      return {"rows": []}
+    raise
+
+  output: List[Dict[str, object]] = []
+  for row in rows:
+    detail_raw = row["detail"]
+    detail_obj: object = detail_raw
+    if isinstance(detail_raw, str) and detail_raw.strip():
+      try:
+        detail_obj = json.loads(detail_raw)
+      except Exception:
+        detail_obj = detail_raw
+    output.append(
+      {
+        "id": int(row["id"] or 0),
+        "ts_utc": row["ts_utc"],
+        "event_type": str(row["event_type"] or ""),
+        "detail": detail_obj,
+      }
+    )
+  return {"rows": output}
+
+
 @APP.get("/api/ts/{series}")
 def api_ts(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Dict[str, object]:
     points = query_series(series, minutes)
@@ -1844,54 +1973,71 @@ def compute_presence_derived(latest_radar_row, settings, recent_radar_rows=None)
 
 @APP.get("/api/radar/latest")
 def api_radar_latest() -> Dict[str, object]:
-    default = {
-        "alive": 0,
-        "target": 0,
-        "detect_cm": 0,
-        "move_cm": 0,
-        "stat_cm": 0,
-        "move_en": 0,
-        "stat_en": 0,
-        "ts_utc": None,
-        "present_raw": False,
-        "present_derived": False,
-        "self_suppressed": False,
-        "self_reason": None,
-    }
-    if not DB_PATH.exists():
+  default = {
+    "alive": 0,
+    "target": 0,
+    "detect_cm": 0,
+    "move_cm": 0,
+    "stat_cm": 0,
+    "move_en": 0,
+    "stat_en": 0,
+    "ts_utc": None,
+    "present_raw": False,
+    "present_derived": False,
+    "self_suppressed": False,
+    "self_reason": None,
+  }
+  if not DB_PATH.exists():
+    return default
+
+  try:
+    with open_db() as conn:
+      conn.row_factory = sqlite3.Row
+      ensure_state_events_table(conn)
+      settings_payload: Dict[str, object] = get_settings_payload(conn)
+      row = conn.execute(
+        "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+        "FROM radar ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      if not row:
         return default
-    try:
-        with open_db() as conn:
-            conn.row_factory = sqlite3.Row
-            settings_payload: Dict[str, object] = get_settings_payload(conn)
-            row = conn.execute(
-                "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
-                "FROM radar ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            recent_rows = []
-            if row and row["ts_utc"]:
-                try:
-                    latest_ts = parse_iso8601_utc(str(row["ts_utc"]))
-                    persist_s = int(settings_payload.get("radar_self_suppress_persist_s") or 20)
-                    window_s = max(60, min(120, persist_s * 2))
-                    cutoff_ts = (latest_ts - datetime.timedelta(seconds=window_s)).isoformat()
-                    recent_rows = conn.execute(
-                        "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
-                        "FROM radar WHERE ts_utc >= ? ORDER BY ts_utc DESC LIMIT 400",
-                        (cutoff_ts,),
-                    ).fetchall()
-                except Exception:
-                    recent_rows = conn.execute(
-                        "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
-                        "FROM radar ORDER BY ts_utc DESC LIMIT 200",
-                    ).fetchall()
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
-            return default
-        raise
-    if not row:
-        return default
-    payload = {
+
+      prev_row = conn.execute(
+        "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+        "FROM radar ORDER BY id DESC LIMIT 1 OFFSET 1"
+      ).fetchone()
+      wifi_latest_row = conn.execute(
+        "SELECT wifist, rssi, ip, ts_utc FROM esp_net ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      wifi_prev_row = conn.execute(
+        "SELECT wifist, rssi, ip, ts_utc FROM esp_net ORDER BY id DESC LIMIT 1 OFFSET 1"
+      ).fetchone()
+      air_latest_row = conn.execute(
+        "SELECT id, ts_utc, eco2_ppm FROM air ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      air_prev_row = conn.execute(
+        "SELECT id, ts_utc, eco2_ppm FROM air ORDER BY id DESC LIMIT 1 OFFSET 1"
+      ).fetchone()
+
+      recent_rows = []
+      if row["ts_utc"]:
+        try:
+          latest_ts = parse_iso8601_utc(str(row["ts_utc"]))
+          persist_s = int(settings_payload.get("radar_self_suppress_persist_s") or 20)
+          window_s = max(60, min(120, persist_s * 2))
+          cutoff_ts = (latest_ts - datetime.timedelta(seconds=window_s)).isoformat()
+          recent_rows = conn.execute(
+            "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+            "FROM radar WHERE ts_utc >= ? ORDER BY ts_utc DESC LIMIT 400",
+            (cutoff_ts,),
+          ).fetchall()
+        except Exception:
+          recent_rows = conn.execute(
+            "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+            "FROM radar ORDER BY ts_utc DESC LIMIT 200",
+          ).fetchall()
+
+      payload = {
         "alive": int(row["alive"] or 0),
         "target": int(row["target"] or 0),
         "detect_cm": int(row["detect_cm"] or 0),
@@ -1900,20 +2046,90 @@ def api_radar_latest() -> Dict[str, object]:
         "move_en": int(row["move_en"] or 0),
         "stat_en": int(row["stat_en"] or 0),
         "ts_utc": row["ts_utc"],
-    }
-    derived = compute_presence_derived(payload, settings_payload, recent_rows)
-    payload.update(derived)
-    mode = radar_presence_mode(settings_payload)
-    pred_sql, pred_params = radar_present_sql_predicate(settings_payload)
-    payload["presence_debug"] = {
-      "mode": mode,
-      "present_predicate_sql": pred_sql,
-      "present_predicate_params": pred_params,
-      "raw_present_bool": bool((int(payload.get("alive") or 0) == 1) and (int(payload.get("target") or 0) != 0)),
-      "derived_present_bool": bool(payload.get("present_derived")) if "present_derived" in payload else None,
-      "self_suppressed": bool(payload.get("self_suppressed")) if "self_suppressed" in payload else None,
-    }
-    return payload
+      }
+      derived = compute_presence_derived(payload, settings_payload, recent_rows)
+      payload.update(derived)
+      mode = radar_presence_mode(settings_payload)
+      pred_sql, pred_params = radar_present_sql_predicate(settings_payload)
+      payload["presence_debug"] = {
+        "mode": mode,
+        "present_predicate_sql": pred_sql,
+        "present_predicate_params": pred_params,
+        "raw_present_bool": bool((int(payload.get("alive") or 0) == 1) and (int(payload.get("target") or 0) != 0)),
+        "derived_present_bool": bool(payload.get("present_derived")) if "present_derived" in payload else None,
+        "self_suppressed": bool(payload.get("self_suppressed")) if "self_suppressed" in payload else None,
+      }
+
+      wifi_state = wifi_state_from_row(wifi_latest_row)
+      payload["wifi_connected"] = bool(wifi_state.get("connected"))
+      payload["wifist"] = wifi_state.get("wifist")
+
+      air_anomaly_level = compute_air_anomaly_level_for_row(conn, air_latest_row)
+      payload["air_anomaly_level"] = air_anomaly_level
+
+      if prev_row is not None:
+        prev_payload = {
+          "alive": int(prev_row["alive"] or 0),
+          "target": int(prev_row["target"] or 0),
+          "detect_cm": int(prev_row["detect_cm"] or 0),
+          "move_cm": int(prev_row["move_cm"] or 0),
+          "stat_cm": int(prev_row["stat_cm"] or 0),
+          "move_en": int(prev_row["move_en"] or 0),
+          "stat_en": int(prev_row["stat_en"] or 0),
+          "ts_utc": prev_row["ts_utc"],
+        }
+        prev_derived = compute_presence_derived(prev_payload, settings_payload, [])
+        prev_present = bool(prev_derived.get("present_derived"))
+        cur_present = bool(payload.get("present_derived"))
+        if prev_present != cur_present:
+          insert_state_event(
+            conn,
+            event_type="presence_change",
+            detail={
+              "from": "present" if prev_present else "absent",
+              "to": "present" if cur_present else "absent",
+              "ts_utc": payload.get("ts_utc"),
+            },
+          )
+
+      if wifi_prev_row is not None:
+        prev_wifi = wifi_state_from_row(wifi_prev_row)
+        prev_up = bool(prev_wifi.get("connected"))
+        cur_up = bool(wifi_state.get("connected"))
+        if prev_up != cur_up:
+          insert_state_event(
+            conn,
+            event_type="wifi_change",
+            detail={
+              "from": "up" if prev_up else "down",
+              "to": "up" if cur_up else "down",
+              "wifist": wifi_state.get("wifist"),
+              "rssi": wifi_state.get("rssi"),
+              "ip": wifi_state.get("ip"),
+            },
+          )
+
+      if air_prev_row is not None:
+        prev_air_level = compute_air_anomaly_level_for_row(conn, air_prev_row)
+        prev_raised = prev_air_level != "none"
+        cur_raised = air_anomaly_level != "none"
+        if prev_raised != cur_raised:
+          insert_state_event(
+            conn,
+            event_type="air_anomaly_change",
+            detail={
+              "from": "raised" if prev_raised else "cleared",
+              "to": "raised" if cur_raised else "cleared",
+              "level": air_anomaly_level,
+            },
+          )
+
+      conn.commit()
+      return payload
+  except sqlite3.OperationalError as exc:
+    if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+      return default
+    raise
 
 
 @APP.post("/api/radar/calibrate")
@@ -2882,6 +3098,18 @@ HTML_PAGE = """
     .rssi-med  { border-color: rgba(255, 180, 0, 0.70); box-shadow: 0 0 0 1px rgba(255,180,0,0.12) inset; }
     .rssi-poor { border-color: rgba(255, 70, 70, 0.75); box-shadow: 0 0 0 1px rgba(255,70,70,0.12) inset; }
     .status-pill { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; border: 1px solid #2a3b4f; background: #111820; color: #c3d4e6; font-size: 11px; font-weight: 650; }
+    .fresh-age { margin-top: 4px; font-size: 11px; color: #9fb3c8; }
+    .fresh-age.good { color: #7ed48b; }
+    .fresh-age.warn { color: #f0c36d; }
+    .fresh-age.bad { color: #f08f8f; }
+    .integrity-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+    .integrity-table td { padding: 2px 4px; font-size: 12px; border-bottom: 1px solid #22303d; }
+    .integrity-table td:last-child { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .state-timeline { margin-top: 8px; max-height: 180px; overflow: auto; display: grid; gap: 6px; }
+    .state-item { border: 1px solid #273443; border-radius: 8px; padding: 6px 8px; background: #0f1721; }
+    .state-item .meta { font-size: 11px; color: #93a8be; margin-bottom: 2px; }
+    .state-item .title { font-size: 12px; color: #d8e6f4; font-weight: 600; }
+    .state-item .detail { font-size: 11px; color: #b8c7d8; margin-top: 2px; }
     .state-offline { border-color: #5a6775; color: #bdc8d4; }
     .state-none { border-color: #2f5f9b; color: #a7c4e5; }
     .state-moving { border-color: #4ca9ff; color: #c8e6ff; }
@@ -2912,9 +3140,22 @@ HTML_PAGE = """
     <div class=\"card status\"><b>Lines In</b><div id=\"lines\">-</div></div>
     <div class=\"card status\"><b>Last Error</b><div id=\"error\">-</div></div>
     <div id=\"rssiBox\" class=\"card status rssi-box\"><b>RSSI</b><div id=\"top-rssi\">--</div></div>
+    <div class="card">
+      <b>State Timeline</b>
+      <div class="muted small">Latest transitions</div>
+      <div id="stateTimeline" class="state-timeline"></div>
+    </div>
   </div>
 
   <div class=\"row\" id=\"freshness\"></div>
+
+  <div class=\"row\">
+    <div class=\"card\">
+      <b>Telemetry Integrity</b>
+      <div id=\"integrityMeta\" class=\"muted small\" style=\"margin-top:6px\">loading...</div>
+      <div id=\"integrityFps\"></div>
+    </div>
+  </div>
 
   <div class=\"row\">
     <div class=\"card\">
@@ -3926,6 +4167,35 @@ const tableLabels = {
   radar: 'Human Presence',
 };
 const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET','RADAR'];
+const EXPECTED_INTERVALS = {
+  radar: 1,
+  env: 5,
+  air: 5,
+  tof: 1,
+  therm: 1,
+  light: 5,
+  mic: 5,
+  esp_net: 5,
+  hb: 1,
+};
+const FRESHNESS_TABLE_BY_PREFIX = {
+  'HB': 'hb',
+  'ENV': 'env',
+  'AIR': 'air',
+  'LIGHT': 'light',
+  'MIC': 'mic_noise',
+  'ESP,NET': 'esp_net',
+  'RADAR': 'radar',
+};
+const EXPECTED_KEY_BY_PREFIX = {
+  'HB': 'hb',
+  'ENV': 'env',
+  'AIR': 'air',
+  'LIGHT': 'light',
+  'MIC': 'mic',
+  'ESP,NET': 'esp_net',
+  'RADAR': 'radar',
+};
 const radarTrend = { key: 'radar_bodies', title: 'Human Presences', unit: 'bodies', decimals: 0, table: 'radar' };
 const chartTrendOptions = [
   { key: 'air_eco2', title: 'ECO2', unit: 'ppm', decimals: 0, table: 'air' },
@@ -3989,6 +4259,8 @@ let tableController = null;
 let trendController = null;
 let readyController = null;
 let eventsController = null;
+let integrityController = null;
+let stateTimelineController = null;
 let lastUpdatedMs = 0;
 let trendMinutes = 60;
 let chartResizeObserver = null;
@@ -4618,10 +4890,157 @@ function renderFreshness(map) {
   root.innerHTML = '';
   for (const k of displayFresh) {
     const v = (map && map[k]) ? map[k] : 'unknown';
+    const tableName = FRESHNESS_TABLE_BY_PREFIX[k] || '';
+    const expectedKey = EXPECTED_KEY_BY_PREFIX[k] || '';
+    const expectedInterval = Number(EXPECTED_INTERVALS[expectedKey] || 0);
+    const ageSec = latestReady && latestReady.table_age_seconds ? Number(latestReady.table_age_seconds[tableName]) : NaN;
+    const ratio = (Number.isFinite(ageSec) && expectedInterval > 0) ? (ageSec / expectedInterval) : NaN;
+    let ageClass = 'bad';
+    if (Number.isFinite(ratio)) {
+      if (ratio < 2) ageClass = 'good';
+      else if (ratio < 5) ageClass = 'warn';
+    }
+    const ageText = (Number.isFinite(ageSec) && Number.isFinite(ratio))
+      ? ('Age: ' + ageSec.toFixed(1) + 's (' + ratio.toFixed(1) + 'x)')
+      : 'Age: n/a';
     const d = document.createElement('div');
     d.className = 'card tile ' + clsFor(v);
-    d.innerHTML = '<div><b>' + k + '</b></div><div>' + v + '</div>';
+    d.innerHTML = '<div><b>' + k + '</b></div><div>' + v + '</div><div class="fresh-age ' + ageClass + '">' + ageText + '</div>';
     root.appendChild(d);
+  }
+}
+
+function renderIntegrity(data) {
+  const metaEl = document.getElementById('integrityMeta');
+  const fpsEl = document.getElementById('integrityFps');
+  if (!metaEl || !fpsEl) return;
+  const parseFail = Number(data && data.parse_fail || 0);
+  const truncated = Number(data && data.truncated || 0);
+  metaEl.textContent = 'parse_fail: ' + parseFail + ' · truncated: ' + truncated;
+
+  const windows = data && data.windows && typeof data.windows === 'object' ? data.windows : {};
+  const w10 = windows['10'] && typeof windows['10'] === 'object' ? windows['10'] : {};
+  const w60 = windows['60'] && typeof windows['60'] === 'object' ? windows['60'] : {};
+  const c10 = w10.count && typeof w10.count === 'object' ? w10.count : {};
+  const f10 = w10.fps && typeof w10.fps === 'object' ? w10.fps : {};
+  const c60 = w60.count && typeof w60.count === 'object' ? w60.count : {};
+  const f60 = w60.fps && typeof w60.fps === 'object' ? w60.fps : {};
+
+  const allPrefixes = new Set([
+    ...Object.keys(c10),
+    ...Object.keys(f10),
+    ...Object.keys(c60),
+    ...Object.keys(f60),
+  ]);
+
+  let rows = Array.from(allPrefixes)
+    .sort((a, b) => String(a).localeCompare(String(b)))
+    .map((prefix) => {
+      const tenCount = Number(c10[prefix] || 0);
+      const tenFps = Number(f10[prefix] || 0);
+      const sixtyCount = Number(c60[prefix] || 0);
+      const sixtyFps = Number(f60[prefix] || 0);
+      return [
+        prefix,
+        tenCount + ' (' + tenFps.toFixed(2) + '/s)',
+        sixtyCount + ' (' + sixtyFps.toFixed(2) + '/s)',
+      ];
+    });
+
+  if (!rows.length) {
+    const legacy = data && data.fps_1m && typeof data.fps_1m === 'object' ? data.fps_1m : {};
+    rows = Object.entries(legacy)
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+      .map(([prefix, count]) => [String(prefix), 'n/a', String(count) + '/min']);
+  }
+
+  if (!rows.length) {
+    fpsEl.innerHTML = '<div class="muted small" style="margin-top:6px">No fps data yet.</div>';
+    return;
+  }
+  fpsEl.innerHTML =
+    '<table class="integrity-table"><thead><tr><th>Prefix</th><th>10s</th><th>60s</th></tr></thead><tbody>' +
+    rows.map(([prefix, ten, sixty]) => '<tr><td>' + escapeHtml(prefix) + '</td><td>' + escapeHtml(String(ten)) + '</td><td>' + escapeHtml(String(sixty)) + '</td></tr>').join('') +
+    '</tbody></table>';
+}
+
+function renderStateTimeline(rows) {
+  const root = document.getElementById('stateTimeline');
+  if (!root) return;
+  const items = Array.isArray(rows) ? rows : [];
+  if (!items.length) {
+    root.innerHTML = '<div class="muted small">No state transitions yet.</div>';
+    return;
+  }
+  root.innerHTML = items.map((row) => {
+    const ts = row && row.ts_utc ? relativeAge(row.ts_utc) : 'n/a';
+    const rawType = row && row.event_type ? String(row.event_type) : 'unknown';
+    const typeLabel = rawType.replaceAll('_', ' ');
+    let detail = '';
+    if (row && row.detail && typeof row.detail === 'object') {
+      if (Object.prototype.hasOwnProperty.call(row.detail, 'from') || Object.prototype.hasOwnProperty.call(row.detail, 'to')) {
+        const from = Object.prototype.hasOwnProperty.call(row.detail, 'from') ? String(row.detail.from) : '?';
+        const to = Object.prototype.hasOwnProperty.call(row.detail, 'to') ? String(row.detail.to) : '?';
+        detail = from + ' → ' + to;
+      } else {
+        detail = JSON.stringify(row.detail);
+      }
+    } else if (row && row.detail != null) {
+      detail = String(row.detail);
+    }
+    return '<div class="state-item">'
+      + '<div class="meta">' + escapeHtml(ts) + '</div>'
+      + '<div class="title">' + escapeHtml(typeLabel) + '</div>'
+      + '<div class="detail">' + escapeHtml(detail || 'no detail') + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+async function pollStateTimeline() {
+  if (document.visibilityState === 'hidden') {
+    return;
+  }
+  if (stateTimelineController) {
+    stateTimelineController.abort();
+  }
+  const controller = new AbortController();
+  stateTimelineController = controller;
+  try {
+    const data = await fetchJson('/api/state_events?limit=50', controller);
+    renderStateTimeline((data && data.rows) ? data.rows : []);
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      const root = document.getElementById('stateTimeline');
+      if (root) root.innerHTML = '<div class="muted small">state timeline fetch failed</div>';
+    }
+  } finally {
+    if (stateTimelineController === controller) {
+      stateTimelineController = null;
+    }
+  }
+}
+
+async function pollIntegrity() {
+  if (document.visibilityState === 'hidden') {
+    return;
+  }
+  if (integrityController) {
+    integrityController.abort();
+  }
+  const controller = new AbortController();
+  integrityController = controller;
+  try {
+    const data = await fetchJson('/api/integrity', controller);
+    renderIntegrity(data || {});
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      const metaEl = document.getElementById('integrityMeta');
+      if (metaEl) metaEl.textContent = 'integrity fetch failed';
+    }
+  } finally {
+    if (integrityController === controller) {
+      integrityController = null;
+    }
   }
 }
 
@@ -5776,12 +6195,16 @@ async function pollEvents() {
   await pollStatus();
   await pollTables();
   await pollEvents();
+  await pollIntegrity();
+  await pollStateTimeline();
   await loadRadarCalibrationHistory();
   setInterval(pollStatus, 1000);
   setInterval(pollReady, 3000);
   setInterval(pollTables, 3000);
   setInterval(pollTrends, 7000);
   setInterval(pollEvents, 4000);
+  setInterval(pollIntegrity, 5000);
+  setInterval(pollStateTimeline, 5000);
   setInterval(refreshRelativeTimes, 1000);
   setInterval(refreshLastUpdatedLabel, 1000);
 })();

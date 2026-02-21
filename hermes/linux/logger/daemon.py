@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import time
 import sqlite3
@@ -9,6 +10,7 @@ import socket
 import re
 import fcntl
 import sys
+from collections import deque, defaultdict
 from typing import Optional
 import serial
 from serial.tools import list_ports
@@ -38,6 +40,9 @@ PARSER_VERSION = "v1"
 HEALTH_WINDOW_SECS = 60
 HEALTH_MAX_RESPONSE_CHARS = 2000
 FRAME_PREFIX_RE = re.compile(r"^[A-Z]{2,8},")
+ESP_NET_KV_RE = re.compile(r"(wifist|rssi|ntp|ip)=([^,\s]+)")
+MAX_LEN = int(os.environ.get("HERMES_INGEST_MAX_LEN", "240"))
+INTEGRITY_WINDOWS = (10, 60)
 
 EXPECTED_PREFIXES = {
     "HB": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
@@ -93,6 +98,13 @@ parse_fail_stats = {
     "by_prefix_total": {},
     "by_reason_window": {},
     "by_prefix_window": {},
+}
+
+INGEST_STATS = {
+    "prefix_counts": defaultdict(int),
+    "parse_fail": 0,
+    "truncated": 0,
+    "line_samples": deque(maxlen=5000),
 }
 
 TZ_NAME = os.environ.get("HERMES_TZ", "America/Chicago")
@@ -437,6 +449,27 @@ def parse_float(value: Optional[str]):
         return None
 
 
+def extract_esp_net_kvs(line: str, base_kvs: Optional[dict] = None) -> dict:
+    out = {}
+    if base_kvs:
+        for key in ("wifist", "rssi", "ntp", "ip"):
+            value = base_kvs.get(key)
+            if value is not None and str(value) != "":
+                out[key] = str(value)
+
+    if "ESP,NET" not in line:
+        return out
+
+    start = line.find("ESP,NET")
+    if start < 0:
+        return out
+
+    segment = line[start:]
+    for match in ESP_NET_KV_RE.finditer(segment):
+        out[match.group(1)] = match.group(2)
+    return out
+
+
 def valid_rssi_dbm(rssi: Optional[int]) -> bool:
     if rssi is None:
         return False
@@ -609,22 +642,54 @@ def maybe_log_parse_fail_summary(now_ts: float):
     parse_fail_stats["by_prefix_window"].clear()
     parse_fail_stats["window_start"] = now_ts
 
+
+def get_ingest_snapshot():
+    now = time.time()
+    with stats_lock:
+        windows = {}
+        fps_1m = defaultdict(int)
+        samples = list(INGEST_STATS["line_samples"])
+        for seconds in INTEGRITY_WINDOWS:
+            counts = defaultdict(int)
+            for prefix, ts in samples:
+                if now - ts <= float(seconds):
+                    counts[prefix] += 1
+            fps = {prefix: round(count / float(seconds), 3) for prefix, count in counts.items()}
+            windows[str(seconds)] = {
+                "count": dict(counts),
+                "fps": fps,
+            }
+            if seconds == 60:
+                fps_1m = counts
+        return {
+            "windows": windows,
+            "fps_1m": dict(fps_1m),
+            "parse_fail": int(INGEST_STATS["parse_fail"]),
+            "truncated": int(INGEST_STATS["truncated"]),
+        }
+
 def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: str):
     kind, kvs = parse_kv_pairs(line)
     if not kind:
         return
-    if kind == "ESP" and line.startswith("ESP,NET"):
-        wifist = parse_int(kvs.get("wifist"))
-        rssi = parse_int(kvs.get("rssi"))
-        ntp = parse_int(kvs.get("ntp"))
-        ip = kvs.get("ip")
+
+    esp_kvs = extract_esp_net_kvs(line, kvs if kind == "ESP" else None)
+    if esp_kvs:
+        wifist = parse_int(esp_kvs.get("wifist"))
+        rssi = parse_int(esp_kvs.get("rssi"))
+        ntp = parse_int(esp_kvs.get("ntp"))
+        ip = esp_kvs.get("ip")
         if wifist is None and rssi is None and ntp is None and not ip:
-            return
-        conn.execute(
-            "INSERT INTO esp_net (ts_utc, ts_local, wifist, rssi, ntp, ip) VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, ts_local, wifist, rssi, ntp, ip),
-        )
-        return
+            if kind == "ESP" and line.startswith("ESP,NET"):
+                return
+        else:
+            conn.execute(
+                "INSERT INTO esp_net (ts_utc, ts_local, wifist, rssi, ntp, ip) VALUES (?, ?, ?, ?, ?, ?)",
+                (ts, ts_local, wifist, rssi, ntp, ip),
+            )
+            if kind == "ESP" and line.startswith("ESP,NET"):
+                return
+
     if kind == "RADAR":
         alive = parse_int(kvs.get("alive"))
         target = parse_int(kvs.get("target"))
@@ -733,11 +798,12 @@ def classify_parse_failure(line: str):
     if prefix in non_typed:
         return None, prefix
 
-    if prefix == "ESP" and line.startswith("ESP,NET"):
-        wifist_raw = kvs.get("wifist")
-        rssi_raw = kvs.get("rssi")
-        ntp_raw = kvs.get("ntp")
-        ip_raw = kvs.get("ip")
+    esp_kvs = extract_esp_net_kvs(line, kvs if prefix == "ESP" else None)
+    if esp_kvs:
+        wifist_raw = esp_kvs.get("wifist")
+        rssi_raw = esp_kvs.get("rssi")
+        ntp_raw = esp_kvs.get("ntp")
+        ip_raw = esp_kvs.get("ip")
         wifist = parse_int(wifist_raw)
         rssi = parse_int(rssi_raw)
         ntp = parse_int(ntp_raw)
@@ -1021,6 +1087,11 @@ def handle_line(conn: sqlite3.Connection, line: str):
     non_ascii_count = sum(1 for c in line if ord(c) > 127)
     decode_replacement_count = line.count("\ufffd")
     corrupt = not looks_like_frame(line)
+    truncated_line = len(line) > MAX_LEN
+
+    if truncated_line:
+        with stats_lock:
+            INGEST_STATS["truncated"] += 1
 
     with open(raw_path(dt), "a", encoding="utf-8") as f:
         f.write(f"{ts}\t{line}\n")
@@ -1031,6 +1102,10 @@ def handle_line(conn: sqlite3.Connection, line: str):
     )
 
     if corrupt:
+        with stats_lock:
+            INGEST_STATS["prefix_counts"]["CORRUPT"] += 1
+            INGEST_STATS["line_samples"].append(("CORRUPT", time.time()))
+            INGEST_STATS["parse_fail"] += 1
         record_parse_fail(conn, ts, ts_local, line, "corrupt_prefix", "CORRUPT")
         record_ingest_health(
             ts,
@@ -1076,8 +1151,13 @@ def handle_line(conn: sqlite3.Connection, line: str):
     insert_typed_frames(conn, ts, ts_local, line)
     reason, prefix = classify_parse_failure(line)
     if reason:
+        with stats_lock:
+            INGEST_STATS["parse_fail"] += 1
         record_parse_fail(conn, ts, ts_local, line, reason, prefix or "")
     effective_prefix = prefix or frame_prefix_label(line, kind)
+    with stats_lock:
+        INGEST_STATS["prefix_counts"][effective_prefix] += 1
+        INGEST_STATS["line_samples"].append((effective_prefix, time.time()))
     record_ingest_health(
         ts,
         effective_prefix,
@@ -1182,6 +1262,12 @@ def handle_command(cmd_line: str, out_q: queue.Queue):
         except Exception as e:
             update_stats(last_error=f"health format failed: {e}")
             return f"ERR health failed: {e}", False
+    if cmd == "INTEGRITY":
+        try:
+            return json.dumps(get_ingest_snapshot(), separators=(",", ":")), False
+        except Exception as e:
+            update_stats(last_error=f"integrity snapshot failed: {e}")
+            return f"ERR integrity failed: {e}", False
     if cmd == "SEND":
         if not arg:
             return "ERR no payload", False
