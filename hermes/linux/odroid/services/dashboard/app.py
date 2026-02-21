@@ -1,4 +1,5 @@
 import json
+import base64
 import re
 import sqlite3
 import subprocess
@@ -17,12 +18,16 @@ from typing import Dict, List, Optional
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
 APP = FastAPI(title="HERMES Dashboard", version="0.1.0")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+APP.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 cors_origins_env = os.environ.get("HERMES_DASHBOARD_CORS_ORIGINS", "")
 if cors_origins_env.strip():
@@ -456,6 +461,16 @@ def html_escape(text: object) -> str:
   )
 
 
+def resolve_report_logo_src() -> str:
+  logo_path = STATIC_DIR / "hermes-logo-h.jpg"
+  try:
+    raw = logo_path.read_bytes()
+  except Exception:
+    return "/static/hermes-logo-h.jpg"
+  encoded = base64.b64encode(raw).decode("ascii")
+  return f"data:image/jpeg;base64,{encoded}"
+
+
 def build_report_html(
     *,
     range_info: Dict[str, str],
@@ -526,6 +541,7 @@ def build_report_html(
     )
 
   sections_html = "\n".join(sections)
+  report_logo_src = resolve_report_logo_src()
   html_template = """
 <!doctype html>
 <html>
@@ -534,6 +550,8 @@ def build_report_html(
   <title>HERMES Report</title>
   <style>
     body { font-family: Inter, Arial, sans-serif; margin: 18px; color: #1e2937; }
+    .report-brand { margin-bottom: 10px; }
+    .report-brand img { height: 30px; width: auto; display: block; }
     h1 { margin-bottom: 8px; }
     h2 { margin: 18px 0 6px 0; font-size: 18px; }
     section { border: 1px solid #d6dee8; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
@@ -544,12 +562,17 @@ def build_report_html(
   </style>
 </head>
 <body>
+  <div class="report-brand"><img src="__REPORT_LOGO_SRC__" alt="HERMES logo" /></div>
   <h1>HERMES Report</h1>
   __SECTIONS__
 </body>
 </html>
 """
-  return html_template.replace("__SECTIONS__", sections_html)
+  return (
+    html_template
+    .replace("__SECTIONS__", sections_html)
+    .replace("__REPORT_LOGO_SRC__", report_logo_src)
+  )
 
 
 def insert_event_row(
@@ -2310,7 +2333,9 @@ HTML_PAGE = """
       color: #e8eef5;
     }
     h1 { margin: 0 0 4px 0; }
-    .top-nav { margin: 10px 0 14px 0; display: flex; gap: 8px; flex-wrap: wrap; }
+    .top-nav { margin: 10px 0 14px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .brand-link { display: inline-flex; align-items: center; margin-right: 10px; text-decoration: none; }
+    .brand-logo { display: block; height: 30px; width: auto; border-radius: 3px; }
     .nav-link {
       display: inline-flex;
       align-items: center;
@@ -2586,7 +2611,8 @@ def render_top_nav(active_path: str) -> str:
     is_active = href == active_path
     cls = "nav-link active" if is_active else "nav-link"
     links.append(f'<a href="{href}" class="{cls}">{label}</a>')
-  return '<nav class="top-nav" aria-label="Primary">' + "".join(links) + "</nav>"
+  brand = '<a href="/" class="brand-link" aria-label="HERMES Home"><img src="/static/hermes-logo-h.jpg" class="brand-logo" alt="HERMES logo" /></a>'
+  return '<nav class="top-nav" aria-label="Primary">' + brand + "".join(links) + "</nav>"
 
 
 def render_dashboard_page(active_path: str) -> str:
@@ -2611,7 +2637,9 @@ def render_shell_page(active_path: str, title: str, body_html: str, script_js: s
     }}
     h1 {{ margin: 0 0 4px 0; }}
     .muted {{ color: #9fb3c8; }}
-    .top-nav {{ margin: 10px 0 14px 0; display: flex; gap: 8px; flex-wrap: wrap; }}
+    .top-nav {{ margin: 10px 0 14px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .brand-link {{ display: inline-flex; align-items: center; margin-right: 10px; text-decoration: none; }}
+    .brand-logo {{ display: block; height: 30px; width: auto; border-radius: 3px; }}
     .nav-link {{
       display: inline-flex;
       align-items: center;
@@ -5143,6 +5171,11 @@ def field_page() -> HTMLResponse:
 @APP.get("/healthz")
 def healthz() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@APP.get("/health")
+def health() -> Dict[str, str]:
+  return {"status": "ok"}
 
 
 @APP.get("/readyz")

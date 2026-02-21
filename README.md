@@ -1,3 +1,5 @@
+<img src="docs/assets/hermes-logo-h.jpg" alt="HERMES H Logo" width="140" />
+
 # HERMES
 
 Multi-device sensing and logging stack for the HERMES project.
