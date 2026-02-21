@@ -4104,6 +4104,26 @@ function setTrendImageSrc(imgEl, trendKey, cacheBust) {
   imgEl.src = buildChartImageUrl(trendKey, cacheBust, imgEl);
 }
 
+function primeTrendImages(attempt = 0) {
+  const images = Array.from(document.querySelectorAll('img.trend-img'));
+  if (!images.length) return;
+  const cacheBust = Date.now();
+  let needsRetry = false;
+  for (const imgEl of images) {
+    const trendKey = String(imgEl.dataset.trendKey || '').trim();
+    if (!trendKey) continue;
+    const size = getChartRenderSize(imgEl);
+    if (!size || size.width <= 180 || size.height <= 120) {
+      needsRetry = true;
+      continue;
+    }
+    setTrendImageSrc(imgEl, trendKey, cacheBust);
+  }
+  if (needsRetry && attempt < 12) {
+    window.requestAnimationFrame(() => primeTrendImages(attempt + 1));
+  }
+}
+
 function resizeAndRedrawChart(chartId) {
   const imgEl = document.getElementById(chartId);
   if (!imgEl) return;
@@ -5009,7 +5029,7 @@ function initTrends() {
     '</div>' +
     '<div id="radar-history-pane" class="hidden">' +
       '<div class="chart-wrap plot">' +
-        '<img id="trend-img-' + radarTrend.key + '" class="trend-img" data-trend-key="' + radarTrend.key + '" alt="' + radarTrend.title + ' trend" src="/chart/' + radarTrend.key + '.png?minutes=60" />' +
+        '<img id="trend-img-' + radarTrend.key + '" class="trend-img" data-trend-key="' + radarTrend.key + '" alt="' + radarTrend.title + ' trend" src="" />' +
       '</div>' +
     '</div>';
   root.appendChild(radarCard);
@@ -5027,7 +5047,7 @@ function initTrends() {
       '</div>' +
       '<div id="trend-value-slot-' + slot + '" class="trend-value metric-value">n/a</div>' +
       '<div class="chart-wrap plot">' +
-        '<img id="trend-img-slot-' + slot + '" class="trend-img" data-trend-key="' + trend.key + '" alt="' + trend.title + ' trend" src="/chart/' + trend.key + '.png?minutes=60" />' +
+        '<img id="trend-img-slot-' + slot + '" class="trend-img" data-trend-key="' + trend.key + '" alt="' + trend.title + ' trend" src="" />' +
       '</div>';
     root.appendChild(card);
   }
@@ -5748,6 +5768,7 @@ async function pollEvents() {
   await loadDashboardSettings();
   renderChartSlotControls();
   initTrends();
+  primeTrendImages();
   bindPresenceToggleUi();
   setTrendMinutes(60);
   initTables();

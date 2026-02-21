@@ -1043,7 +1043,7 @@ static void sendTelemetryLine() {
   snprintf(
       line,
       sizeof(line),
-      "%sup=%lu,n=%lu,camok=%d,camerr=%d,micok=%d,micerr=%d,camaddr=%d,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s\n",
+      "%sup=%lu,n=%lu,camok=%d,camerr=%d,micok=%d,micerr=%d,camaddr=%d,wifist=%d,rssi=%d,ntp=%lu,heap=%lu,psram=%lu,ct=%s\n",
       SENS_PREFIX,
       static_cast<unsigned long>(uptimeSec),
       static_cast<unsigned long>(frame),
@@ -1052,6 +1052,7 @@ static void sendTelemetryLine() {
       micOk ? 1 : 0,
       micErr,
       cameraAddr,
+      wifiStatus,
       rssi,
       static_cast<unsigned long>(ntpEpoch),
       static_cast<unsigned long>(heap),
