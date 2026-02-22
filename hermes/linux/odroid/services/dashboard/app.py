@@ -3786,7 +3786,12 @@ HTML_PAGE = """
     .radar-pip.near { transform: translateY(-50%) scale(1.16); }
     .radar-pip.mid { transform: translateY(-50%) scale(1.06); }
     .radar-pip.far { transform: translateY(-50%) scale(0.94); }
+    .radar-pip.pulse-lead { animation: radarLeadPulse 1.0s infinite ease-in-out; }
     .radar-pip.ghost { opacity: 0.28; }
+    @keyframes radarLeadPulse {
+      0%, 100% { filter: brightness(1.0); }
+      50% { filter: brightness(1.28); }
+    }
     .radar-strip-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .radar-strip-status { color: #d8e6f4; font-size: 12px; font-weight: 600; }
     .radar-strip-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
@@ -5760,13 +5765,16 @@ function renderRadarReturnStrip(tracksPayload, radarAlive) {
 
   function renderLane(stripEl, items, laneKind) {
     stripEl.innerHTML = '';
+    let leadAssigned = false;
     for (const track of items) {
       const distanceCm = Number(track.d_cm || 0);
       const norm = clamp(distanceCm / rangeCm, 0, 1);
       const left = (norm * 100);
       const pip = document.createElement('div');
       const proximityClass = distanceCm <= 100 ? 'near' : (distanceCm <= 200 ? 'mid' : 'far');
-      pip.className = 'radar-pip ' + laneKind + ' ' + proximityClass + (track.ghost ? ' ghost' : '');
+      const isLead = (laneKind === 'moving') && !track.ghost && !leadAssigned;
+      if (isLead) leadAssigned = true;
+      pip.className = 'radar-pip ' + laneKind + ' ' + proximityClass + (track.ghost ? ' ghost' : '') + (isLead ? ' pulse-lead' : '');
       pip.style.left = `calc(${left.toFixed(2)}% - ${pipRadius}px)`;
       pip.title = String(track.id || '?') + ' · ' + formatDistance(distanceCm, units) + ' · age ' + (Math.max(0, Number(track.age_ms || 0)) / 1000.0).toFixed(1) + 's';
       stripEl.appendChild(pip);
