@@ -15,6 +15,7 @@ import threading
 import importlib.util
 from pathlib import Path
 from typing import Dict, List, Optional
+from dataclasses import dataclass, field
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
@@ -77,6 +78,12 @@ SETTINGS_DEFAULTS = {
   "radar_self_suppress_persist_s": 20,
   "radar_self_suppress_jitter_cm": 15,
   "radar_presence_mode": "raw",
+  "radar_track_enabled": True,
+  "radar_track_match_gate_cm": 60,
+  "radar_track_expire_ms": 2000,
+  "radar_track_confirm_hits": 2,
+  "radar_track_min_energy": 10,
+  "radar_track_jump_reject_cm": 250,
 }
 
 VALID_CHIME_KEYS = {
@@ -379,6 +386,33 @@ def get_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
 
   mode = str(result.get("radar_presence_mode") or "raw").strip().lower()
   result["radar_presence_mode"] = "derived" if mode == "derived" else "raw"
+
+  result["radar_track_enabled"] = bool(result.get("radar_track_enabled", True))
+  try:
+    match_gate_cm = int(result.get("radar_track_match_gate_cm"))
+  except Exception:
+    match_gate_cm = 60
+  result["radar_track_match_gate_cm"] = max(10, min(200, match_gate_cm))
+  try:
+    expire_ms = int(result.get("radar_track_expire_ms"))
+  except Exception:
+    expire_ms = 2000
+  result["radar_track_expire_ms"] = max(500, min(10000, expire_ms))
+  try:
+    confirm_hits = int(result.get("radar_track_confirm_hits"))
+  except Exception:
+    confirm_hits = 2
+  result["radar_track_confirm_hits"] = max(1, min(5, confirm_hits))
+  try:
+    min_energy = int(result.get("radar_track_min_energy"))
+  except Exception:
+    min_energy = 10
+  result["radar_track_min_energy"] = max(0, min(100, min_energy))
+  try:
+    jump_reject_cm = int(result.get("radar_track_jump_reject_cm"))
+  except Exception:
+    jump_reject_cm = 250
+  result["radar_track_jump_reject_cm"] = max(50, min(600, jump_reject_cm))
   return result
 
 
@@ -444,6 +478,39 @@ def save_settings_payload(conn: sqlite3.Connection, updates: Dict[str, object]) 
     mode = str(updates.get("radar_presence_mode") or "raw").strip().lower()
     merged["radar_presence_mode"] = "derived" if mode == "derived" else "raw"
 
+  if "radar_track_enabled" in updates:
+    merged["radar_track_enabled"] = bool(updates.get("radar_track_enabled"))
+  if "radar_track_match_gate_cm" in updates:
+    try:
+      match_gate_cm = int(updates.get("radar_track_match_gate_cm"))
+    except Exception:
+      match_gate_cm = int(current.get("radar_track_match_gate_cm") or 60)
+    merged["radar_track_match_gate_cm"] = max(10, min(200, match_gate_cm))
+  if "radar_track_expire_ms" in updates:
+    try:
+      expire_ms = int(updates.get("radar_track_expire_ms"))
+    except Exception:
+      expire_ms = int(current.get("radar_track_expire_ms") or 2000)
+    merged["radar_track_expire_ms"] = max(500, min(10000, expire_ms))
+  if "radar_track_confirm_hits" in updates:
+    try:
+      confirm_hits = int(updates.get("radar_track_confirm_hits"))
+    except Exception:
+      confirm_hits = int(current.get("radar_track_confirm_hits") or 2)
+    merged["radar_track_confirm_hits"] = max(1, min(5, confirm_hits))
+  if "radar_track_min_energy" in updates:
+    try:
+      min_energy = int(updates.get("radar_track_min_energy"))
+    except Exception:
+      min_energy = int(current.get("radar_track_min_energy") or 10)
+    merged["radar_track_min_energy"] = max(0, min(100, min_energy))
+  if "radar_track_jump_reject_cm" in updates:
+    try:
+      jump_reject_cm = int(updates.get("radar_track_jump_reject_cm"))
+    except Exception:
+      jump_reject_cm = int(current.get("radar_track_jump_reject_cm") or 250)
+    merged["radar_track_jump_reject_cm"] = max(50, min(600, jump_reject_cm))
+
   if not bool(merged.get("radar_self_suppress_enabled")):
     merged["radar_presence_mode"] = "raw"
   if str(merged.get("radar_presence_mode") or "raw") == "derived":
@@ -479,6 +546,230 @@ def reset_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
       (key, json.dumps(value, separators=(",", ":"), ensure_ascii=False), now_ts),
     )
   return dict(SETTINGS_DEFAULTS)
+
+
+@dataclass
+class Track:
+  id: str
+  kind: str
+  d_cm: float
+  energy: int
+  created_ms: int
+  last_seen_ms: int
+  hits: int = 1
+  misses: int = 0
+  history: List[float] = field(default_factory=list)
+
+
+class RadarTrackManager:
+  def __init__(self):
+    self._seq_m = 0
+    self._seq_s = 0
+    self.moving: Dict[str, Track] = {}
+    self.still: Dict[str, Track] = {}
+    self.last_update_ms = 0
+
+  def _now_ms(self) -> int:
+    return int(time.time() * 1000.0)
+
+  def _expire(self, tracks: Dict[str, Track], expire_ms: int, now_ms: int) -> None:
+    stale_ids = [track_id for track_id, track in tracks.items() if (now_ms - int(track.last_seen_ms)) > expire_ms]
+    for track_id in stale_ids:
+      tracks.pop(track_id, None)
+
+  def _new_track_id(self, prefix: str) -> str:
+    if prefix == "M":
+      self._seq_m += 1
+      return f"M{self._seq_m}"
+    self._seq_s += 1
+    return f"S{self._seq_s}"
+
+  def _match_or_create(
+      self,
+      tracks: Dict[str, Track],
+      kind: str,
+      z_cm: Optional[float],
+      z_en: int,
+      now_ms: int,
+      settings: Dict[str, object],
+      prefix: str,
+  ) -> Optional[Track]:
+    min_energy = int(settings.get("radar_track_min_energy") or 10)
+    min_energy = max(0, min(100, min_energy))
+    if z_cm is None or z_cm <= 0:
+      return None
+    if int(z_en) < min_energy:
+      return None
+
+    match_gate_cm = int(settings.get("radar_track_match_gate_cm") or 60)
+    match_gate_cm = max(10, min(200, match_gate_cm))
+    jump_reject_cm = int(settings.get("radar_track_jump_reject_cm") or 250)
+    jump_reject_cm = max(50, min(600, jump_reject_cm))
+
+    nearest_track: Optional[Track] = None
+    nearest_dist = float("inf")
+    for track in tracks.values():
+      dist = abs(float(track.d_cm) - float(z_cm))
+      if dist < nearest_dist:
+        nearest_dist = dist
+        nearest_track = track
+
+    if nearest_track is not None and nearest_dist <= float(match_gate_cm):
+      jump = abs(float(nearest_track.d_cm) - float(z_cm))
+      if jump <= float(jump_reject_cm):
+        nearest_track.d_cm = float(z_cm)
+        nearest_track.energy = int(max(0, min(100, z_en)))
+        nearest_track.last_seen_ms = now_ms
+        nearest_track.hits += 1
+        nearest_track.misses = 0
+        nearest_track.history.append(float(z_cm))
+        if len(nearest_track.history) > 16:
+          nearest_track.history = nearest_track.history[-16:]
+        return nearest_track
+
+    new_track = Track(
+      id=self._new_track_id(prefix),
+      kind=kind,
+      d_cm=float(z_cm),
+      energy=int(max(0, min(100, z_en))),
+      created_ms=now_ms,
+      last_seen_ms=now_ms,
+      hits=1,
+      misses=0,
+      history=[float(z_cm)],
+    )
+    tracks[new_track.id] = new_track
+    return new_track
+
+  def _confidence(self, track: Track) -> int:
+    hist = [float(v) for v in (track.history or [])][-10:]
+    if len(hist) >= 2:
+      stddev = float(statistics.pstdev(hist))
+    else:
+      stddev = 0.0
+    stability = 1.0 / (1.0 + stddev)
+    presence = float(track.hits) / float(track.hits + track.misses + 1)
+    energy_factor = min(1.0, max(0.0, float(track.energy) / 100.0))
+    confidence = 100.0 * stability * presence * (0.5 + 0.5 * energy_factor)
+    return int(max(0.0, min(100.0, confidence)))
+
+  def _serialize_tracks(self, tracks: Dict[str, Track], now_ms: int, confirm_hits: int) -> List[Dict[str, object]]:
+    result: List[Dict[str, object]] = []
+    for track in sorted(tracks.values(), key=lambda item: float(item.d_cm)):
+      result.append({
+        "id": track.id,
+        "d_cm": float(track.d_cm),
+        "energy": int(track.energy),
+        "age_ms": max(0, int(now_ms - int(track.last_seen_ms))),
+        "confidence": self._confidence(track),
+        "confirmed": bool(track.hits >= confirm_hits),
+      })
+    return result
+
+  def update_from_radar(self, radar: Dict[str, object], settings: Dict[str, object]) -> Dict[str, object]:
+    now_ms = self._now_ms()
+    self.last_update_ms = now_ms
+    enabled = bool(settings.get("radar_track_enabled", True))
+    expire_ms = int(settings.get("radar_track_expire_ms") or 2000)
+    expire_ms = max(500, min(10000, expire_ms))
+    confirm_hits = int(settings.get("radar_track_confirm_hits") or 2)
+    confirm_hits = max(1, min(5, confirm_hits))
+
+    if not enabled:
+      self.moving.clear()
+      self.still.clear()
+      return {
+        "moving_tracks": [],
+        "still_tracks": [],
+        "clutter_level": "unknown",
+        "multi_moving_suspected": False,
+        "multi_still_suspected": False,
+      }
+
+    for track in self.moving.values():
+      track.misses += 1
+    for track in self.still.values():
+      track.misses += 1
+
+    self._expire(self.moving, expire_ms, now_ms)
+    self._expire(self.still, expire_ms, now_ms)
+
+    try:
+      move_cm = float(radar.get("move_cm") or 0)
+    except Exception:
+      move_cm = 0.0
+    try:
+      move_en = int(radar.get("move_en") or 0)
+    except Exception:
+      move_en = 0
+    try:
+      stat_cm = float(radar.get("stat_cm") or 0)
+    except Exception:
+      stat_cm = 0.0
+    try:
+      stat_en = int(radar.get("stat_en") or 0)
+    except Exception:
+      stat_en = 0
+    try:
+      target = int(radar.get("target") or 0)
+    except Exception:
+      target = 0
+
+    self._match_or_create(
+      self.moving,
+      kind="moving",
+      z_cm=move_cm if move_cm > 0 else None,
+      z_en=move_en,
+      now_ms=now_ms,
+      settings=settings,
+      prefix="M",
+    )
+    self._match_or_create(
+      self.still,
+      kind="still",
+      z_cm=stat_cm if stat_cm > 0 else None,
+      z_en=stat_en,
+      now_ms=now_ms,
+      settings=settings,
+      prefix="S",
+    )
+
+    self._expire(self.moving, expire_ms, now_ms)
+    self._expire(self.still, expire_ms, now_ms)
+
+    moving_tracks = self._serialize_tracks(self.moving, now_ms, confirm_hits)
+    still_tracks = self._serialize_tracks(self.still, now_ms, confirm_hits)
+
+    confirmed_moving = [t for t in moving_tracks if t.get("confirmed") and int(t.get("age_ms") or 0) <= expire_ms]
+    confirmed_still = [t for t in still_tracks if t.get("confirmed") and int(t.get("age_ms") or 0) <= expire_ms]
+    multi_moving_suspected = len(confirmed_moving) >= 2
+    multi_still_suspected = len(confirmed_still) >= 2
+
+    moving_var = 0.0
+    if len(confirmed_moving) >= 2:
+      moving_var = float(statistics.pstdev([float(t.get("d_cm") or 0.0) for t in confirmed_moving]))
+    still_var = 0.0
+    if len(confirmed_still) >= 2:
+      still_var = float(statistics.pstdev([float(t.get("d_cm") or 0.0) for t in confirmed_still]))
+    energy_unstable = abs(int(move_en) - int(stat_en)) >= 30
+
+    if multi_moving_suspected or multi_still_suspected or moving_var >= 80.0 or still_var >= 80.0:
+      clutter_level = "high"
+    elif target != 0 and energy_unstable:
+      clutter_level = "medium"
+    else:
+      clutter_level = "low"
+
+    return {
+      "moving_tracks": moving_tracks,
+      "still_tracks": still_tracks,
+      "clutter_level": clutter_level,
+      "multi_moving_suspected": multi_moving_suspected,
+      "multi_still_suspected": multi_still_suspected,
+    }
+
+
+RADAR_TRACKER = RadarTrackManager()
 
 
 def radar_presence_mode(settings: Dict[str, object]) -> str:
@@ -1540,6 +1831,162 @@ def render_sparkline_png(series: str, minutes: int, points: List[Dict[str, objec
         del chart_render_ms_samples[: len(chart_render_ms_samples) - CHART_RENDER_SAMPLES_MAX]
 
 
+def _series_axis_limits(series: str, values: List[float], stepped: bool) -> Optional[tuple]:
+  if not values:
+    return None
+  if stepped:
+    lo = min(values) - 0.5
+    hi = max(values) + 0.5
+    if lo == hi:
+      lo -= 0.5
+      hi += 0.5
+    return (lo, hi)
+
+  min_span_total_by_series = {
+    "env_temp": 0.6,
+    "env_hum": 4.0,
+    "air_eco2": 60.0,
+    "air_tvoc": 40.0,
+    "esp_rssi": 10.0,
+    "radar_target": 3.0,
+    "radar_bodies": 2.0,
+  }
+  robust_q_by_series = {
+    "esp_rssi": 0.90,
+  }
+
+  center = sum(values) / len(values)
+  abs_devs = sorted(abs(v - center) for v in values)
+  q = float(robust_q_by_series.get(series, 0.95))
+  q = min(max(q, 0.0), 1.0)
+  q_index = int((len(abs_devs) - 1) * q)
+  q_index = min(max(q_index, 0), len(abs_devs) - 1)
+  robust_dev = abs_devs[q_index]
+
+  pad = 0.10
+  half_span = robust_dev * (1.0 + pad)
+  min_span_total = float(min_span_total_by_series.get(series, 0.2))
+  half_span = max(half_span, min_span_total / 2.0)
+  half_span = max(half_span, 1e-6)
+
+  lo = center - half_span
+  hi = center + half_span
+  y_min = min(values)
+  y_max = max(values)
+
+  if y_min < lo or y_max > hi:
+    full_range = max(1e-9, y_max - y_min)
+    pad2 = full_range * 0.10
+    lo = min(lo, y_min - pad2)
+    hi = max(hi, y_max + pad2)
+
+  if lo == hi:
+    lo -= 0.5
+    hi += 0.5
+
+  return (lo, hi)
+
+
+def render_overlay_sparkline_png(
+  left_series: str,
+  right_series: str,
+  minutes: int,
+  left_points: List[Dict[str, object]],
+  right_points: List[Dict[str, object]],
+  width_px: int,
+  height_px: int,
+  device_pixel_ratio: float,
+) -> bytes:
+  left_cfg = SERIES_MAP[left_series]
+  right_cfg = SERIES_MAP[right_series]
+  render_start = time.perf_counter()
+  width_px = max(180, min(2200, int(width_px or 528)))
+  height_px = max(120, min(1400, int(height_px or 226)))
+  dpr = max(1.0, min(3.0, float(device_pixel_ratio or 1.0)))
+  base_dpi = 100
+  fig_w = width_px / float(base_dpi)
+  fig_h = height_px / float(base_dpi)
+  render_dpi = int(round(base_dpi * dpr))
+
+  def as_xy(points: List[Dict[str, object]]) -> tuple:
+    xs: List[int] = []
+    ys: List[float] = []
+    for index, item in enumerate(points):
+      try:
+        value = float(item.get("v"))
+      except (TypeError, ValueError):
+        continue
+      if math.isnan(value):
+        continue
+      xs.append(index)
+      ys.append(value)
+    return xs, ys
+
+  left_x, left_y = as_xy(left_points)
+  right_x, right_y = as_xy(right_points)
+
+  try:
+    with chart_render_lock:
+      fig, ax_left = plt.subplots(figsize=(fig_w, fig_h), dpi=render_dpi)
+      fig.patch.set_facecolor("#151c24")
+      ax_left.set_facecolor("#151c24")
+      ax_right = ax_left.twinx()
+      ax_right.set_facecolor("none")
+
+    if left_y:
+      ax_left.plot(left_x, left_y, color=left_cfg["color"], linewidth=1.8)
+      ax_left.fill_between(left_x, left_y, color=left_cfg["color"], alpha=0.10)
+      limits = _series_axis_limits(left_series, left_y, bool(left_cfg.get("stepped")))
+      if limits:
+        ax_left.set_ylim(limits[0], limits[1])
+
+    if right_y:
+      ax_right.plot(right_x, right_y, color=right_cfg["color"], linewidth=1.8)
+      ax_right.fill_between(right_x, right_y, color=right_cfg["color"], alpha=0.10)
+      limits = _series_axis_limits(right_series, right_y, bool(right_cfg.get("stepped")))
+      if limits:
+        ax_right.set_ylim(limits[0], limits[1])
+
+    if not left_y and not right_y:
+      ax_left.text(0.5, 0.5, "no data", transform=ax_left.transAxes, va="center", ha="center", color="#8ea1b3", fontsize=9)
+
+    ax_left.set_xticks([])
+    ax_left.grid(axis="y", color="#2a3440", alpha=0.45, linewidth=0.6)
+    ax_left.tick_params(axis="y", colors=left_cfg["color"], length=2, width=0.6)
+    ax_right.tick_params(axis="y", colors=right_cfg["color"], length=2, width=0.6)
+
+    ax_left.text(0.01, 0.98, left_cfg["label"], transform=ax_left.transAxes, va="top", ha="left", color=left_cfg["color"], fontsize=8)
+    ax_left.text(0.99, 0.98, right_cfg["label"], transform=ax_left.transAxes, va="top", ha="right", color=right_cfg["color"], fontsize=8)
+    ax_left.text(0.99, 0.03, f"{minutes}m", transform=ax_left.transAxes, va="bottom", ha="right", color="#8ea1b3", fontsize=7)
+
+    for name, spine in ax_left.spines.items():
+      if name == "left":
+        spine.set_visible(True)
+        spine.set_color("#2a3440")
+        spine.set_linewidth(0.8)
+      else:
+        spine.set_visible(False)
+    for name, spine in ax_right.spines.items():
+      if name == "right":
+        spine.set_visible(True)
+        spine.set_color("#2a3440")
+        spine.set_linewidth(0.8)
+      else:
+        spine.set_visible(False)
+
+    fig.tight_layout(pad=0.2)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor=fig.get_facecolor())
+    plt.close(fig)
+    return buf.getvalue()
+  finally:
+    render_ms = (time.perf_counter() - render_start) * 1000.0
+    with chart_metrics_lock:
+      chart_render_ms_samples.append(render_ms)
+      if len(chart_render_ms_samples) > CHART_RENDER_SAMPLES_MAX:
+        del chart_render_ms_samples[: len(chart_render_ms_samples) - CHART_RENDER_SAMPLES_MAX]
+
+
 @APP.get("/api/status")
 def api_status() -> Dict[str, object]:
     cmd = run_cmd(["python3", str(CLIENT_PATH), "status"], timeout_sec=2)
@@ -2236,6 +2683,55 @@ def api_radar_latest() -> Dict[str, object]:
     raise
 
 
+@APP.get("/api/radar/tracks")
+def api_radar_tracks() -> Dict[str, object]:
+  default = {
+    "ts_utc": None,
+    "moving_tracks": [],
+    "still_tracks": [],
+    "clutter_level": "unknown",
+    "multi_moving_suspected": False,
+    "multi_still_suspected": False,
+  }
+  if not DB_PATH.exists():
+    return default
+
+  try:
+    with open_db() as conn:
+      conn.row_factory = sqlite3.Row
+      settings_payload: Dict[str, object] = get_settings_payload(conn)
+      row = conn.execute(
+        "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+        "FROM radar ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      if not row:
+        return default
+
+      latest = {
+        "alive": int(row["alive"] or 0),
+        "target": int(row["target"] or 0),
+        "detect_cm": int(row["detect_cm"] or 0),
+        "move_cm": int(row["move_cm"] or 0),
+        "stat_cm": int(row["stat_cm"] or 0),
+        "move_en": int(row["move_en"] or 0),
+        "stat_en": int(row["stat_en"] or 0),
+        "ts_utc": row["ts_utc"],
+      }
+      summary = RADAR_TRACKER.update_from_radar(latest, settings_payload)
+      return {
+        "ts_utc": latest.get("ts_utc"),
+        "moving_tracks": summary.get("moving_tracks") or [],
+        "still_tracks": summary.get("still_tracks") or [],
+        "clutter_level": summary.get("clutter_level") or "unknown",
+        "multi_moving_suspected": bool(summary.get("multi_moving_suspected")),
+        "multi_still_suspected": bool(summary.get("multi_still_suspected")),
+      }
+  except sqlite3.OperationalError as exc:
+    if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+      return default
+    raise
+
+
 @APP.post("/api/radar/calibrate")
 def api_radar_calibrate_start(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
     duration_s = int(payload.get("duration_s", 60) or 60)
@@ -2463,6 +2959,53 @@ def chart_png(
             oldest = sorted(chart_cache.items(), key=lambda kv: kv[1][0])[: max(1, len(chart_cache) - MAX_CACHE_KEYS)]
             for k, _ in oldest:
                 chart_cache.pop(k, None)
+
+    return Response(content=payload, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@APP.get("/chart_overlay.png")
+def chart_overlay_png(
+  left: str = Query(...),
+  right: str = Query(...),
+  minutes: int = Query(60, ge=1, le=24 * 60),
+  w: int = Query(528, ge=120, le=2400),
+  h: int = Query(226, ge=100, le=1600),
+  dpr: float = Query(1.0, ge=1.0, le=3.0),
+) -> Response:
+    allowed = {"env_temp", "env_hum", "air_eco2", "air_tvoc"}
+    if left not in allowed or right not in allowed:
+      raise HTTPException(status_code=404, detail="series not allowed")
+    if left == right:
+      raise HTTPException(status_code=400, detail="left and right must differ")
+
+    if minutes <= 10:
+      minutes = 5
+    elif minutes <= 90:
+      minutes = 60
+    else:
+      minutes = 240
+
+    width_px = int(w)
+    height_px = int(h)
+    dpr_norm = float(dpr)
+
+    cache_key = f"overlay:{left}:{right}:{minutes}:{width_px}:{height_px}:{dpr_norm:.2f}"
+    now = time.time()
+    with chart_cache_lock:
+      cached = chart_cache.get(cache_key)
+      if cached and (now - cached[0]) < CHART_CACHE_TTL_SECS:
+        return Response(content=cached[1], media_type="image/png", headers={"Cache-Control": "no-store"})
+
+    left_points = query_series(left, minutes)
+    right_points = query_series(right, minutes)
+    payload = render_overlay_sparkline_png(left, right, minutes, left_points, right_points, width_px, height_px, dpr_norm)
+
+    with chart_cache_lock:
+      chart_cache[cache_key] = (now, payload)
+      if len(chart_cache) > MAX_CACHE_KEYS:
+        oldest = sorted(chart_cache.items(), key=lambda kv: kv[1][0])[: max(1, len(chart_cache) - MAX_CACHE_KEYS)]
+        for k, _ in oldest:
+          chart_cache.pop(k, None)
 
     return Response(content=payload, media_type="image/png", headers={"Cache-Control": "no-store"})
 
@@ -3233,16 +3776,21 @@ HTML_PAGE = """
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
     .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
-    .radar-people { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-    .radar-person { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 6px 8px; border: 1px solid #26313d; border-radius: 8px; background: #0f1620; }
-    .radar-person-name { font-weight: 700; color: #d8e6f4; }
-    .radar-person-meta { color: #9fb3c8; font-size: 11px; }
-    .radar-person-conf { color: #cfe2f4; font-weight: 600; white-space: nowrap; }
-    .home2-grid { display: grid; grid-template-columns: minmax(640px, 2fr) minmax(520px, 2.2fr); gap: 14px; width: 100%; }
+    .returns-root { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .returns-row { display: flex; flex-direction: column; gap: 4px; }
+    .returns-title { color: #9fb3c8; font-size: 12px; font-weight: 700; }
+    .returns-list { color: #d8e6f4; font-size: 12px; line-height: 1.5; }
+    .returns-item { padding: 4px 6px; border: 1px solid #26313d; border-radius: 8px; background: #0f1620; }
+    .returns-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .home2-grid { display: grid; grid-template-columns: minmax(640px, 2fr) minmax(520px, 2.2fr); gap: 14px; width: 100%; align-items: stretch; }
     .home2-left { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
     .home2-combo-card { min-width: 0; }
-    .home2-combo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .home2-combo-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+    .home2-metric { border: 1px solid #26313d; border-radius: 8px; background: #0f1620; padding: 6px 8px; }
+    .home2-metric .title { color: #9fb3c8; font-size: 12px; margin-bottom: 2px; }
+    .home2-metric .value { font-size: 26px; line-height: 1.1; font-weight: 700; margin-bottom: 2px; }
     .home2-presence { min-width: 0; }
+    .home2-presence .hp-card { height: 100%; }
     @media (max-width: 1400px) {
       .home2-grid { grid-template-columns: 1fr; }
     }
@@ -4515,6 +5063,14 @@ const radarNow = {
     ts_utc: null,
   },
 };
+let radarTracksNow = {
+  ts_utc: null,
+  moving_tracks: [],
+  still_tracks: [],
+  clutter_level: 'unknown',
+  multi_moving_suspected: false,
+  multi_still_suspected: false,
+};
 const tableState = {};
 const tableRowLimit = {};
 const eventsState = {
@@ -4684,9 +5240,28 @@ function buildChartImageUrl(trendKey, cacheBust, imgEl) {
   return '/chart/' + trendKey + '.png?minutes=' + trendMinutes + '&w=' + width + '&h=' + height + '&dpr=' + dpr.toFixed(2) + '&ts=' + cacheBust;
 }
 
+function buildOverlayImageUrl(leftKey, rightKey, cacheBust, imgEl) {
+  const size = getChartRenderSize(imgEl);
+  const dpr = Math.max(1, Math.min(3, Number(window.devicePixelRatio || 1)));
+  const width = size ? size.width : 528;
+  const height = size ? size.height : 226;
+  return '/chart_overlay.png?left=' + encodeURIComponent(leftKey)
+    + '&right=' + encodeURIComponent(rightKey)
+    + '&minutes=' + trendMinutes
+    + '&w=' + width
+    + '&h=' + height
+    + '&dpr=' + dpr.toFixed(2)
+    + '&ts=' + cacheBust;
+}
+
 function setTrendImageSrc(imgEl, trendKey, cacheBust) {
   if (!imgEl || !trendKey) return;
   imgEl.src = buildChartImageUrl(trendKey, cacheBust, imgEl);
+}
+
+function setOverlayImageSrc(imgEl, leftKey, rightKey, cacheBust) {
+  if (!imgEl || !leftKey || !rightKey) return;
+  imgEl.src = buildOverlayImageUrl(leftKey, rightKey, cacheBust, imgEl);
 }
 
 function primeTrendImages(attempt = 0) {
@@ -4696,13 +5271,19 @@ function primeTrendImages(attempt = 0) {
   let needsRetry = false;
   for (const imgEl of images) {
     const trendKey = String(imgEl.dataset.trendKey || '').trim();
-    if (!trendKey) continue;
+    const overlayLeft = String(imgEl.dataset.overlayLeft || '').trim();
+    const overlayRight = String(imgEl.dataset.overlayRight || '').trim();
+    if (!trendKey && !(overlayLeft && overlayRight)) continue;
     const size = getChartRenderSize(imgEl);
     if (!size || size.width <= 180 || size.height <= 120) {
       needsRetry = true;
       continue;
     }
-    setTrendImageSrc(imgEl, trendKey, cacheBust);
+    if (overlayLeft && overlayRight) {
+      setOverlayImageSrc(imgEl, overlayLeft, overlayRight, cacheBust);
+    } else {
+      setTrendImageSrc(imgEl, trendKey, cacheBust);
+    }
   }
   if (needsRetry && attempt < 12) {
     window.requestAnimationFrame(() => primeTrendImages(attempt + 1));
@@ -4713,6 +5294,12 @@ function resizeAndRedrawChart(chartId) {
   const imgEl = document.getElementById(chartId);
   if (!imgEl) return;
   const trendKey = String(imgEl.dataset.trendKey || '').trim();
+  const overlayLeft = String(imgEl.dataset.overlayLeft || '').trim();
+  const overlayRight = String(imgEl.dataset.overlayRight || '').trim();
+  if (overlayLeft && overlayRight) {
+    setOverlayImageSrc(imgEl, overlayLeft, overlayRight, Date.now());
+    return;
+  }
   if (!trendKey) return;
   setTrendImageSrc(imgEl, trendKey, Date.now());
 }
@@ -5077,18 +5664,12 @@ function updateRadarReadout(state) {
   const target = Number(state.target || 0);
   const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
   const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
-  const detectCm = Math.round(clamp(Number(state.detect_cm || 0), 0, radarNow.maxRangeCm));
-  const moveCm = Math.round(clamp(Number(state.move_cm || 0), 0, radarNow.maxRangeCm));
-  const statCm = Math.round(clamp(Number(state.stat_cm || 0), 0, radarNow.maxRangeCm));
   const moveActive = alive && (moveMetric > 0 || target === 1 || target === 3);
   const statActive = alive && (statMetric > 0 || target === 2 || target === 3);
-  const bodyCount = getStableBodies(target);
 
   const stateEl = document.getElementById('radar-now-state');
   const statePillEl = document.getElementById('radar-now-state-pill');
   const selfNoteEl = document.getElementById('radar-now-self-note');
-  const peopleEl = document.getElementById('radar-now-people');
-  const units = currentDistanceUnit();
   const hasDerived = Object.prototype.hasOwnProperty.call(state || {}, 'present_derived');
   const derivedEnabled = !!useDerivedPresence && hasDerived;
   const derivedPresent = derivedEnabled ? !!state.present_derived : false;
@@ -5126,41 +5707,51 @@ function updateRadarReadout(state) {
   if (selfNoteEl) {
     selfNoteEl.textContent = selfSuppressed ? 'Self suppressed' : '';
   }
-  if (peopleEl) {
-    if (!alive || effectiveTarget === 0 || bodyCount <= 0) {
-      peopleEl.innerHTML = '<div class="muted">No humans detected.</div>';
-    } else {
-      const people = [];
-      const moveDist = moveCm > 0 ? moveCm : detectCm;
-      const statDist = statCm > 0 ? statCm : detectCm;
-      const moveConfidence = Math.round(clamp(moveMetric > 0 ? moveMetric : (moveState ? 55 : 0), 0, 100));
-      const statConfidence = Math.round(clamp(statMetric > 0 ? statMetric : (statState ? 55 : 0), 0, 100));
+  renderRadarReturns(radarTracksNow, alive);
+}
 
-      if (moveState) {
-        people.push({ mode: 'Moving', distanceCm: moveDist, confidence: moveConfidence });
-      }
-      if (statState) {
-        people.push({ mode: 'Stationary', distanceCm: statDist, confidence: statConfidence });
-      }
-      if (!people.length) {
-        people.push({ mode: 'Detected', distanceCm: detectCm, confidence: 50 });
-      }
-
-      people.sort((left, right) => Number(left.distanceCm || 0) - Number(right.distanceCm || 0));
-      peopleEl.innerHTML = people.slice(0, Math.max(1, bodyCount)).map((person, index) => {
-        const name = index === 0 ? 'You' : `Human ${index + 1}`;
-        const distance = formatDistance(person.distanceCm, units);
-        return ''
-          + '<div class="radar-person">'
-          +   '<div>'
-          +     `<div class="radar-person-name">${name}</div>`
-          +     `<div class="radar-person-meta">${person.mode} · ${distance}</div>`
-          +   '</div>'
-          +   `<div class="radar-person-conf">${person.confidence}%</div>`
-          + '</div>';
-      }).join('');
-    }
+function renderRadarReturns(tracksPayload, radarAlive) {
+  const movingEl = document.getElementById('radar-moving-list');
+  const stillEl = document.getElementById('radar-still-list');
+  const badgesEl = document.getElementById('radar-clutter-badges');
+  if (!movingEl || !stillEl || !badgesEl) return;
+  const units = currentDistanceUnit();
+  if (!radarAlive) {
+    movingEl.innerHTML = '<div class="muted">—</div>';
+    stillEl.innerHTML = '<div class="muted">—</div>';
+    badgesEl.innerHTML = '<span class="chip chip-neutral">Clutter: Unknown</span>';
+    return;
   }
+
+  const moving = Array.isArray(tracksPayload && tracksPayload.moving_tracks) ? tracksPayload.moving_tracks : [];
+  const still = Array.isArray(tracksPayload && tracksPayload.still_tracks) ? tracksPayload.still_tracks : [];
+  const movingConfirmed = moving.filter((item) => !!item.confirmed);
+  const stillConfirmed = still.filter((item) => !!item.confirmed);
+
+  const renderList = (items) => {
+    if (!items.length) return '<div class="muted">—</div>';
+    return items.map((track) => {
+      const id = String(track.id || '?');
+      const distance = formatDistance(Number(track.d_cm || 0), units);
+      const confidence = Math.round(clamp(Number(track.confidence || 0), 0, 100));
+      const ageSec = Math.max(0, Number(track.age_ms || 0)) / 1000.0;
+      return '<div class="returns-item">' + id + ' · ' + distance + ' · ' + confidence + '% · ' + ageSec.toFixed(1) + 's</div>';
+    }).join('');
+  };
+
+  movingEl.innerHTML = renderList(movingConfirmed);
+  stillEl.innerHTML = renderList(stillConfirmed);
+
+  const clutterRaw = String((tracksPayload && tracksPayload.clutter_level) || 'unknown').toLowerCase();
+  const clutterLabel = clutterRaw === 'high' ? 'High' : (clutterRaw === 'medium' ? 'Med' : (clutterRaw === 'low' ? 'Low' : 'Unknown'));
+  const chips = ['<span class="chip chip-neutral">Clutter: ' + clutterLabel + '</span>'];
+  if (tracksPayload && tracksPayload.multi_moving_suspected) {
+    chips.push('<span class="chip chip-warn">Multiple movers suspected</span>');
+  }
+  if (tracksPayload && tracksPayload.multi_still_suspected) {
+    chips.push('<span class="chip chip-warn">Multiple still returns suspected</span>');
+  }
+  badgesEl.innerHTML = chips.join('');
 }
 
 function drawRadarScope(state) {
@@ -5774,31 +6365,41 @@ function initTrends() {
     const leftCol = document.createElement('div');
     leftCol.className = 'home2-left';
 
-    const makeComboCard = (title, pairs) => {
+    const makeComboCard = (title, left, right, comboId) => {
       const card = document.createElement('div');
       card.className = 'card trend-card chart home2-combo-card';
       card.innerHTML =
         '<div class="trend-top card-header"><div><b>' + title + '</b></div></div>' +
-        '<div class="home2-combo-grid">' +
-          pairs.map((pair) => (
-            '<div class="card" style="margin:0">'
-              + '<div class="trend-top card-header" style="padding:8px 10px 6px 10px;margin:0"><div><b id="' + pair.titleId + '">' + pair.title + '</b></div><div id="' + pair.badgesId + '" class="trend-badges pill-row"></div></div>'
-              + '<div id="' + pair.valueId + '" class="trend-value metric-value">n/a</div>'
-              + '<div class="chart-wrap plot"><img id="' + pair.imgId + '" class="trend-img" data-trend-key="' + pair.trendKey + '" alt="' + pair.title + ' trend" src="" /></div>'
-            + '</div>'
-          )).join('') +
+        '<div class="home2-combo-meta">' +
+          '<div class="home2-metric">' +
+            '<div class="title">' + left.title + '</div>' +
+            '<div id="trend-value-home2-' + left.trendKey + '" class="value">n/a</div>' +
+            '<div id="trend-badges-home2-' + left.trendKey + '" class="trend-badges pill-row"></div>' +
+          '</div>' +
+          '<div class="home2-metric">' +
+            '<div class="title">' + right.title + '</div>' +
+            '<div id="trend-value-home2-' + right.trendKey + '" class="value">n/a</div>' +
+            '<div id="trend-badges-home2-' + right.trendKey + '" class="trend-badges pill-row"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="chart-wrap plot">' +
+          '<img id="trend-img-home2-combo-' + comboId + '" class="trend-img" data-overlay-left="' + left.trendKey + '" data-overlay-right="' + right.trendKey + '" alt="' + title + ' trend" src="" />' +
         '</div>';
       return card;
     };
 
-    leftCol.appendChild(makeComboCard('Temp + Humidity', [
-      { trendKey: 'env_temp', title: 'Temp', titleId: 'trend-title-home2-env_temp', badgesId: 'trend-badges-home2-env_temp', valueId: 'trend-value-home2-env_temp', imgId: 'trend-img-home2-env_temp' },
-      { trendKey: 'env_hum', title: 'Humidity', titleId: 'trend-title-home2-env_hum', badgesId: 'trend-badges-home2-env_hum', valueId: 'trend-value-home2-env_hum', imgId: 'trend-img-home2-env_hum' },
-    ]));
-    leftCol.appendChild(makeComboCard('ECO2 + TVOC', [
-      { trendKey: 'air_eco2', title: 'ECO2', titleId: 'trend-title-home2-air_eco2', badgesId: 'trend-badges-home2-air_eco2', valueId: 'trend-value-home2-air_eco2', imgId: 'trend-img-home2-air_eco2' },
-      { trendKey: 'air_tvoc', title: 'TVOC', titleId: 'trend-title-home2-air_tvoc', badgesId: 'trend-badges-home2-air_tvoc', valueId: 'trend-value-home2-air_tvoc', imgId: 'trend-img-home2-air_tvoc' },
-    ]));
+    leftCol.appendChild(makeComboCard(
+      'Temp + Humidity',
+      { trendKey: 'env_temp', title: 'Temp' },
+      { trendKey: 'env_hum', title: 'Humidity' },
+      'env'
+    ));
+    leftCol.appendChild(makeComboCard(
+      'ECO2 + TVOC',
+      { trendKey: 'air_eco2', title: 'ECO2' },
+      { trendKey: 'air_tvoc', title: 'TVOC' },
+      'air'
+    ));
 
     const radarWrap = document.createElement('div');
     radarWrap.className = 'home2-presence';
@@ -5851,7 +6452,17 @@ function initTrends() {
             '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
           '</div>' +
           '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
-          '<div id="radar-now-people" class="radar-people"><div class="muted">No humans detected.</div></div>' +
+          '<div id="radar-returns" class="returns-root">' +
+            '<div class="returns-row">' +
+              '<div class="returns-title">Moving returns</div>' +
+              '<div id="radar-moving-list" class="returns-list"><div class="muted">—</div></div>' +
+            '</div>' +
+            '<div class="returns-row">' +
+              '<div class="returns-title">Still returns</div>' +
+              '<div id="radar-still-list" class="returns-list"><div class="muted">—</div></div>' +
+            '</div>' +
+            '<div id="radar-clutter-badges" class="returns-badges"></div>' +
+          '</div>' +
         '</div>' +
       '</div>' +
       '<div id="radar-history-pane" class="hidden">' +
@@ -5921,7 +6532,17 @@ function initTrends() {
           '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
         '</div>' +
         '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
-        '<div id="radar-now-people" class="radar-people"><div class="muted">No humans detected.</div></div>' +
+        '<div id="radar-returns" class="returns-root">' +
+          '<div class="returns-row">' +
+            '<div class="returns-title">Moving returns</div>' +
+            '<div id="radar-moving-list" class="returns-list"><div class="muted">—</div></div>' +
+          '</div>' +
+          '<div class="returns-row">' +
+            '<div class="returns-title">Still returns</div>' +
+            '<div id="radar-still-list" class="returns-list"><div class="muted">—</div></div>' +
+          '</div>' +
+          '<div id="radar-clutter-badges" class="returns-badges"></div>' +
+        '</div>' +
       '</div>' +
     '</div>' +
     '<div id="radar-history-pane" class="hidden">' +
@@ -6512,12 +7133,16 @@ async function pollTrends() {
     for (const [key, data] of results) {
       trendData[key] = data;
     }
-    const radarLatest = await fetchJson('/api/radar/latest', controller);
+    const [radarLatest, radarTracks] = await Promise.all([
+      fetchJson('/api/radar/latest', controller),
+      fetchJson('/api/radar/tracks', controller),
+    ]);
     const derivedToggleEl = document.getElementById('radar-use-derived');
     if (derivedToggleEl) {
       useDerivedPresence = !!derivedToggleEl.checked;
     }
     radarNow.state = radarLatest || radarNow.state;
+    radarTracksNow = radarTracks || radarTracksNow;
     drawRadarScope(radarNow.state);
 
     const cacheBust = Date.now();
@@ -6558,18 +7183,28 @@ async function pollTrends() {
         }
         const badgesEl = document.getElementById('trend-badges-home2-' + trend.key);
         renderBadgesToEl(badgesEl, trend, data.stats || null, trend.decimals, ' ' + trend.unit);
+      }
 
-        const imgEl = document.getElementById('trend-img-home2-' + trend.key);
-        const card = imgEl ? imgEl.closest('.card') : null;
-        if (imgEl) {
-          imgEl.classList.toggle('stale', stale);
-          imgEl.alt = trend.title + ' trend';
-          imgEl.dataset.trendKey = trend.key;
-          setTrendImageSrc(imgEl, trend.key, cacheBust);
-        }
-        if (card) {
-          card.classList.toggle('stale-card', stale);
-        }
+      const envImg = document.getElementById('trend-img-home2-combo-env');
+      const envStale = tableIsStale('env')
+        || !(trendData.env_temp && trendData.env_temp.points && trendData.env_temp.points.length)
+        || !(trendData.env_hum && trendData.env_hum.points && trendData.env_hum.points.length);
+      if (envImg) {
+        envImg.classList.toggle('stale', envStale);
+        setOverlayImageSrc(envImg, 'env_temp', 'env_hum', cacheBust);
+        const card = envImg.closest('.trend-card');
+        if (card) card.classList.toggle('stale-card', envStale);
+      }
+
+      const airImg = document.getElementById('trend-img-home2-combo-air');
+      const airStale = tableIsStale('air')
+        || !(trendData.air_eco2 && trendData.air_eco2.points && trendData.air_eco2.points.length)
+        || !(trendData.air_tvoc && trendData.air_tvoc.points && trendData.air_tvoc.points.length);
+      if (airImg) {
+        airImg.classList.toggle('stale', airStale);
+        setOverlayImageSrc(airImg, 'air_eco2', 'air_tvoc', cacheBust);
+        const card = airImg.closest('.trend-card');
+        if (card) card.classList.toggle('stale-card', airStale);
       }
     } else {
       for (const slot of chartSlotOrder) {
