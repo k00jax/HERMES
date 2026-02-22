@@ -47,6 +47,18 @@ inline constexpr Note MELODY_STARTUP_FIELD_UNIT_ONLINE[] = {
 };
 inline constexpr size_t MELODY_STARTUP_FIELD_UNIT_ONLINE_COUNT = sizeof(MELODY_STARTUP_FIELD_UNIT_ONLINE) / sizeof(MELODY_STARTUP_FIELD_UNIT_ONLINE[0]);
 
+inline constexpr Note MELODY_STARTUP_WASTELAND_RISE[] = {
+  {294, 200},
+  {440, 200},
+  {523, 250},
+  {587, 400},
+  {523, 200},
+  {440, 200},
+  {659, 300},
+  {587, 500},
+};
+inline constexpr size_t MELODY_STARTUP_WASTELAND_RISE_COUNT = sizeof(MELODY_STARTUP_WASTELAND_RISE) / sizeof(MELODY_STARTUP_WASTELAND_RISE[0]);
+
 inline constexpr Note MELODY_WARN_RADIATION_SPIKE[] = {
   {2200, 90},
   {2500, 90},

@@ -981,6 +981,10 @@ static void playBuzzerJingle(const char *name) {
     play_melody(MELODY_STARTUP_FIELD_UNIT_ONLINE, MELODY_STARTUP_FIELD_UNIT_ONLINE_COUNT);
     return;
   }
+  if (name && strcasecmp(name, "startup_wasteland_rise") == 0) {
+    play_melody(MELODY_STARTUP_WASTELAND_RISE, MELODY_STARTUP_WASTELAND_RISE_COUNT, 40);
+    return;
+  }
   if (name && strcasecmp(name, "warn_radiation_spike") == 0) {
     play_warning_chime();
     return;

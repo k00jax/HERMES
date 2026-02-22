@@ -84,6 +84,7 @@ VALID_CHIME_KEYS = {
   "startup_atomic_sunrise",
   "startup_radiant_bootloader",
   "startup_field_unit_online",
+  "startup_wasteland_rise",
   "warn_radiation_spike",
   "warn_system_fault",
   "warn_low_power",
@@ -3070,7 +3071,8 @@ HTML_PAGE = """
     .nav-link.active { background: #1f5f99; border-color: #1f5f99; color: #fff; }
     .nav-ticker { margin-left: auto; max-width: 620px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; opacity: 0.9; padding: 6px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; }
     .ticker-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background: rgba(120,180,255,0.9); margin-right: 8px; vertical-align: middle; }
-    .home-top-grid { display: grid; grid-template-columns: 1fr 420px; gap: 14px; align-items: start; }
+    .home-top-grid { display: grid; grid-template-columns: 1fr 440px; gap: 16px; align-items: start; }
+    .home-left { min-width: 0; }
     .section-title { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; margin: 6px 0 10px; }
     .sys-cards { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 12px; }
     .card-compact { padding: 6px 8px; min-height: 70px; }
@@ -3119,7 +3121,7 @@ HTML_PAGE = """
     @media (max-width: 1100px) {
       .home-top-grid { grid-template-columns: 1fr; }
       .stream-row { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
-      .trend-window { width: 100%; max-width: 100%; }
+      .trend-window-card { width: 100%; max-width: 100%; }
       .health-side .card { min-height: 0; }
       #integrityFps { min-height: 0; }
     }
@@ -3228,11 +3230,13 @@ HTML_PAGE = """
     .radar-label { color: #8ea1b3; }
     .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
     .chart-slot-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
-    .trend-window { width: calc(100% - 434px); max-width: calc(100% - 434px); display: flex; flex-direction: column; padding: 6px 8px; }
+    .trend-window-card { width: 100%; display: flex; flex-direction: column; padding: 6px 8px; }
     .trend-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }
     .trend-range-pills { display: inline-flex; }
     .trend-slots { display:flex; gap:12px; flex-wrap:wrap; margin-top: 10px; }
     .trend-actions { margin-top: 10px; }
+    .trend-controls { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:0; }
+    .trend-generate { margin-left: 14px; }
     .slot-ctrl { display: inline-flex; align-items: center; gap: 6px; }
     .slot-ctrl label { font-size: 12px; color: #9fb3c8; }
     .slot-ctrl select { background: #111820; color: #d9e6f3; border: 1px solid #26313d; border-radius: 8px; padding: 5px 8px; }
@@ -3277,7 +3281,7 @@ HTML_PAGE = """
     last fetch: <span id="dbg-fetch">none</span>
   </div>
   <div class="home-top-grid">
-    <div class="home-top-main">
+    <div class="home-top-main home-left">
       <div class="section-title">System Health</div>
       <div class="sys-cards">
         <div class="card status card-compact">
@@ -3304,6 +3308,8 @@ HTML_PAGE = """
       <div style="height: 10px"></div>
       <div class="section-title">Telemetry Streams</div>
       <div id="freshness" class="stream-row"></div>
+
+      {{HOME_TREND_WINDOW}}
     </div>
     <div class="home-top-side health-side">
       <div class="section-title">Telemetry Integrity</div>
@@ -3339,28 +3345,28 @@ def render_top_nav(active_path: str) -> str:
 
 
 def render_dashboard_page(active_path: str) -> str:
-  home_charts_section = """
-  <div class=\"row\">
-    <div class=\"card trend-window\">
-      <div class="trend-head">
-        <div>
-          <div class="card-title">Trend window</div>
-          <div class="card-sub muted small">Affects sparklines and badges</div>
-        </div>
-        <div class="trend-range-pills">
-          <div class=\"seg\">
-            <button id=\"win-5\" onclick=\"setTrendMinutes(5)\">5m</button>
-            <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
-            <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
-          </div>
-        </div>
+  home_trend_window = """
+  <div class=\"card trend-window-card\">
+    <div class="trend-head">
+      <div>
+        <div class="card-title">Trend window</div>
+        <div class="card-sub muted small">Affects sparklines and badges</div>
       </div>
-      <div class="trend-slots">
-        <div id=\"chartSlotControls\" class=\"chart-slot-controls\"></div>
+      <div class="trend-range-pills">
+        <div class=\"seg\">
+          <button id=\"win-5\" onclick=\"setTrendMinutes(5)\">5m</button>
+          <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
+          <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
+        </div>
       </div>
     </div>
+    <div class="trend-slots">
+      <div id=\"chartSlotControls\" class=\"chart-slot-controls trend-controls\"></div>
+    </div>
   </div>
+  """
 
+  home_charts_section = """
   <div class="section-title">Human Presences & Trends</div>
   <div class=\"row\" id=\"trends\"></div>
   """
@@ -3430,6 +3436,7 @@ def render_dashboard_page(active_path: str) -> str:
   return (
     HTML_PAGE
     .replace("{{TOP_NAV}}", render_top_nav(active_path))
+    .replace("{{HOME_TREND_WINDOW}}", home_trend_window if show_home_charts else "")
     .replace("{{HOME_CHARTS_SECTION}}", home_charts_section if show_home_charts else "")
     .replace("{{EVENTS_DATA_SECTION}}", events_data_section if show_events_data else "")
   )
@@ -3857,6 +3864,7 @@ def render_settings_page() -> str:
     { key: 'startup_atomic_sunrise', title: 'Startup · Atomic Sunrise' },
     { key: 'startup_radiant_bootloader', title: 'Startup · Radiant Bootloader' },
     { key: 'startup_field_unit_online', title: 'Startup · Field Unit Online' },
+    { key: 'startup_wasteland_rise', title: 'Startup · Wasteland Rise' },
     { key: 'warn_radiation_spike', title: 'Warning · Radiation Spike' },
     { key: 'warn_system_fault', title: 'Warning · System Fault' },
     { key: 'warn_low_power', title: 'Warning · Low Power' },
@@ -4759,16 +4767,6 @@ function renderChartSlotControls() {
   if (!root) return;
   root.innerHTML = '';
   for (const slot of chartSlotOrder) {
-    if (slot === 'D') {
-      const reportWrap = document.createElement('span');
-      reportWrap.className = 'slot-ctrl';
-      const reportBtn = document.createElement('button');
-      reportBtn.type = 'button';
-      reportBtn.textContent = 'Generate report';
-      reportBtn.onclick = () => { window.location.href = '/reports'; };
-      reportWrap.appendChild(reportBtn);
-      root.appendChild(reportWrap);
-    }
     const wrap = document.createElement('span');
     wrap.className = 'slot-ctrl';
     const label = document.createElement('label');
@@ -4794,6 +4792,15 @@ function renderChartSlotControls() {
     wrap.appendChild(select);
     root.appendChild(wrap);
   }
+
+  const reportWrap = document.createElement('span');
+  reportWrap.className = 'slot-ctrl trend-generate';
+  const reportBtn = document.createElement('button');
+  reportBtn.type = 'button';
+  reportBtn.textContent = 'Generate report';
+  reportBtn.onclick = () => { window.location.href = '/reports'; };
+  reportWrap.appendChild(reportBtn);
+  root.appendChild(reportWrap);
 }
 
 function clamp(value, min, max) {
