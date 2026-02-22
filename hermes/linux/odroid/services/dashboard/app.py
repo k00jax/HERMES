@@ -3776,12 +3776,20 @@ HTML_PAGE = """
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
     .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
-    .returns-root { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
-    .returns-row { display: flex; flex-direction: column; gap: 4px; }
-    .returns-title { color: #9fb3c8; font-size: 12px; font-weight: 700; }
-    .returns-list { color: #d8e6f4; font-size: 12px; line-height: 1.5; }
-    .returns-item { padding: 4px 6px; border: 1px solid #26313d; border-radius: 8px; background: #0f1620; }
-    .returns-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .radar-returns-strip { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .radar-strip-row { display: grid; grid-template-columns: 56px 1fr; align-items: center; gap: 8px; }
+    .radar-strip-row .label { color: #9fb3c8; font-size: 12px; font-weight: 700; }
+    .radar-strip { position: relative; height: 30px; border-radius: 999px; border: 1px solid #2c3a48; background: linear-gradient(180deg, #101926 0%, #0e1621 100%); overflow: hidden; }
+    .radar-pip { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 999px; transform: translateY(-50%); pointer-events: auto; }
+    .radar-pip.moving { background: rgba(132, 210, 255, 0.98); box-shadow: 0 0 0 5px rgba(76, 153, 220, 0.24), 0 0 9px rgba(76, 153, 220, 0.35); }
+    .radar-pip.still { background: rgba(62, 112, 182, 0.98); box-shadow: 0 0 0 5px rgba(54, 110, 182, 0.22), 0 0 9px rgba(54, 110, 182, 0.32); }
+    .radar-pip.near { transform: translateY(-50%) scale(1.16); }
+    .radar-pip.mid { transform: translateY(-50%) scale(1.06); }
+    .radar-pip.far { transform: translateY(-50%) scale(0.94); }
+    .radar-pip.ghost { opacity: 0.28; }
+    .radar-strip-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .radar-strip-status { color: #d8e6f4; font-size: 12px; font-weight: 600; }
+    .radar-strip-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
     .home2-grid { display: grid; grid-template-columns: minmax(640px, 2fr) minmax(520px, 2.2fr); gap: 14px; width: 100%; align-items: stretch; }
     .home2-left { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
     .home2-combo-card { min-width: 0; }
@@ -5071,6 +5079,7 @@ let radarTracksNow = {
   multi_moving_suspected: false,
   multi_still_suspected: false,
 };
+const radarStripGhost = { moving: {}, still: {} };
 const tableState = {};
 const tableRowLimit = {};
 const eventsState = {
@@ -5707,49 +5716,98 @@ function updateRadarReadout(state) {
   if (selfNoteEl) {
     selfNoteEl.textContent = selfSuppressed ? 'Self suppressed' : '';
   }
-  renderRadarReturns(radarTracksNow, alive);
+  renderRadarReturnStrip(radarTracksNow, alive);
 }
 
-function renderRadarReturns(tracksPayload, radarAlive) {
-  const movingEl = document.getElementById('radar-moving-list');
-  const stillEl = document.getElementById('radar-still-list');
-  const badgesEl = document.getElementById('radar-clutter-badges');
-  if (!movingEl || !stillEl || !badgesEl) return;
+function renderRadarReturnStrip(tracksPayload, radarAlive) {
+  const movingEl = document.getElementById('radar-move-strip');
+  const stillEl = document.getElementById('radar-still-strip');
+  const statusEl = document.getElementById('radar-strip-status');
+  const badgesEl = document.getElementById('radar-strip-badges');
+  if (!movingEl || !stillEl || !statusEl || !badgesEl) return;
   const units = currentDistanceUnit();
+  const rangeCm = 300;
+  const nowMs = Date.now();
+  const pipRadius = 7;
+
+  function pruneGhosts(kind) {
+    const bucket = radarStripGhost[kind] || {};
+    for (const [trackId, ghost] of Object.entries(bucket)) {
+      if (!ghost || Number(ghost.expires || 0) < nowMs) {
+        delete bucket[trackId];
+      }
+    }
+    radarStripGhost[kind] = bucket;
+  }
+
+  function laneTracks(rawTracks, kind) {
+    const confirmed = (rawTracks || []).filter((item) => !!item.confirmed).sort((a, b) => Number(a.d_cm || 0) - Number(b.d_cm || 0));
+    const bucket = radarStripGhost[kind] || {};
+    for (const track of confirmed) {
+      const trackId = String(track.id || '');
+      if (!trackId) continue;
+      bucket[trackId] = { d_cm: Number(track.d_cm || 0), age_ms: Number(track.age_ms || 0), expires: nowMs + 1000 };
+    }
+    radarStripGhost[kind] = bucket;
+    const currentIds = new Set(confirmed.map((item) => String(item.id || '')));
+    const ghosts = Object.entries(bucket)
+      .filter(([trackId]) => !currentIds.has(trackId))
+      .map(([trackId, ghost]) => ({ id: trackId, d_cm: Number(ghost.d_cm || 0), age_ms: Number(ghost.age_ms || 0), ghost: true }));
+    return [...confirmed.map((item) => ({ ...item, ghost: false })), ...ghosts]
+      .sort((a, b) => Number(a.d_cm || 0) - Number(b.d_cm || 0))
+      .slice(0, 3);
+  }
+
+  function renderLane(stripEl, items, laneKind) {
+    stripEl.innerHTML = '';
+    for (const track of items) {
+      const distanceCm = Number(track.d_cm || 0);
+      const norm = clamp(distanceCm / rangeCm, 0, 1);
+      const left = (norm * 100);
+      const pip = document.createElement('div');
+      const proximityClass = distanceCm <= 100 ? 'near' : (distanceCm <= 200 ? 'mid' : 'far');
+      pip.className = 'radar-pip ' + laneKind + ' ' + proximityClass + (track.ghost ? ' ghost' : '');
+      pip.style.left = `calc(${left.toFixed(2)}% - ${pipRadius}px)`;
+      pip.title = String(track.id || '?') + ' · ' + formatDistance(distanceCm, units) + ' · age ' + (Math.max(0, Number(track.age_ms || 0)) / 1000.0).toFixed(1) + 's';
+      stripEl.appendChild(pip);
+    }
+  }
+
   if (!radarAlive) {
-    movingEl.innerHTML = '<div class="muted">—</div>';
-    stillEl.innerHTML = '<div class="muted">—</div>';
+    movingEl.innerHTML = '';
+    stillEl.innerHTML = '';
+    statusEl.textContent = 'Clear';
     badgesEl.innerHTML = '<span class="chip chip-neutral">Clutter: Unknown</span>';
     return;
   }
 
+  pruneGhosts('moving');
+  pruneGhosts('still');
   const moving = Array.isArray(tracksPayload && tracksPayload.moving_tracks) ? tracksPayload.moving_tracks : [];
   const still = Array.isArray(tracksPayload && tracksPayload.still_tracks) ? tracksPayload.still_tracks : [];
-  const movingConfirmed = moving.filter((item) => !!item.confirmed);
-  const stillConfirmed = still.filter((item) => !!item.confirmed);
+  const movingLane = laneTracks(moving, 'moving');
+  const stillLane = laneTracks(still, 'still');
+  renderLane(movingEl, movingLane, 'moving');
+  renderLane(stillEl, stillLane, 'still');
 
-  const renderList = (items) => {
-    if (!items.length) return '<div class="muted">—</div>';
-    return items.map((track) => {
-      const id = String(track.id || '?');
-      const distance = formatDistance(Number(track.d_cm || 0), units);
-      const confidence = Math.round(clamp(Number(track.confidence || 0), 0, 100));
-      const ageSec = Math.max(0, Number(track.age_ms || 0)) / 1000.0;
-      return '<div class="returns-item">' + id + ' · ' + distance + ' · ' + confidence + '% · ' + ageSec.toFixed(1) + 's</div>';
-    }).join('');
-  };
-
-  movingEl.innerHTML = renderList(movingConfirmed);
-  stillEl.innerHTML = renderList(stillConfirmed);
+  const movingCurrent = moving.filter((item) => !!item.confirmed).sort((a, b) => Number(a.d_cm || 0) - Number(b.d_cm || 0));
+  const stillCurrent = still.filter((item) => !!item.confirmed).sort((a, b) => Number(a.d_cm || 0) - Number(b.d_cm || 0));
+  if (movingCurrent.length) {
+    statusEl.textContent = 'Moving at ' + formatDistance(Number(movingCurrent[0].d_cm || 0), units);
+  } else if (stillCurrent.length) {
+    statusEl.textContent = 'Still at ' + formatDistance(Number(stillCurrent[0].d_cm || 0), units);
+  } else {
+    statusEl.textContent = 'Clear';
+  }
 
   const clutterRaw = String((tracksPayload && tracksPayload.clutter_level) || 'unknown').toLowerCase();
   const clutterLabel = clutterRaw === 'high' ? 'High' : (clutterRaw === 'medium' ? 'Med' : (clutterRaw === 'low' ? 'Low' : 'Unknown'));
   const chips = ['<span class="chip chip-neutral">Clutter: ' + clutterLabel + '</span>'];
   if (tracksPayload && tracksPayload.multi_moving_suspected) {
-    chips.push('<span class="chip chip-warn">Multiple movers suspected</span>');
+    chips.push('<span class="chip chip-warn">Multi moving suspected</span>');
   }
   if (tracksPayload && tracksPayload.multi_still_suspected) {
-    chips.push('<span class="chip chip-warn">Multiple still returns suspected</span>');
+    chips.push('<span class="chip chip-warn">Multi still suspected</span>');
   }
   badgesEl.innerHTML = chips.join('');
 }
@@ -6452,16 +6510,10 @@ function initTrends() {
             '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
           '</div>' +
           '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
-          '<div id="radar-returns" class="returns-root">' +
-            '<div class="returns-row">' +
-              '<div class="returns-title">Moving returns</div>' +
-              '<div id="radar-moving-list" class="returns-list"><div class="muted">—</div></div>' +
-            '</div>' +
-            '<div class="returns-row">' +
-              '<div class="returns-title">Still returns</div>' +
-              '<div id="radar-still-list" class="returns-list"><div class="muted">—</div></div>' +
-            '</div>' +
-            '<div id="radar-clutter-badges" class="returns-badges"></div>' +
+          '<div id="radar-returns" class="radar-returns-strip">' +
+            '<div class="radar-strip-row"><div class="label">Moving</div><div id="radar-move-strip" class="radar-strip"></div></div>' +
+            '<div class="radar-strip-row"><div class="label">Still</div><div id="radar-still-strip" class="radar-strip"></div></div>' +
+            '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -6532,16 +6584,10 @@ function initTrends() {
           '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
         '</div>' +
         '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
-        '<div id="radar-returns" class="returns-root">' +
-          '<div class="returns-row">' +
-            '<div class="returns-title">Moving returns</div>' +
-            '<div id="radar-moving-list" class="returns-list"><div class="muted">—</div></div>' +
-          '</div>' +
-          '<div class="returns-row">' +
-            '<div class="returns-title">Still returns</div>' +
-            '<div id="radar-still-list" class="returns-list"><div class="muted">—</div></div>' +
-          '</div>' +
-          '<div id="radar-clutter-badges" class="returns-badges"></div>' +
+        '<div id="radar-returns" class="radar-returns-strip">' +
+          '<div class="radar-strip-row"><div class="label">Moving</div><div id="radar-move-strip" class="radar-strip"></div></div>' +
+          '<div class="radar-strip-row"><div class="label">Still</div><div id="radar-still-strip" class="radar-strip"></div></div>' +
+          '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
         '</div>' +
       '</div>' +
     '</div>' +
