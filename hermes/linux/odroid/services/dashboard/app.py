@@ -53,6 +53,7 @@ READY_TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
 FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "ESP,NET", "RADAR")
 NAV_LINKS = (
   ("Home", "/"),
+  ("Home 2", "/home2"),
   ("History", "/history"),
   ("Events", "/events"),
   ("Analytics", "/analytics"),
@@ -3237,6 +3238,14 @@ HTML_PAGE = """
     .radar-person-name { font-weight: 700; color: #d8e6f4; }
     .radar-person-meta { color: #9fb3c8; font-size: 11px; }
     .radar-person-conf { color: #cfe2f4; font-weight: 600; white-space: nowrap; }
+    .home2-grid { display: grid; grid-template-columns: minmax(640px, 2fr) minmax(520px, 2.2fr); gap: 14px; width: 100%; }
+    .home2-left { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+    .home2-combo-card { min-width: 0; }
+    .home2-combo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .home2-presence { min-width: 0; }
+    @media (max-width: 1400px) {
+      .home2-grid { grid-template-columns: 1fr; }
+    }
     .chart-slot-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
     .trend-window-card { width: 100%; display: flex; flex-direction: column; padding: 6px 8px; }
     .trend-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }
@@ -3347,7 +3356,7 @@ def render_top_nav(active_path: str) -> str:
     links.append(f'<a href="{href}" class="{cls}">{label}</a>')
   brand = '<a href="/" class="brand-link" aria-label="HERMES Home"><img src="/static/hermes-logo-h.jpg" class="brand-logo" alt="HERMES logo" /></a>'
   ticker = ""
-  if active_path == "/":
+  if active_path in ("/", "/home2"):
     ticker = '<div class="nav-ticker" id="navTicker"><span class="ticker-dot" id="tickerDot"></span><span class="ticker-text" id="tickerText">Loading transitions…</span></div>'
   return '<nav class="top-nav" aria-label="Primary">' + brand + "".join(links) + ticker + "</nav>"
 
@@ -3374,8 +3383,31 @@ def render_dashboard_page(active_path: str) -> str:
   </div>
   """
 
+  home2_trend_window = """
+  <div class=\"card trend-window-card\">
+    <div class="trend-head">
+      <div>
+        <div class="card-title">Trend window</div>
+        <div class="card-sub muted small">Affects sparklines and badges</div>
+      </div>
+      <div class="trend-range-pills">
+        <div class=\"seg\">
+          <button id=\"win-5\" onclick=\"setTrendMinutes(5)\">5m</button>
+          <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
+          <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  """
+
   home_charts_section = """
   <div class="section-title">Human Presences & Trends</div>
+  <div class=\"row\" id=\"trends\"></div>
+  """
+
+  home2_charts_section = """
+  <div class="section-title">Home 2 · Layout Test</div>
   <div class=\"row\" id=\"trends\"></div>
   """
 
@@ -3439,15 +3471,17 @@ def render_dashboard_page(active_path: str) -> str:
   <pre id=\"rawHealth\">loading...</pre>
   """
 
-  show_home_charts = active_path == "/"
+  show_home_charts = active_path in ("/", "/home2")
+  is_home2 = active_path == "/home2"
   show_events_data = active_path == "/events"
-  return (
+  page = (
     HTML_PAGE
     .replace("{{TOP_NAV}}", render_top_nav(active_path))
-    .replace("{{HOME_TREND_WINDOW}}", home_trend_window if show_home_charts else "")
-    .replace("{{HOME_CHARTS_SECTION}}", home_charts_section if show_home_charts else "")
+    .replace("{{HOME_TREND_WINDOW}}", (home2_trend_window if is_home2 else home_trend_window) if show_home_charts else "")
+    .replace("{{HOME_CHARTS_SECTION}}", (home2_charts_section if is_home2 else home_charts_section) if show_home_charts else "")
     .replace("{{EVENTS_DATA_SECTION}}", events_data_section if show_events_data else "")
   )
+  return page.replace("<body>", f'<body data-home-layout="{"home2" if is_home2 else "home1"}">', 1)
 
 
 def render_shell_page(active_path: str, title: str, body_html: str, script_js: str, extra_style: str = "") -> str:
@@ -4584,6 +4618,10 @@ function applyFieldModeEntryVisibility() {
   const el = document.getElementById('fieldModeEntry');
   if (!el) return;
   el.classList.toggle('hidden', !dashboardSettings.field_mode_start);
+}
+
+function isHome2Layout() {
+  return String(document.body && document.body.dataset ? document.body.dataset.homeLayout || '' : '') === 'home2';
 }
 
 async function loadDashboardSettings() {
@@ -5728,6 +5766,109 @@ function initTrends() {
   const root = document.getElementById('trends');
   if (!root) return;
   root.innerHTML = '';
+
+  if (isHome2Layout()) {
+    const home2Grid = document.createElement('div');
+    home2Grid.className = 'home2-grid';
+
+    const leftCol = document.createElement('div');
+    leftCol.className = 'home2-left';
+
+    const makeComboCard = (title, pairs) => {
+      const card = document.createElement('div');
+      card.className = 'card trend-card chart home2-combo-card';
+      card.innerHTML =
+        '<div class="trend-top card-header"><div><b>' + title + '</b></div></div>' +
+        '<div class="home2-combo-grid">' +
+          pairs.map((pair) => (
+            '<div class="card" style="margin:0">'
+              + '<div class="trend-top card-header" style="padding:8px 10px 6px 10px;margin:0"><div><b id="' + pair.titleId + '">' + pair.title + '</b></div><div id="' + pair.badgesId + '" class="trend-badges pill-row"></div></div>'
+              + '<div id="' + pair.valueId + '" class="trend-value metric-value">n/a</div>'
+              + '<div class="chart-wrap plot"><img id="' + pair.imgId + '" class="trend-img" data-trend-key="' + pair.trendKey + '" alt="' + pair.title + ' trend" src="" /></div>'
+            + '</div>'
+          )).join('') +
+        '</div>';
+      return card;
+    };
+
+    leftCol.appendChild(makeComboCard('Temp + Humidity', [
+      { trendKey: 'env_temp', title: 'Temp', titleId: 'trend-title-home2-env_temp', badgesId: 'trend-badges-home2-env_temp', valueId: 'trend-value-home2-env_temp', imgId: 'trend-img-home2-env_temp' },
+      { trendKey: 'env_hum', title: 'Humidity', titleId: 'trend-title-home2-env_hum', badgesId: 'trend-badges-home2-env_hum', valueId: 'trend-value-home2-env_hum', imgId: 'trend-img-home2-env_hum' },
+    ]));
+    leftCol.appendChild(makeComboCard('ECO2 + TVOC', [
+      { trendKey: 'air_eco2', title: 'ECO2', titleId: 'trend-title-home2-air_eco2', badgesId: 'trend-badges-home2-air_eco2', valueId: 'trend-value-home2-air_eco2', imgId: 'trend-img-home2-air_eco2' },
+      { trendKey: 'air_tvoc', title: 'TVOC', titleId: 'trend-title-home2-air_tvoc', badgesId: 'trend-badges-home2-air_tvoc', valueId: 'trend-value-home2-air_tvoc', imgId: 'trend-img-home2-air_tvoc' },
+    ]));
+
+    const radarWrap = document.createElement('div');
+    radarWrap.className = 'home2-presence';
+    const radarCard = document.createElement('div');
+    radarCard.className = 'card trend-card chart hp-card';
+    radarCard.innerHTML =
+      '<div class="trend-top card-header hp-head">' +
+        '<div><b>' + radarTrend.title + '</b><button class="cal-btn" onclick="startRadarCalibration()">Calibration</button></div>' +
+        '<div class="hp-tabs">' +
+          '<button id="radar-view-now" class="hp-tab active" onclick="setRadarView(\'now\')">Now</button>' +
+          '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
+        '</div>' +
+      '</div>' +
+      '<div id="trend-badges-' + radarTrend.key + '" class="trend-badges hp-badges pill-row"></div>' +
+      '<div id="trend-value-' + radarTrend.key + '" class="trend-value metric-value">n/a</div>' +
+      '<div id="radar-now-pane" class="radar-now-wrap">' +
+        '<div id="radar-cal-panel" class="cal-panel hidden">' +
+          '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
+          '<div class="cal-guidance">Grade thresholds: A &lt; 5 false, B &lt; 20 false, C ≥ 20 false.</div>' +
+          '<div class="cal-counters">' +
+            '<div><span class="muted">Status</span><div id="radar-cal-status">idle</div></div>' +
+            '<div><span class="muted">Countdown</span><div id="radar-cal-remaining">--</div></div>' +
+            '<div><span class="muted">Samples</span><div id="radar-cal-samples">0</div></div>' +
+          '</div>' +
+          '<div class="cal-counters">' +
+            '<div><span class="muted">False presence</span><div id="radar-cal-false">0</div></div>' +
+            '<div><span class="muted">Baseline</span><div id="radar-cal-baseline">--</div></div>' +
+            '<div><span class="muted">Noise</span><div id="radar-cal-noise">--</div></div>' +
+          '</div>' +
+          '<div class="cal-counters">' +
+            '<div><span class="muted">Grade</span><div id="radar-cal-grade">--</div></div>' +
+            '<div style="grid-column: span 2"><span class="muted">Recommendation</span><div id="radar-cal-reco">--</div></div>' +
+          '</div>' +
+          '<div class="cal-actions"><button onclick="cancelRadarCalibration()">Cancel</button><button onclick="startRadarCalibration()">Run again</button></div>' +
+          '<div style="margin-top:8px"><input id="radar-cal-note" type="text" placeholder="Save note (optional)" style="width:100%; padding:6px 8px; border-radius:8px; border:1px solid #26313d; background:#0f1620; color:#d9e6f3;" /></div>' +
+          '<div class="cal-actions"><button onclick="saveRadarCalibrationNote()">Save note</button></div>' +
+          '<div id="radar-cal-history" class="cal-history"></div>' +
+        '</div>' +
+        '<div id="range-strip" class="range-strip">' +
+          '<div class="range-track"></div>' +
+          '<div id="range-marker-detect" class="marker detect hidden"></div>' +
+          '<div id="range-marker-move" class="marker move hidden"></div>' +
+          '<div id="range-marker-stat" class="marker stat hidden"></div>' +
+          '<div class="range-labels"><span id="range-min-label">0cm</span><span id="range-max-label">300cm</span></div>' +
+        '</div>' +
+        '<div class="radar-readout">' +
+          '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
+          '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">' +
+            '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
+            '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
+          '</div>' +
+          '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
+          '<div id="radar-now-people" class="radar-people"><div class="muted">No humans detected.</div></div>' +
+        '</div>' +
+      '</div>' +
+      '<div id="radar-history-pane" class="hidden">' +
+        '<div class="chart-wrap plot">' +
+          '<img id="trend-img-' + radarTrend.key + '" class="trend-img" data-trend-key="' + radarTrend.key + '" alt="' + radarTrend.title + ' trend" src="" />' +
+        '</div>' +
+      '</div>';
+    radarWrap.appendChild(radarCard);
+
+    home2Grid.appendChild(leftCol);
+    home2Grid.appendChild(radarWrap);
+    root.appendChild(home2Grid);
+    radarViewButtonsActive();
+    initChartResizeObserver();
+    return;
+  }
+
   const radarCard = document.createElement('div');
   radarCard.className = 'card trend-card chart hp-card';
   radarCard.innerHTML =
@@ -6359,7 +6500,10 @@ async function pollTrends() {
   const controller = new AbortController();
   trendController = controller;
   try {
-    const requestedKeys = [radarTrend.key, ...chartSlotOrder.map((slot) => getTrendByKey(chartSlots[slot]).key)];
+    const fixedHome2Keys = ['env_temp', 'env_hum', 'air_eco2', 'air_tvoc'];
+    const requestedKeys = isHome2Layout()
+      ? [radarTrend.key, ...fixedHome2Keys]
+      : [radarTrend.key, ...chartSlotOrder.map((slot) => getTrendByKey(chartSlots[slot]).key)];
     const uniqueKeys = [...new Set(requestedKeys)];
     const results = await Promise.all(
       uniqueKeys.map((key) => fetchJson('/api/ts/' + key + '?minutes=' + trendMinutes, controller).then((data) => [key, data]))
@@ -6401,32 +6545,60 @@ async function pollTrends() {
       }
     }
 
-    for (const slot of chartSlotOrder) {
-      const trend = getTrendByKey(chartSlots[slot]);
-      const data = trendData[trend.key] || { points: [], stats: null };
-      const points = data.points || [];
-      const latest = points.length ? points[points.length - 1].v : null;
-      const valueEl = document.getElementById('trend-value-slot-' + slot);
-      const stale = tableIsStale(trend.table) || !points.length || !data.stats;
-      if (valueEl) {
-        valueEl.textContent = latest === null ? 'n/a' : (formatMetric(latest, trend.decimals) + ' ' + trend.unit);
-      }
-      const badgesEl = document.getElementById('trend-badges-slot-' + slot);
-      renderBadgesToEl(badgesEl, trend, data.stats || null, trend.decimals, ' ' + trend.unit);
+    if (isHome2Layout()) {
+      for (const trendKey of fixedHome2Keys) {
+        const trend = getTrendByKey(trendKey);
+        const data = trendData[trend.key] || { points: [], stats: null };
+        const points = data.points || [];
+        const latest = points.length ? points[points.length - 1].v : null;
+        const valueEl = document.getElementById('trend-value-home2-' + trend.key);
+        const stale = tableIsStale(trend.table) || !points.length || !data.stats;
+        if (valueEl) {
+          valueEl.textContent = latest === null ? 'n/a' : (formatMetric(latest, trend.decimals) + ' ' + trend.unit);
+        }
+        const badgesEl = document.getElementById('trend-badges-home2-' + trend.key);
+        renderBadgesToEl(badgesEl, trend, data.stats || null, trend.decimals, ' ' + trend.unit);
 
-      const titleEl = document.getElementById('trend-title-slot-' + slot);
-      if (titleEl) titleEl.textContent = trend.title;
-
-      const imgEl = document.getElementById('trend-img-slot-' + slot);
-      const card = imgEl ? imgEl.closest('.trend-card') : null;
-      if (imgEl) {
-        imgEl.classList.toggle('stale', stale);
-        imgEl.alt = trend.title + ' trend';
-        imgEl.dataset.trendKey = trend.key;
-        setTrendImageSrc(imgEl, trend.key, cacheBust);
+        const imgEl = document.getElementById('trend-img-home2-' + trend.key);
+        const card = imgEl ? imgEl.closest('.card') : null;
+        if (imgEl) {
+          imgEl.classList.toggle('stale', stale);
+          imgEl.alt = trend.title + ' trend';
+          imgEl.dataset.trendKey = trend.key;
+          setTrendImageSrc(imgEl, trend.key, cacheBust);
+        }
+        if (card) {
+          card.classList.toggle('stale-card', stale);
+        }
       }
-      if (card) {
-        card.classList.toggle('stale-card', stale);
+    } else {
+      for (const slot of chartSlotOrder) {
+        const trend = getTrendByKey(chartSlots[slot]);
+        const data = trendData[trend.key] || { points: [], stats: null };
+        const points = data.points || [];
+        const latest = points.length ? points[points.length - 1].v : null;
+        const valueEl = document.getElementById('trend-value-slot-' + slot);
+        const stale = tableIsStale(trend.table) || !points.length || !data.stats;
+        if (valueEl) {
+          valueEl.textContent = latest === null ? 'n/a' : (formatMetric(latest, trend.decimals) + ' ' + trend.unit);
+        }
+        const badgesEl = document.getElementById('trend-badges-slot-' + slot);
+        renderBadgesToEl(badgesEl, trend, data.stats || null, trend.decimals, ' ' + trend.unit);
+
+        const titleEl = document.getElementById('trend-title-slot-' + slot);
+        if (titleEl) titleEl.textContent = trend.title;
+
+        const imgEl = document.getElementById('trend-img-slot-' + slot);
+        const card = imgEl ? imgEl.closest('.trend-card') : null;
+        if (imgEl) {
+          imgEl.classList.toggle('stale', stale);
+          imgEl.alt = trend.title + ' trend';
+          imgEl.dataset.trendKey = trend.key;
+          setTrendImageSrc(imgEl, trend.key, cacheBust);
+        }
+        if (card) {
+          card.classList.toggle('stale-card', stale);
+        }
       }
     }
     setLastUpdatedNow();
@@ -6536,7 +6708,9 @@ async function pollEvents() {
   if (hasTrends) {
     chartSlots = loadChartSlots();
     await loadDashboardSettings();
-    renderChartSlotControls();
+    if (!isHome2Layout()) {
+      renderChartSlotControls();
+    }
     initTrends();
     primeTrendImages();
     bindPresenceToggleUi();
@@ -6595,6 +6769,11 @@ def app_js() -> Response:
 @APP.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
   return HTMLResponse(render_dashboard_page("/"))
+
+
+@APP.get("/home2", response_class=HTMLResponse)
+def home2_page() -> HTMLResponse:
+  return HTMLResponse(render_dashboard_page("/home2"))
 
 
 @APP.get("/history", response_class=HTMLResponse)
