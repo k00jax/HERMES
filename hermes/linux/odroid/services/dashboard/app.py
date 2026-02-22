@@ -66,9 +66,11 @@ SETTINGS_DEFAULTS = {
   "chart_slot_b": "env_temp",
   "chart_slot_c": "env_hum",
   "chart_slot_d": "air_tvoc",
+  "chime_event_startup": "startup_vault_boot",
   "chime_event_air_spike": "warn_radiation_spike",
   "chime_event_wifi_drop": "warn_low_power",
   "chime_event_reboot_detected": "warn_system_fault",
+  "chime_event_presence_change": "none",
   "radar_self_suppress_enabled": False,
   "radar_self_suppress_near_cm": 80,
   "radar_self_suppress_persist_s": 20,
@@ -124,12 +126,15 @@ event_post_rate: Dict[str, List[float]] = {}
 event_chime_lock = threading.Lock()
 event_chime_initialized = False
 event_chime_last_seen_id = 0
+presence_change_last_chime_ts = 0.0
 
 EVENT_KIND_TO_CHIME_SETTING = {
+  "dashboard_restart": "chime_event_startup",
   "air_spike": "chime_event_air_spike",
   "wifi_drop": "chime_event_wifi_drop",
   "reboot_detected": "chime_event_reboot_detected",
 }
+STARTUP_CHIME_BOOTSTRAP_MAX_AGE_SECS = 180
 
 radar_calibration_lock = threading.Lock()
 radar_calibration_sessions: Dict[str, Dict[str, object]] = {}
@@ -339,9 +344,11 @@ def get_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
     result[slot_key] = chosen if chosen in valid_chart else fallback
 
   for chime_key, fallback in (
+      ("chime_event_startup", "startup_vault_boot"),
       ("chime_event_air_spike", "warn_radiation_spike"),
       ("chime_event_wifi_drop", "warn_low_power"),
       ("chime_event_reboot_detected", "warn_system_fault"),
+      ("chime_event_presence_change", "none"),
   ):
     chosen = str(result.get(chime_key) or fallback)
     result[chime_key] = chosen if chosen in VALID_CHIME_KEYS else fallback
@@ -397,9 +404,11 @@ def save_settings_payload(conn: sqlite3.Connection, updates: Dict[str, object]) 
       merged[slot_key] = chosen if chosen in valid_chart else fallback
 
   for chime_key, fallback in (
+      ("chime_event_startup", "startup_vault_boot"),
       ("chime_event_air_spike", "warn_radiation_spike"),
       ("chime_event_wifi_drop", "warn_low_power"),
       ("chime_event_reboot_detected", "warn_system_fault"),
+      ("chime_event_presence_change", "none"),
   ):
     if chime_key in updates:
       chosen = str(updates.get(chime_key) or fallback)
@@ -621,6 +630,7 @@ def build_report_html(
       f"<p>Total minutes present: <b>{presence_summary.get('minutes_present', 0):.2f}</b></p>"
       f"<p>Percent time present: <b>{presence_summary.get('percent_present', 0):.2f}%</b></p>"
       f"<p>Moving minutes: <b>{presence_summary.get('moving_minutes', 0):.2f}</b> | Still minutes: <b>{presence_summary.get('still_minutes', 0):.2f}</b></p>"
+      "<p><i>Note: moving and still minutes can overlap during mixed-target frames.</i></p>"
       "</section>"
     )
 
@@ -734,6 +744,33 @@ def trigger_radar_calibration_jingle() -> Dict[str, object]:
   return send_buzzer_command("BUZZER,JINGLE,cal_done")
 
 
+def grade_calibration(false_presence_count: int) -> str:
+  count = int(false_presence_count or 0)
+  if count < 5:
+    return "A"
+  if count < 20:
+    return "B"
+  return "C"
+
+
+def calibration_recommendation(grade: str) -> str:
+  key = str(grade or "").strip().upper()
+  if key == "A":
+    return "Stable baseline. Calibration quality is excellent."
+  if key == "B":
+    return "Acceptable baseline. Consider rerunning if false triggers continue."
+  return "Noisy baseline. Recalibrate in a quieter empty-room setup."
+
+
+def decorate_calibration_row(row: Dict[str, object]) -> Dict[str, object]:
+  out = dict(row or {})
+  false_presence_count = int(out.get("false_presence_count") or 0)
+  grade = grade_calibration(false_presence_count)
+  out["calibration_grade"] = grade
+  out["calibration_recommendation"] = calibration_recommendation(grade)
+  return out
+
+
 def chime_payload_from_key(chime_key: str) -> Optional[str]:
   key = str(chime_key or "none").strip().lower()
   if key == "none":
@@ -761,15 +798,39 @@ def maybe_play_event_chime(rows: List[Dict[str, object]], settings: Dict[str, ob
 
   max_seen = max(int(row.get("id") or 0) for row in valid_rows)
   baseline = 0
+  initialized_now = False
+  bootstrap_payload: Optional[str] = None
   with event_chime_lock:
     if not event_chime_initialized:
       event_chime_initialized = True
       event_chime_last_seen_id = max_seen
-      return
+      initialized_now = True
     baseline = int(event_chime_last_seen_id)
     if max_seen <= baseline:
       return
     event_chime_last_seen_id = max_seen
+
+  if initialized_now:
+    newest = max(valid_rows, key=lambda row: int(row.get("id") or 0))
+    event_kind = str(newest.get("kind") or "")
+    if event_kind == "dashboard_restart":
+      settings_key = EVENT_KIND_TO_CHIME_SETTING.get(event_kind)
+      if settings_key:
+        payload = chime_payload_from_key(str(settings.get(settings_key) or "none"))
+        if payload:
+          ts_raw = str(newest.get("ts_utc") or "").strip()
+          if ts_raw:
+            try:
+              age_s = (datetime.datetime.now(datetime.timezone.utc) - parse_iso8601_utc(ts_raw)).total_seconds()
+            except Exception:
+              age_s = float(STARTUP_CHIME_BOOTSTRAP_MAX_AGE_SECS + 1)
+            if 0 <= age_s <= float(STARTUP_CHIME_BOOTSTRAP_MAX_AGE_SECS):
+              bootstrap_payload = payload
+          else:
+            bootstrap_payload = payload
+    if bootstrap_payload:
+      send_buzzer_command(bootstrap_payload)
+    return
 
   candidates = [row for row in valid_rows if int(row.get("id") or 0) > baseline]
   if not candidates:
@@ -784,6 +845,38 @@ def maybe_play_event_chime(rows: List[Dict[str, object]], settings: Dict[str, ob
   if not payload:
     return
   send_buzzer_command(payload)
+
+
+def maybe_play_presence_change_chime(settings: Dict[str, object]) -> None:
+  key = str(settings.get("chime_event_presence_change") or "none")
+  payload = chime_payload_from_key(key)
+  if not payload:
+    return
+  global presence_change_last_chime_ts
+  now_ts = time.time()
+  with event_chime_lock:
+    if (now_ts - float(presence_change_last_chime_ts)) < 3.0:
+      return
+    presence_change_last_chime_ts = now_ts
+  send_buzzer_command(payload)
+
+
+def should_log_presence_transition(conn: sqlite3.Connection, *, ts_utc: str, from_state: str, to_state: str) -> bool:
+  ensure_state_events_table(conn)
+  fp = f"{ts_utc}|{from_state}|{to_state}"
+  row = conn.execute(
+    "SELECT detail FROM state_events WHERE event_type='presence_change' ORDER BY id DESC LIMIT 1"
+  ).fetchone()
+  if not row:
+    return True
+  raw = row["detail"]
+  if raw is None:
+    return True
+  try:
+    payload = json.loads(str(raw))
+    return str(payload.get("_fp") or "") != fp
+  except Exception:
+    return fp not in str(raw)
 
 
 def summarize_radar_calibration_window(
@@ -901,7 +994,7 @@ def finalize_radar_calibration_session(session_id: str) -> Dict[str, object]:
       conn.commit()
 
     buzzer = trigger_radar_calibration_jingle()
-    result = {"id": calibration_id, **summary, "buzzer": buzzer}
+    result = decorate_calibration_row({"id": calibration_id, **summary, "buzzer": buzzer})
     with radar_calibration_lock:
       session = radar_calibration_sessions.get(session_id, session)
       session["status"] = "done"
@@ -2082,15 +2175,21 @@ def api_radar_latest() -> Dict[str, object]:
         prev_present = bool(prev_derived.get("present_derived"))
         cur_present = bool(payload.get("present_derived"))
         if prev_present != cur_present:
-          insert_state_event(
-            conn,
-            event_type="presence_change",
-            detail={
-              "from": "present" if prev_present else "absent",
-              "to": "present" if cur_present else "absent",
-              "ts_utc": payload.get("ts_utc"),
-            },
-          )
+          from_state = "present" if prev_present else "absent"
+          to_state = "present" if cur_present else "absent"
+          ts_marker = str(payload.get("ts_utc") or "")
+          if should_log_presence_transition(conn, ts_utc=ts_marker, from_state=from_state, to_state=to_state):
+            insert_state_event(
+              conn,
+              event_type="presence_change",
+              detail={
+                "from": from_state,
+                "to": to_state,
+                "ts_utc": payload.get("ts_utc"),
+                "_fp": f"{ts_marker}|{from_state}|{to_state}",
+              },
+            )
+            maybe_play_presence_change_chime(settings_payload)
 
       if wifi_prev_row is not None:
         prev_wifi = wifi_state_from_row(wifi_prev_row)
@@ -2311,7 +2410,7 @@ def api_radar_calibration_history(limit: int = Query(10, ge=1, le=100)) -> Dict[
       if "locked" in str(exc).lower():
         return {"rows": []}
       raise
-    return {"rows": [dict(r) for r in rows]}
+    return {"rows": [decorate_calibration_row(dict(r)) for r in rows]}
 
 
 @APP.get("/api/radar/calibration/latest")
@@ -3037,21 +3136,21 @@ HTML_PAGE = """
     .ts-main { display: block; }
     .ts-sub { display: block; font-size: 11px; color: #8ea1b3; }
     td.changed { background: #213447; transition: background-color 0.5s ease; }
-    .trend-card { min-width: 260px; flex: 1 1 320px; display: flex; flex-direction: column; gap: 0.375rem; }
+    .trend-card { min-width: 260px; flex: 1 1 320px; display: flex; flex-direction: column; gap: 0.5rem; }
     .card.chart { height: auto; }
     .trend-card.chart { height: auto; }
     @media (min-width: 1400px) {
       .trend-card.chart { height: auto; }
     }
     .metric-value, .card h2 { font-weight: 650; }
-    .trend-value { font-size: 1.125rem; line-height: 1.2; font-weight: 650; margin: 0.125rem 0 0.25rem 0; }
-    .card.chart .card-header { padding: 12px 14px 6px 14px; margin: -10px -12px 0 -12px; }
+    .trend-value { font-size: 1.125rem; line-height: 1.2; font-weight: 650; margin: 0.2rem 0 0.35rem 0; }
+    .card.chart .card-header { padding: 12px 14px 8px 14px; margin: -10px -12px 0 -12px; }
     .chart-wrap { flex: 1 1 auto; width: 100%; }
-    .card.chart .plot { position: relative; width: 100%; aspect-ratio: 16 / 9; min-height: 220px; max-height: 360px; }
+    .card.chart .plot { position: relative; width: 100%; aspect-ratio: 16 / 9; min-height: 240px; max-height: 380px; }
     .card.chart canvas, .card.chart svg { height: 100% !important; width: 100% !important; }
     .trend-img { width: 100%; height: 100%; border-radius: 8px; border: 1px solid #26313d; display: block; }
-    .trend-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-    .trend-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+    .trend-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .trend-badges { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
     .pill-row { gap: 6px; }
     .badge, .pill { font-size: 12px; color: #9fb3c8; border: 1px solid #26313d; padding: 3px 8px; border-radius: 999px; background: #111820; }
     .seg { display: inline-flex; border: 1px solid #26313d; border-radius: 999px; overflow: hidden; }
@@ -3135,6 +3234,7 @@ HTML_PAGE = """
     .cal-btn { margin-left: 8px; padding: 5px 9px; font-size: 11px; border-radius: 999px; }
     .cal-panel { border: 1px solid #2a3440; border-radius: 8px; background: #101722; padding: 10px; font-size: 12px; }
     .cal-instruction { color: #c6d5e7; margin-bottom: 8px; }
+    .cal-guidance { color: #9fb3c8; font-size: 11px; margin-top: 6px; }
     .cal-counters { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 8px; }
     .cal-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .cal-history { margin-top: 8px; color: #9fb3c8; font-size: 11px; max-height: 100px; overflow: auto; }
@@ -3195,6 +3295,13 @@ HTML_PAGE = """
       <b>Trend window</b>
       <div class=\"muted small\">Affects sparklines and badges</div>
       <div style=\"margin-top:8px\" class=\"seg\">
+        <label>Startup
+          <div class="muted" style="margin-top:2px">Plays when dashboard restart/startup is detected.</div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+            <select id="chimeStartup" style="flex:1"></select>
+            <button id="previewStartup" type="button">Preview</button>
+          </div>
+        </label>
         <button id=\"win-5\" onclick=\"setTrendMinutes(5)\">5m</button>
         <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
         <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
@@ -3204,6 +3311,7 @@ HTML_PAGE = """
     </div>
   </div>
 
+  <div class="section-title">Human Presences & Trends</div>
   <div class=\"row\" id=\"trends\"></div>
 
   <div class=\"row\">
@@ -3644,6 +3752,13 @@ def render_settings_page() -> str:
           <button id=\"previewRebootDetected\" type=\"button\">Preview</button>
         </div>
       </label>
+      <label>Presence change
+        <div class="muted" style="margin-top:2px">Plays when presence transitions Present ↔ Clear.</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+          <select id="chimePresenceChange" style="flex:1"></select>
+          <button id="previewPresenceChange" type="button">Preview</button>
+        </div>
+      </label>
     </div>
   </div>
   <div class=\"card\">
@@ -3727,9 +3842,11 @@ def render_settings_page() -> str:
       chart_slot_b: document.getElementById('slotB')?.value || 'env_temp',
       chart_slot_c: document.getElementById('slotC')?.value || 'env_hum',
       chart_slot_d: document.getElementById('slotD')?.value || 'air_tvoc',
+      chime_event_startup: document.getElementById('chimeStartup')?.value || 'startup_vault_boot',
       chime_event_air_spike: document.getElementById('chimeAirSpike')?.value || 'warn_radiation_spike',
       chime_event_wifi_drop: document.getElementById('chimeWifiDrop')?.value || 'warn_low_power',
       chime_event_reboot_detected: document.getElementById('chimeRebootDetected')?.value || 'warn_system_fault',
+      chime_event_presence_change: document.getElementById('chimePresenceChange')?.value || 'none',
       radar_self_suppress_enabled: suppressEnabled || (effectiveMode === 'derived'),
       radar_presence_mode: effectiveMode,
       radar_self_suppress_near_cm: Number(document.getElementById('radarSelfSuppressNearCm')?.value || 80),
@@ -3759,9 +3876,11 @@ def render_settings_page() -> str:
     document.getElementById('slotB').value = s.chart_slot_b || 'env_temp';
     document.getElementById('slotC').value = s.chart_slot_c || 'env_hum';
     document.getElementById('slotD').value = s.chart_slot_d || 'air_tvoc';
+    document.getElementById('chimeStartup').value = s.chime_event_startup || 'startup_vault_boot';
     document.getElementById('chimeAirSpike').value = s.chime_event_air_spike || 'warn_radiation_spike';
     document.getElementById('chimeWifiDrop').value = s.chime_event_wifi_drop || 'warn_low_power';
     document.getElementById('chimeRebootDetected').value = s.chime_event_reboot_detected || 'warn_system_fault';
+    document.getElementById('chimePresenceChange').value = s.chime_event_presence_change || 'none';
     document.getElementById('radarSelfSuppressEnabled').checked = !!s.radar_self_suppress_enabled;
     document.getElementById('radarPresenceMode').value = String(s.radar_presence_mode || 'raw') === 'derived' ? 'derived' : 'raw';
     document.getElementById('radarSelfSuppressNearCm').value = String(Number(s.radar_self_suppress_near_cm || 80));
@@ -3807,15 +3926,17 @@ def render_settings_page() -> str:
 
   (async () => {
     ['slotA', 'slotB', 'slotC', 'slotD'].forEach(fillTrendSelect);
-    ['chimeAirSpike', 'chimeWifiDrop', 'chimeRebootDetected'].forEach(fillChimeSelect);
+    ['chimeStartup', 'chimeAirSpike', 'chimeWifiDrop', 'chimeRebootDetected', 'chimePresenceChange'].forEach(fillChimeSelect);
     const data = await fetchJson('/api/settings');
     applySettings(data || {});
     document.getElementById('radarSelfSuppressEnabled')?.addEventListener('change', () => syncRadarPresenceModeUi());
     document.getElementById('saveBtn')?.addEventListener('click', () => saveSettings().catch((e) => alert(String(e.message || e))));
     document.getElementById('resetBtn')?.addEventListener('click', () => resetSettings().catch((e) => alert(String(e.message || e))));
+    document.getElementById('previewStartup')?.addEventListener('click', () => previewChimeBySelect('chimeStartup').catch((e) => alert(String(e.message || e))));
     document.getElementById('previewAirSpike')?.addEventListener('click', () => previewChimeBySelect('chimeAirSpike').catch((e) => alert(String(e.message || e))));
     document.getElementById('previewWifiDrop')?.addEventListener('click', () => previewChimeBySelect('chimeWifiDrop').catch((e) => alert(String(e.message || e))));
     document.getElementById('previewRebootDetected')?.addEventListener('click', () => previewChimeBySelect('chimeRebootDetected').catch((e) => alert(String(e.message || e))));
+    document.getElementById('previewPresenceChange')?.addEventListener('click', () => previewChimeBySelect('chimePresenceChange').catch((e) => alert(String(e.message || e))));
   })();
   """
   return render_shell_page("/settings", "HERMES Settings", body, script)
@@ -3948,6 +4069,10 @@ def render_calibration_page() -> str:
       <div><span class=\"muted\">False positives</span><div id=\"calFalse\">0</div></div>
     </div>
     <div style=\"margin-top:10px\"><span class=\"muted\">Result</span><div id=\"calResult\">-</div></div>
+    <div style=\"margin-top:10px;display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:10px\">
+      <div><span class=\"muted\">Grade</span><div id=\"calGrade\">--</div></div>
+      <div><span class=\"muted\">Recommendation</span><div id=\"calReco\">--</div></div>
+    </div>
   </div>
 
   <div class=\"card\">
@@ -3990,6 +4115,10 @@ def render_calibration_page() -> str:
       const r = data.result;
       const resultEl = document.getElementById('calResult');
       if (resultEl) resultEl.textContent = 'baseline=' + (r.baseline_detect_cm ?? 'n/a') + 'cm, noise=' + (r.noise_detect_cm ?? 'n/a') + ', false=' + (r.false_presence_count ?? 0);
+      const gradeEl = document.getElementById('calGrade');
+      const recoEl = document.getElementById('calReco');
+      if (gradeEl) gradeEl.textContent = String(r.calibration_grade || '--');
+      if (recoEl) recoEl.textContent = String(r.calibration_recommendation || '--');
     }
   }
 
@@ -4008,6 +4137,7 @@ def render_calibration_page() -> str:
       + ' · baseline ' + (row.baseline_detect_cm ?? 'n/a')
       + ' · noise ' + (row.noise_detect_cm ?? 'n/a')
       + ' · false ' + (row.false_presence_count ?? 0)
+      + ' · grade ' + String(row.calibration_grade || '--')
       + '</div>'
     ).join('');
   }
@@ -4393,6 +4523,20 @@ async function loadDashboardSettings() {
   }
 }
 
+async function refreshDashboardSettingsLight() {
+  try {
+    const resp = await fetch('/api/settings', { cache: 'no-store' });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data || typeof data !== 'object') return;
+    dashboardSettings.units_distance = String(data.units_distance || 'cm') === 'm' ? 'm' : 'cm';
+    dashboardSettings.field_mode_start = !!data.field_mode_start;
+    applyFieldModeEntryVisibility();
+    drawRadarScope(radarNow.state || {});
+  } catch (_err) {
+  }
+}
+
 function bindPresenceToggleUi() {
   const toggleEl = document.getElementById('radar-use-derived');
   if (!toggleEl) return;
@@ -4629,6 +4773,17 @@ function markerLeft(cm, maxRange, markerHalfPx) {
   return `calc(${pct}% - ${markerHalfPx}px)`;
 }
 
+function currentDistanceUnit() {
+  return String((dashboardSettings && dashboardSettings.units_distance) || 'cm') === 'm' ? 'm' : 'cm';
+}
+
+function formatDistance(cm, units) {
+  const value = Number(cm);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  if (String(units || 'cm') === 'm') return (value / 100).toFixed(2) + ' m';
+  return Math.round(value) + ' cm';
+}
+
 function radarViewButtonsActive() {
   const nowBtn = document.getElementById('radar-view-now');
   const historyBtn = document.getElementById('radar-view-history');
@@ -4663,7 +4818,8 @@ function renderRadarCalibrationHistory(rows) {
     const ts = row.ts_local || row.ts_utc || '';
     const baseline = row.baseline_detect_cm == null ? 'n/a' : Number(row.baseline_detect_cm).toFixed(1);
     const noise = row.noise_detect_cm == null ? 'n/a' : Number(row.noise_detect_cm).toFixed(1);
-    return '<div>#' + row.id + ' ' + escapeHtml(formatDateTime(ts)) + ' · baseline ' + baseline + 'cm · noise ' + noise + ' · false ' + Number(row.false_presence_count || 0) + '</div>';
+    const grade = String(row.calibration_grade || '--');
+    return '<div>#' + row.id + ' ' + escapeHtml(formatDateTime(ts)) + ' · baseline ' + baseline + 'cm · noise ' + noise + ' · false ' + Number(row.false_presence_count || 0) + ' · grade ' + escapeHtml(grade) + '</div>';
   }).join('');
 }
 
@@ -4683,6 +4839,8 @@ function renderRadarCalibrationStatus(data) {
   const falseEl = document.getElementById('radar-cal-false');
   const baselineEl = document.getElementById('radar-cal-baseline');
   const noiseEl = document.getElementById('radar-cal-noise');
+  const gradeEl = document.getElementById('radar-cal-grade');
+  const recoEl = document.getElementById('radar-cal-reco');
   const phase = String(data.phase || data.status || 'idle');
   if (instructionEl) {
     if (phase === 'prepare') {
@@ -4704,6 +4862,11 @@ function renderRadarCalibrationStatus(data) {
     const noise = data.result.noise_detect_cm;
     if (baselineEl) baselineEl.textContent = base == null ? 'n/a' : Number(base).toFixed(1) + 'cm';
     if (noiseEl) noiseEl.textContent = noise == null ? 'n/a' : Number(noise).toFixed(1) + 'cm';
+    if (gradeEl) gradeEl.textContent = String(data.result.calibration_grade || '--');
+    if (recoEl) recoEl.textContent = String(data.result.calibration_recommendation || '--');
+  } else {
+    if (gradeEl) gradeEl.textContent = '--';
+    if (recoEl) recoEl.textContent = '--';
   }
 }
 
@@ -4802,6 +4965,7 @@ function updateRadarReadout(state) {
   const moveSigEl = document.getElementById('radar-now-move-sig');
   const statSigEl = document.getElementById('radar-now-stat-sig');
   const targetEl = document.getElementById('radar-now-target');
+  const units = currentDistanceUnit();
   const hasDerived = Object.prototype.hasOwnProperty.call(state || {}, 'present_derived');
   const derivedEnabled = !!useDerivedPresence && hasDerived;
   const derivedPresent = derivedEnabled ? !!state.present_derived : false;
@@ -4840,9 +5004,9 @@ function updateRadarReadout(state) {
     selfNoteEl.textContent = selfSuppressed ? 'Self suppressed' : '';
   }
   if (bodiesEl) bodiesEl.textContent = alive ? `${bodyCount}` : '--';
-  if (detectEl) detectEl.textContent = alive && target !== 0 ? `${detectCm} cm` : '--';
-  if (moveSigEl) moveSigEl.textContent = moveState ? `${moveCm} cm` : '--';
-  if (statSigEl) statSigEl.textContent = statState ? `${statCm} cm` : '--';
+  if (detectEl) detectEl.textContent = alive && target !== 0 ? formatDistance(detectCm, units) : '—';
+  if (moveSigEl) moveSigEl.textContent = moveState ? formatDistance(moveCm, units) : '—';
+  if (statSigEl) statSigEl.textContent = statState ? formatDistance(statCm, units) : '—';
   if (targetEl) targetEl.textContent = `${target}/3`;
 }
 
@@ -4862,9 +5026,16 @@ function drawRadarScope(state) {
   const detectMarkerEl = document.getElementById('range-marker-detect');
   const moveMarkerEl = document.getElementById('range-marker-move');
   const statMarkerEl = document.getElementById('range-marker-stat');
+  const minRangeEl = document.getElementById('range-min-label');
   const maxRangeEl = document.getElementById('range-max-label');
+  const units = currentDistanceUnit();
 
-  if (maxRangeEl) maxRangeEl.textContent = `${radarNow.maxRangeCm}cm`;
+  if (minRangeEl) minRangeEl.textContent = units === 'm' ? '0.00m' : '0cm';
+  if (maxRangeEl) {
+    maxRangeEl.textContent = units === 'm'
+      ? `${(radarNow.maxRangeCm / 100).toFixed(2)}m`
+      : `${radarNow.maxRangeCm}cm`;
+  }
   if (!stripEl || !detectMarkerEl || !moveMarkerEl || !statMarkerEl) {
     updateRadarReadout(state);
     return;
@@ -5456,6 +5627,7 @@ function initTrends() {
     '<div id="radar-now-pane" class="radar-now-wrap">' +
       '<div id="radar-cal-panel" class="cal-panel hidden">' +
         '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
+        '<div class="cal-guidance">Grade thresholds: A &lt; 5 false, B &lt; 20 false, C ≥ 20 false.</div>' +
         '<div class="cal-counters">' +
           '<div><span class="muted">Status</span><div id="radar-cal-status">idle</div></div>' +
           '<div><span class="muted">Countdown</span><div id="radar-cal-remaining">--</div></div>' +
@@ -5465,6 +5637,10 @@ function initTrends() {
           '<div><span class="muted">False presence</span><div id="radar-cal-false">0</div></div>' +
           '<div><span class="muted">Baseline</span><div id="radar-cal-baseline">--</div></div>' +
           '<div><span class="muted">Noise</span><div id="radar-cal-noise">--</div></div>' +
+        '</div>' +
+        '<div class="cal-counters">' +
+          '<div><span class="muted">Grade</span><div id="radar-cal-grade">--</div></div>' +
+          '<div style="grid-column: span 2"><span class="muted">Recommendation</span><div id="radar-cal-reco">--</div></div>' +
         '</div>' +
         '<div class="cal-actions">' +
           '<button onclick="cancelRadarCalibration()">Cancel</button>' +
@@ -5479,7 +5655,7 @@ function initTrends() {
         '<div id="range-marker-detect" class="marker detect hidden"></div>' +
         '<div id="range-marker-move" class="marker move hidden"></div>' +
         '<div id="range-marker-stat" class="marker stat hidden"></div>' +
-        '<div class="range-labels"><span>0cm</span><span id="range-max-label">300cm</span></div>' +
+        '<div class="range-labels"><span id="range-min-label">0cm</span><span id="range-max-label">300cm</span></div>' +
       '</div>' +
       '<div class="radar-readout">' +
         '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
@@ -6247,6 +6423,7 @@ async function pollEvents() {
   await pollIntegrity();
   await refreshTicker();
   await loadRadarCalibrationHistory();
+  await refreshDashboardSettingsLight();
   setInterval(pollStatus, 1000);
   setInterval(pollReady, 3000);
   setInterval(pollTables, 3000);
@@ -6254,6 +6431,7 @@ async function pollEvents() {
   setInterval(pollEvents, 4000);
   setInterval(pollIntegrity, 5000);
   setInterval(refreshTicker, 4000);
+  setInterval(refreshDashboardSettingsLight, 5000);
   setInterval(refreshRelativeTimes, 1000);
   setInterval(refreshLastUpdatedLabel, 1000);
 })();
