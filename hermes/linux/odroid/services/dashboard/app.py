@@ -7547,7 +7547,15 @@ async function pollEvents() {
 
 @APP.get("/app.js")
 def app_js() -> Response:
-    return Response(JS_BUNDLE, media_type="application/javascript")
+  return Response(
+    JS_BUNDLE,
+    media_type="application/javascript",
+    headers={
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "Pragma": "no-cache",
+      "Expires": "0",
+    },
+  )
 
 
 @APP.get("/", response_class=HTMLResponse)
