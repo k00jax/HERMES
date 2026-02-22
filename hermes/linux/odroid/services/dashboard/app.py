@@ -3749,8 +3749,21 @@ HTML_PAGE = """
     .hp-tab.active { background: #1f5f99; color: #fff; border-color: #1f5f99; }
     .hp-badges { justify-content: flex-start; }
     .radar-now-wrap { margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
-    .range-strip { position: relative; padding: 14px 8px 22px 8px; border-radius: 8px; border: 1px solid #26313d; background: #0f1620; }
-    .range-track { height: 8px; border-radius: 999px; background: #0b121b; border: 1px solid #1d2a38; }
+    .radar-bodies-line { font-size: 13px; font-weight: 600; color: #d6e4f3; }
+    .range-strip { position: relative; padding: 10px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; transition: opacity 150ms ease-in-out; }
+    .range-strip.no-target { opacity: 0.48; }
+    .zone-band { position: relative; display: grid; grid-template-columns: 0.8fr 0.7fr 1.5fr 2fr 1fr; gap: 6px; align-items: stretch; }
+    .zone-segment { min-height: 42px; border-radius: 8px; border: 1px solid #223244; display: flex; align-items: center; justify-content: center; text-align: center; padding: 4px 6px; color: #c7d7e8; font-size: 11px; line-height: 1.2; transition: opacity 150ms ease-in-out, filter 150ms ease-in-out, box-shadow 150ms ease-in-out, border-color 150ms ease-in-out; }
+    .zone-segment .zone-name { opacity: 0.92; }
+    .zone-segment .zone-certainty { display: block; font-size: 10px; color: #8ea1b3; margin-top: 2px; }
+    .zone-segment.zone-intimate { background: rgba(92, 175, 255, 0.30); }
+    .zone-segment.zone-personal { background: rgba(92, 175, 255, 0.22); }
+    .zone-segment.zone-interaction { background: rgba(92, 175, 255, 0.16); }
+    .zone-segment.zone-room { background: rgba(92, 175, 255, 0.10); }
+    .zone-segment.zone-extended { background: rgba(92, 175, 255, 0.05); opacity: 0.55; }
+    .zone-segment.active { border-color: #4f84bc; box-shadow: 0 0 0 2px rgba(79, 132, 188, 0.20) inset, 0 0 10px rgba(79, 132, 188, 0.15); filter: saturate(1.08); }
+    .zone-marker { position: absolute; top: -8px; width: 14px; height: 14px; border-radius: 999px; background: rgba(132, 210, 255, 0.96); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.20); pointer-events: none; transition: left 150ms ease-in-out, opacity 150ms ease-in-out; }
+    .zone-marker.hidden { display: none; }
     .marker { position: absolute; pointer-events: none; }
     .marker.hidden { display: none; }
     .marker.detect { top: 8px; width: 14px; height: 14px; border-radius: 999px; background: rgba(132, 210, 255, 0.95); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.18); }
@@ -3772,7 +3785,11 @@ HTML_PAGE = """
       0%, 100% { transform: scale(1.0); box-shadow: 0 0 0 3px rgba(54, 110, 182, 0.14); }
       50% { transform: scale(1.10); box-shadow: 0 0 0 6px rgba(54, 110, 182, 0.20); }
     }
-    .radar-readout { margin-top: 8px; font-size: 12px; color: #b8c7d8; line-height: 1.6; }
+    .radar-target-meta { margin-top: 2px; border: 1px solid #26313d; border-radius: 8px; background: #101822; padding: 8px; display: grid; gap: 3px; font-size: 12px; color: #b8c7d8; }
+    .radar-target-title { color: #d6e4f3; font-weight: 700; margin-bottom: 2px; }
+    .radar-target-row { display: flex; justify-content: space-between; gap: 10px; }
+    .radar-target-row .label { color: #8ea1b3; }
+    .radar-readout { margin-top: 2px; font-size: 12px; color: #b8c7d8; line-height: 1.6; }
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
     .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
@@ -3826,6 +3843,11 @@ HTML_PAGE = """
     .rssi-med  { border-color: rgba(255, 180, 0, 0.70); box-shadow: 0 0 0 1px rgba(255,180,0,0.12) inset; }
     .rssi-poor { border-color: rgba(255, 70, 70, 0.75); box-shadow: 0 0 0 1px rgba(255,70,70,0.12) inset; }
     .status-pill { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; border: 1px solid #2a3b4f; background: #111820; color: #c3d4e6; font-size: 11px; font-weight: 650; }
+    .conf-very-high { border-color: #4ca9ff; color: #d4ecff; }
+    .conf-high { border-color: #4f8ecc; color: #cae3fa; }
+    .conf-moderate { border-color: #6a7f99; color: #c3d0df; }
+    .conf-low { border-color: #8b7a5a; color: #dfd1b8; }
+    .conf-weak { border-color: #6c5f6e; color: #d2c6d4; opacity: 0.88; }
     .fresh-age { margin-top: 4px; font-size: 11px; color: #9fb3c8; }
     .fresh-age.good { color: #7ed48b; }
     .fresh-age.warn { color: #f0c36d; }
@@ -5501,6 +5523,84 @@ function markerLeft(cm, maxRange, markerHalfPx) {
   return `calc(${pct}% - ${markerHalfPx}px)`;
 }
 
+const RADAR_DISTANCE_ZONES = [
+  { key: 'intimate', label: 'Intimate', startCm: 0, endCm: 80, certainty: 'Very high confidence' },
+  { key: 'personal', label: 'Personal', startCm: 80, endCm: 150, certainty: 'High confidence' },
+  { key: 'interaction', label: 'Interaction', startCm: 150, endCm: 300, certainty: 'Moderate confidence' },
+  { key: 'room', label: 'Room', startCm: 300, endCm: 500, certainty: 'Low confidence' },
+  { key: 'extended', label: 'Extended', startCm: 500, endCm: Number.POSITIVE_INFINITY, certainty: 'Low Certainty' },
+];
+
+function zoneForDistanceCm(distanceCm) {
+  const value = Math.max(0, Number(distanceCm || 0));
+  for (let idx = 0; idx < RADAR_DISTANCE_ZONES.length; idx += 1) {
+    const zone = RADAR_DISTANCE_ZONES[idx];
+    if (value >= zone.startCm && value < zone.endCm) {
+      return { ...zone, index: idx };
+    }
+  }
+  const tail = RADAR_DISTANCE_ZONES[RADAR_DISTANCE_ZONES.length - 1];
+  return { ...tail, index: RADAR_DISTANCE_ZONES.length - 1 };
+}
+
+function baseConfidenceForDistance(distanceCm) {
+  const value = Math.max(0, Number(distanceCm || 0));
+  if (value <= 150) return 0.9;
+  if (value <= 300) return 0.7;
+  if (value <= 500) return 0.4;
+  return 0.2;
+}
+
+function confidenceDescriptor(distanceCm) {
+  const value = Math.max(0, Number(distanceCm || 0));
+  if (value > 500) {
+    return { badge: 'Weak Reflection', css: 'conf-weak' };
+  }
+  if (value <= 80) {
+    return { badge: 'Very High', css: 'conf-very-high' };
+  }
+  if (value <= 150) {
+    return { badge: 'High', css: 'conf-high' };
+  }
+  if (value <= 300) {
+    return { badge: 'Moderate', css: 'conf-moderate' };
+  }
+  return { badge: 'Low', css: 'conf-low' };
+}
+
+function formatPresenceDistanceMeters(cm) {
+  const value = Number(cm || 0);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  return (value / 100).toFixed(1) + ' m';
+}
+
+function updateSemanticDistanceBar(distanceCm, hasTarget, alive) {
+  const stripEl = document.getElementById('range-strip');
+  const markerEl = document.getElementById('range-marker-detect');
+  if (!stripEl || !markerEl) return;
+
+  const segments = stripEl.querySelectorAll('.zone-segment');
+  segments.forEach((segment) => segment.classList.remove('active'));
+
+  const showTarget = !!alive && !!hasTarget;
+  stripEl.classList.toggle('no-target', !showTarget);
+  if (!showTarget) {
+    markerEl.classList.add('hidden');
+    return;
+  }
+
+  const zone = zoneForDistanceCm(distanceCm);
+  const active = stripEl.querySelector(`.zone-segment[data-zone="${zone.key}"]`);
+  if (active) active.classList.add('active');
+
+  const zoneMaxCm = Number.isFinite(zone.endCm) ? zone.endCm : 600;
+  const zoneSpan = Math.max(1, zoneMaxCm - zone.startCm);
+  const localNorm = clamp((distanceCm - zone.startCm) / zoneSpan, 0, 1);
+  const percent = clamp(((zone.index + localNorm) / RADAR_DISTANCE_ZONES.length) * 100, 0, 100);
+  markerEl.classList.remove('hidden');
+  markerEl.style.left = `calc(${percent.toFixed(2)}% - 7px)`;
+}
+
 function currentDistanceUnit() {
   return String((dashboardSettings && dashboardSettings.units_distance) || 'cm') === 'm' ? 'm' : 'cm';
 }
@@ -5684,6 +5784,11 @@ function updateRadarReadout(state) {
   const stateEl = document.getElementById('radar-now-state');
   const statePillEl = document.getElementById('radar-now-state-pill');
   const selfNoteEl = document.getElementById('radar-now-self-note');
+  const bodiesLineEl = document.getElementById('radar-bodies-line');
+  const targetDistanceEl = document.getElementById('radar-target-distance');
+  const targetZoneEl = document.getElementById('radar-target-zone');
+  const targetConfEl = document.getElementById('radar-target-confidence');
+  const confBadgeEl = document.getElementById('radar-target-confidence-badge');
   const hasDerived = Object.prototype.hasOwnProperty.call(state || {}, 'present_derived');
   const derivedEnabled = !!useDerivedPresence && hasDerived;
   const derivedPresent = derivedEnabled ? !!state.present_derived : false;
@@ -5691,6 +5796,34 @@ function updateRadarReadout(state) {
   const effectiveTarget = (derivedEnabled && !derivedPresent) ? 0 : target;
   const moveState = (derivedEnabled && !derivedPresent) ? false : (moveMetric > 0);
   const statState = (derivedEnabled && !derivedPresent) ? false : (statMetric > 0);
+  const detectCm = clamp(Number(state.detect_cm || state.move_cm || state.stat_cm || 0), 0, 600);
+  const hasTarget = alive && effectiveTarget > 0 && detectCm > 0;
+  const bodies = getStableBodies(effectiveTarget);
+
+  updateSemanticDistanceBar(detectCm, hasTarget, alive);
+
+  if (bodiesLineEl) {
+    bodiesLineEl.textContent = 'Bodies Detected: ' + String(bodies);
+  }
+
+  if (targetDistanceEl && targetZoneEl && targetConfEl && confBadgeEl) {
+    if (!hasTarget) {
+      targetDistanceEl.textContent = '—';
+      targetZoneEl.textContent = 'Clear';
+      targetConfEl.textContent = alive ? 'No target' : 'Radar offline';
+      confBadgeEl.textContent = alive ? 'No Target' : 'Offline';
+      confBadgeEl.className = 'status-pill conf-low';
+    } else {
+      const zone = zoneForDistanceCm(detectCm);
+      const conf = confidenceDescriptor(detectCm);
+      const baseConfidence = baseConfidenceForDistance(detectCm);
+      targetDistanceEl.textContent = formatPresenceDistanceMeters(detectCm);
+      targetZoneEl.textContent = zone.label;
+      targetConfEl.textContent = conf.badge + ' (' + Math.round(baseConfidence * 100) + '%)';
+      confBadgeEl.textContent = conf.badge;
+      confBadgeEl.className = 'status-pill ' + conf.css;
+    }
+  }
 
   if (stateEl) {
     if (!alive) stateEl.textContent = 'Radar offline';
@@ -5821,62 +5954,6 @@ function renderRadarReturnStrip(tracksPayload, radarAlive) {
 }
 
 function drawRadarScope(state) {
-  const alive = Number(state.alive || 0) === 1;
-  const target = Number(state.target || 0);
-  const noContact = (!alive || target === 0);
-  const detectCm = clamp(Number(state.detect_cm || 0), 0, radarNow.maxRangeCm);
-  const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
-  const statMetric = clamp(Number(state.stat_en || 0), 0, 100);
-  const moveCm = clamp(Number(state.move_cm || detectCm), 0, radarNow.maxRangeCm);
-  const statCm = clamp(Number(state.stat_cm || detectCm), 0, radarNow.maxRangeCm);
-  const moveActive = alive && (moveMetric > 0 || target === 1 || target === 3);
-  const statActive = alive && (statMetric > 0 || target === 2 || target === 3);
-
-  const stripEl = document.getElementById('range-strip');
-  const detectMarkerEl = document.getElementById('range-marker-detect');
-  const moveMarkerEl = document.getElementById('range-marker-move');
-  const statMarkerEl = document.getElementById('range-marker-stat');
-  const minRangeEl = document.getElementById('range-min-label');
-  const maxRangeEl = document.getElementById('range-max-label');
-  const units = currentDistanceUnit();
-
-  if (minRangeEl) minRangeEl.textContent = units === 'm' ? '0.00m' : '0cm';
-  if (maxRangeEl) {
-    maxRangeEl.textContent = units === 'm'
-      ? `${(radarNow.maxRangeCm / 100).toFixed(2)}m`
-      : `${radarNow.maxRangeCm}cm`;
-  }
-  if (!stripEl || !detectMarkerEl || !moveMarkerEl || !statMarkerEl) {
-    updateRadarReadout(state);
-    return;
-  }
-
-  if (noContact) {
-    detectMarkerEl.classList.add('hidden');
-    moveMarkerEl.classList.add('hidden');
-    statMarkerEl.classList.add('hidden');
-  } else {
-    detectMarkerEl.classList.remove('hidden');
-    detectMarkerEl.style.left = markerLeft(detectCm, radarNow.maxRangeCm, 7);
-    detectMarkerEl.classList.remove('pulse-fast', 'pulse-slow');
-    if (moveMetric > 0) detectMarkerEl.classList.add('pulse-fast');
-    else detectMarkerEl.classList.add('pulse-slow');
-
-    if (moveActive) {
-      moveMarkerEl.classList.remove('hidden');
-      moveMarkerEl.style.left = markerLeft(moveCm, radarNow.maxRangeCm, 6);
-    } else {
-      moveMarkerEl.classList.add('hidden');
-    }
-
-    if (statActive) {
-      statMarkerEl.classList.remove('hidden');
-      statMarkerEl.style.left = markerLeft(statCm, radarNow.maxRangeCm, 6);
-    } else {
-      statMarkerEl.classList.add('hidden');
-    }
-  }
-
   updateRadarReadout(state);
 }
 
@@ -6479,8 +6556,7 @@ function initTrends() {
           '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
         '</div>' +
       '</div>' +
-      '<div id="trend-badges-' + radarTrend.key + '" class="trend-badges hp-badges pill-row"></div>' +
-      '<div id="trend-value-' + radarTrend.key + '" class="trend-value metric-value">n/a</div>' +
+      '<div id="radar-bodies-line" class="radar-bodies-line">Bodies Detected: 0</div>' +
       '<div id="radar-now-pane" class="radar-now-wrap">' +
         '<div id="radar-cal-panel" class="cal-panel hidden">' +
           '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
@@ -6504,15 +6580,25 @@ function initTrends() {
           '<div class="cal-actions"><button onclick="saveRadarCalibrationNote()">Save note</button></div>' +
           '<div id="radar-cal-history" class="cal-history"></div>' +
         '</div>' +
-        '<div id="range-strip" class="range-strip">' +
-          '<div class="range-track"></div>' +
-          '<div id="range-marker-detect" class="marker detect hidden"></div>' +
-          '<div id="range-marker-move" class="marker move hidden"></div>' +
-          '<div id="range-marker-stat" class="marker stat hidden"></div>' +
-          '<div class="range-labels"><span id="range-min-label">0cm</span><span id="range-max-label">300cm</span></div>' +
+        '<div id="range-strip" class="range-strip no-target">' +
+          '<div class="zone-band">' +
+            '<div class="zone-segment zone-intimate" data-zone="intimate"><div><span class="zone-name">Intimate</span></div></div>' +
+            '<div class="zone-segment zone-personal" data-zone="personal"><div><span class="zone-name">Personal</span></div></div>' +
+            '<div class="zone-segment zone-interaction" data-zone="interaction"><div><span class="zone-name">Interaction</span></div></div>' +
+            '<div class="zone-segment zone-room" data-zone="room"><div><span class="zone-name">Room</span></div></div>' +
+            '<div class="zone-segment zone-extended" data-zone="extended"><div><span class="zone-name">Extended</span><span class="zone-certainty">Low Certainty</span></div></div>' +
+            '<div id="range-marker-detect" class="zone-marker hidden"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="radar-target-meta">' +
+          '<div class="radar-target-title">Active Target</div>' +
+          '<div class="radar-target-row"><span class="label">Distance</span><span id="radar-target-distance">—</span></div>' +
+          '<div class="radar-target-row"><span class="label">Zone</span><span id="radar-target-zone">Clear</span></div>' +
+          '<div class="radar-target-row"><span class="label">Confidence</span><span id="radar-target-confidence">No target</span></div>' +
         '</div>' +
         '<div class="radar-readout">' +
           '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
+          '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
           '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">' +
             '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
             '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
@@ -6550,8 +6636,7 @@ function initTrends() {
         '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
       '</div>' +
     '</div>' +
-    '<div id="trend-badges-' + radarTrend.key + '" class="trend-badges hp-badges pill-row"></div>' +
-    '<div id="trend-value-' + radarTrend.key + '" class="trend-value metric-value">n/a</div>' +
+    '<div id="radar-bodies-line" class="radar-bodies-line">Bodies Detected: 0</div>' +
     '<div id="radar-now-pane" class="radar-now-wrap">' +
       '<div id="radar-cal-panel" class="cal-panel hidden">' +
         '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
@@ -6578,15 +6663,25 @@ function initTrends() {
         '<div class="cal-actions"><button onclick="saveRadarCalibrationNote()">Save note</button></div>' +
         '<div id="radar-cal-history" class="cal-history"></div>' +
       '</div>' +
-      '<div id="range-strip" class="range-strip">' +
-        '<div class="range-track"></div>' +
-        '<div id="range-marker-detect" class="marker detect hidden"></div>' +
-        '<div id="range-marker-move" class="marker move hidden"></div>' +
-        '<div id="range-marker-stat" class="marker stat hidden"></div>' +
-        '<div class="range-labels"><span id="range-min-label">0cm</span><span id="range-max-label">300cm</span></div>' +
+      '<div id="range-strip" class="range-strip no-target">' +
+        '<div class="zone-band">' +
+          '<div class="zone-segment zone-intimate" data-zone="intimate"><div><span class="zone-name">Intimate</span></div></div>' +
+          '<div class="zone-segment zone-personal" data-zone="personal"><div><span class="zone-name">Personal</span></div></div>' +
+          '<div class="zone-segment zone-interaction" data-zone="interaction"><div><span class="zone-name">Interaction</span></div></div>' +
+          '<div class="zone-segment zone-room" data-zone="room"><div><span class="zone-name">Room</span></div></div>' +
+          '<div class="zone-segment zone-extended" data-zone="extended"><div><span class="zone-name">Extended</span><span class="zone-certainty">Low Certainty</span></div></div>' +
+          '<div id="range-marker-detect" class="zone-marker hidden"></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="radar-target-meta">' +
+        '<div class="radar-target-title">Active Target</div>' +
+        '<div class="radar-target-row"><span class="label">Distance</span><span id="radar-target-distance">—</span></div>' +
+        '<div class="radar-target-row"><span class="label">Zone</span><span id="radar-target-zone">Clear</span></div>' +
+        '<div class="radar-target-row"><span class="label">Confidence</span><span id="radar-target-confidence">No target</span></div>' +
       '</div>' +
       '<div class="radar-readout">' +
         '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
+        '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
         '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">' +
           '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
           '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
