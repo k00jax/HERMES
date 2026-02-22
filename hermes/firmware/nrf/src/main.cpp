@@ -51,7 +51,6 @@ static const uint8_t SCREEN_HEIGHT = 64;
 
 static const int STATUS_LED_PIN = -1;
 static const int DEBUG_LED_PIN = -1;
-static const int PIN_BTN = D2;
 static const int PIN_SW = -1;
 
 static const uint32_t BTN_DEBOUNCE_MS = 25;
@@ -184,9 +183,9 @@ static const uint32_t DISPLAY_DEBUG_INTERVAL_MS = 400;
 static const uint32_t DISPLAY_USER_INTERVAL_MS = 800;
 
 static const int BUZZER_PIN = D0;
-static const int BTN_PREV = D1;
-static const int BTN_SELECT = D2;
-static const int BTN_NEXT = D3;
+static const int PIN_BTN_RIGHT = D1;
+static const int PIN_BTN_MIDDLE = D2;
+static const int PIN_BTN_LEFT = D3;
 static const uint32_t INPUT_DEBOUNCE_MS = 80;
 static const uint32_t INPUT_HOLD_MS = 1500;
 static uint32_t inputPrevEdgeMs = 0;
@@ -200,6 +199,29 @@ static bool inputChordActive = false;
 static bool inputChordFired = false;
 static uint32_t inputChordStartMs = 0;
 
+struct ButtonState {
+  int pin;
+  bool last;
+  uint32_t lastChangeMs;
+  uint32_t downSinceMs;
+  uint32_t lastUpMs;
+  uint8_t clickCount;
+  bool longFired;
+};
+
+[[maybe_unused]] static const char *btnName(int pin) {
+  if (pin == PIN_BTN_LEFT) {
+    return "left";
+  }
+  if (pin == PIN_BTN_MIDDLE) {
+    return "mid";
+  }
+  if (pin == PIN_BTN_RIGHT) {
+    return "right";
+  }
+  return "unknown";
+}
+
 static void testBeep(uint16_t freq, uint16_t durMs) {
   tone(BUZZER_PIN, freq, durMs);
 }
@@ -207,12 +229,12 @@ static void testBeep(uint16_t freq, uint16_t durMs) {
 static void runInputBuzzerTestSetup() {
   delay(200);
   pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(BTN_PREV, INPUT_PULLUP);
-  pinMode(BTN_SELECT, INPUT_PULLUP);
-  pinMode(BTN_NEXT, INPUT_PULLUP);
-  inputLastPrev = digitalRead(BTN_PREV);
-  inputLastSelect = digitalRead(BTN_SELECT);
-  inputLastNext = digitalRead(BTN_NEXT);
+  pinMode(PIN_BTN_LEFT, INPUT_PULLUP);
+  pinMode(PIN_BTN_MIDDLE, INPUT_PULLUP);
+  pinMode(PIN_BTN_RIGHT, INPUT_PULLUP);
+  inputLastPrev = digitalRead(PIN_BTN_LEFT);
+  inputLastSelect = digitalRead(PIN_BTN_MIDDLE);
+  inputLastNext = digitalRead(PIN_BTN_RIGHT);
 
   testBeep(880, 80);
   delay(120);
@@ -222,9 +244,9 @@ static void runInputBuzzerTestSetup() {
 }
 
 static void runInputBuzzerTestLoop() {
-  const bool prev = digitalRead(BTN_PREV);
-  const bool sel = digitalRead(BTN_SELECT);
-  const bool next = digitalRead(BTN_NEXT);
+  const bool prev = digitalRead(PIN_BTN_LEFT);
+  const bool sel = digitalRead(PIN_BTN_MIDDLE);
+  const bool next = digitalRead(PIN_BTN_RIGHT);
   const uint32_t now = millis();
 
   const bool allPressed = (prev == LOW && sel == LOW && next == LOW);
@@ -459,13 +481,9 @@ static int lastEspNetRssi = RSSI_NOT_CONNECTED;
 static uint32_t lastEspNetNtp = 0;
 static char lastEspNetIp[32] = "";
 
-static bool btnRawState = true;
-static bool btnStableState = true;
-static uint32_t btnLastChangeMs = 0;
-static uint32_t btnPressStartMs = 0;
-static bool btnLongHandled = false;
-static bool shortPressPending = false;
-static uint32_t shortPressMs = 0;
+static ButtonState btnLeft = {PIN_BTN_LEFT, HIGH, 0, 0, 0, 0, false};
+static ButtonState btnMid = {PIN_BTN_MIDDLE, HIGH, 0, 0, 0, 0, false};
+static ButtonState btnRight = {PIN_BTN_RIGHT, HIGH, 0, 0, 0, 0, false};
 
 static bool parseKeyValue(char *pair) {
   char *equals = strchr(pair, '=');
@@ -2823,102 +2841,130 @@ static void refreshNow(uint32_t now) {
   refreshFlashUntilMs = now + 500;
   lastDisplayMs = now;
   renderDisplays(now);
-  emitFrame("BTN", "action=refresh_now");
 }
 
-static void handleShortPress(uint32_t now) {
+static void emitButtonEvent(const char *name, const char *evt) {
+  char pairs[64];
+  snprintf(pairs, sizeof(pairs), "name=%s,evt=%s", name ? name : "unknown", evt ? evt : "unknown");
+  emitFrame("BTN", pairs);
+}
+
+static int clampWrap(int idx, int count) {
+  if (count <= 0) {
+    return 0;
+  }
+  int wrapped = idx % count;
+  if (wrapped < 0) {
+    wrapped += count;
+  }
+  return wrapped;
+}
+
+static void uiNextPage() {
   if (uiStack == UI_DEBUG) {
-    debugPageIndex = (debugPageIndex + 1) % DEBUG_PAGE_COUNT;
+    debugPageIndex = clampWrap(debugPageIndex + 1, DEBUG_PAGE_COUNT);
   } else {
-    userPageIndex = (userPageIndex + 1) % USER_PAGE_COUNT;
+    userPageIndex = clampWrap(userPageIndex + 1, USER_PAGE_COUNT);
+  }
+}
+
+static void uiPrevPage() {
+  if (uiStack == UI_DEBUG) {
+    debugPageIndex = clampWrap(debugPageIndex - 1, DEBUG_PAGE_COUNT);
+  } else {
+    userPageIndex = clampWrap(userPageIndex - 1, USER_PAGE_COUNT);
+  }
+}
+
+static void uiToggleStack() {
+  if (uiStack == UI_DEBUG) {
+    uiStack = UI_USER;
+    debugMode = false;
+    usbExportEnabled = false;
+  } else {
+    uiStack = UI_DEBUG;
+    debugMode = true;
+    usbExportEnabled = true;
+  }
+}
+
+static void uiGoHome() {
+  uiStack = UI_USER;
+  debugMode = false;
+  usbExportEnabled = false;
+  userPageIndex = 0;
+}
+
+static void onButtonShort(const char *name, uint32_t now) {
+  if (!name) {
+    return;
+  }
+  if (strcmp(name, "left") == 0) {
+    uiPrevPage();
+    emitButtonEvent(name, "short");
+  } else if (strcmp(name, "right") == 0) {
+    uiNextPage();
+    emitButtonEvent(name, "short");
+  } else if (strcmp(name, "mid") == 0) {
+    uiToggleStack();
+    emitButtonEvent(name, "short");
+  } else {
+    return;
   }
   lastDisplayMs = now;
   renderDisplays(now);
 }
 
-static void handleDoublePress(uint32_t now) {
-  if (uiStack == UI_DEBUG) {
+static void onButtonDouble(const char *name, uint32_t now) {
+  if (!name) {
+    return;
+  }
+  if (strcmp(name, "mid") == 0) {
+    emitButtonEvent(name, "double");
     refreshNow(now);
-  } else {
-    emitFrame("EVT", "type=mark");
   }
 }
 
-static void handleLongPress(uint32_t now) {
-  focusMode = !focusMode;
-  if (focusMode) {
-    focusModeUntilMs = now + FOCUS_MODE_DURATION_MS;
-    emitFrame("BTN", "action=focus,mode=on");
-  } else {
-    focusModeUntilMs = 0;
-    emitFrame("BTN", "action=focus,mode=off");
+static void onButtonLong(const char *name, uint32_t now) {
+  if (!name) {
+    return;
   }
+  if (strcmp(name, "mid") != 0) {
+    return;
+  }
+  uiGoHome();
+  emitButtonEvent(name, "long");
+  lastDisplayMs = now;
+  renderDisplays(now);
 }
 
-static void updateButton(uint32_t now) {
-  const bool prevRaw = digitalRead(BTN_PREV);
-  if (prevRaw != inputLastPrev && (now - inputPrevEdgeMs >= INPUT_DEBOUNCE_MS)) {
-    inputPrevEdgeMs = now;
-    inputLastPrev = prevRaw;
-    if (prevRaw == LOW) {
-      if (uiStack == UI_DEBUG) {
-        debugPageIndex = (debugPageIndex + DEBUG_PAGE_COUNT - 1) % DEBUG_PAGE_COUNT;
-      } else {
-        userPageIndex = (userPageIndex + USER_PAGE_COUNT - 1) % USER_PAGE_COUNT;
+static void updateButton(uint32_t now, ButtonState &button, const char *name) {
+  const bool rawLevel = digitalRead(button.pin);
+  if (rawLevel != button.last && (now - button.lastChangeMs) >= INPUT_DEBOUNCE_MS) {
+    button.last = rawLevel;
+    button.lastChangeMs = now;
+    if (rawLevel == LOW) {
+      button.downSinceMs = now;
+      button.longFired = false;
+    } else if (!button.longFired) {
+      button.clickCount = static_cast<uint8_t>(button.clickCount + 1);
+      if (button.clickCount >= 2 && (now - button.lastUpMs) <= BTN_DOUBLE_WINDOW_MS) {
+        button.clickCount = 0;
+        onButtonDouble(name, now);
       }
-      lastDisplayMs = now;
-      renderDisplays(now);
+      button.lastUpMs = now;
     }
   }
 
-  const bool nextRaw = digitalRead(BTN_NEXT);
-  if (nextRaw != inputLastNext && (now - inputNextEdgeMs >= INPUT_DEBOUNCE_MS)) {
-    inputNextEdgeMs = now;
-    inputLastNext = nextRaw;
-    if (nextRaw == LOW) {
-      if (uiStack == UI_DEBUG) {
-        debugPageIndex = (debugPageIndex + 1) % DEBUG_PAGE_COUNT;
-      } else {
-        userPageIndex = (userPageIndex + 1) % USER_PAGE_COUNT;
-      }
-      lastDisplayMs = now;
-      renderDisplays(now);
-    }
+  if (!button.longFired && button.last == LOW && (now - button.downSinceMs) >= BTN_LONG_PRESS_MS) {
+    button.longFired = true;
+    button.clickCount = 0;
+    onButtonLong(name, now);
   }
 
-  const bool rawLevel = digitalRead(PIN_BTN);
-  if (rawLevel != btnRawState) {
-    btnRawState = rawLevel;
-    btnLastChangeMs = now;
-  }
-
-  if ((now - btnLastChangeMs) >= BTN_DEBOUNCE_MS && rawLevel != btnStableState) {
-    btnStableState = rawLevel;
-    if (!btnStableState) {
-      btnPressStartMs = now;
-      btnLongHandled = false;
-    } else {
-      if (!btnLongHandled) {
-        if (shortPressPending && (now - shortPressMs) <= BTN_DOUBLE_WINDOW_MS) {
-          shortPressPending = false;
-          handleDoublePress(now);
-        } else {
-          shortPressPending = true;
-          shortPressMs = now;
-        }
-      }
-    }
-  }
-
-  if (!btnLongHandled && !btnStableState && (now - btnPressStartMs) >= BTN_LONG_PRESS_MS) {
-    btnLongHandled = true;
-    shortPressPending = false;
-    handleLongPress(now);
-  }
-
-  if (shortPressPending && (now - shortPressMs) > BTN_DOUBLE_WINDOW_MS) {
-    shortPressPending = false;
-    handleShortPress(now);
+  if (button.clickCount == 1 && (now - button.lastUpMs) > BTN_DOUBLE_WINDOW_MS) {
+    button.clickCount = 0;
+    onButtonShort(name, now);
   }
 }
 
@@ -3037,16 +3083,33 @@ void setup() {
   }
   pinMode(BUZZER_PIN, OUTPUT);
   hermesInitShiftRegisterLEDs();
-  pinMode(BTN_PREV, INPUT_PULLUP);
-  pinMode(BTN_SELECT, INPUT_PULLUP);
-  pinMode(BTN_NEXT, INPUT_PULLUP);
-  inputLastPrev = digitalRead(BTN_PREV);
-  inputLastSelect = digitalRead(BTN_SELECT);
-  inputLastNext = digitalRead(BTN_NEXT);
-  pinMode(PIN_BTN, INPUT_PULLUP);
-  btnRawState = digitalRead(PIN_BTN);
-  btnStableState = btnRawState;
-  btnLastChangeMs = millis();
+  pinMode(PIN_BTN_LEFT, INPUT_PULLUP);
+  pinMode(PIN_BTN_MIDDLE, INPUT_PULLUP);
+  pinMode(PIN_BTN_RIGHT, INPUT_PULLUP);
+  const uint32_t bootNow = millis();
+  btnLeft.pin = PIN_BTN_LEFT;
+  btnLeft.last = digitalRead(PIN_BTN_LEFT);
+  btnLeft.lastChangeMs = bootNow;
+  btnLeft.downSinceMs = 0;
+  btnLeft.lastUpMs = 0;
+  btnLeft.clickCount = 0;
+  btnLeft.longFired = false;
+
+  btnMid.pin = PIN_BTN_MIDDLE;
+  btnMid.last = digitalRead(PIN_BTN_MIDDLE);
+  btnMid.lastChangeMs = bootNow;
+  btnMid.downSinceMs = 0;
+  btnMid.lastUpMs = 0;
+  btnMid.clickCount = 0;
+  btnMid.longFired = false;
+
+  btnRight.pin = PIN_BTN_RIGHT;
+  btnRight.last = digitalRead(PIN_BTN_RIGHT);
+  btnRight.lastChangeMs = bootNow;
+  btnRight.downSinceMs = 0;
+  btnRight.lastUpMs = 0;
+  btnRight.clickCount = 0;
+  btnRight.longFired = false;
   swLastChangeMs = millis();
   if (PIN_SW >= 0) {
     pinMode(PIN_SW, INPUT_PULLUP);
@@ -3109,7 +3172,9 @@ void loop() {
   updateMicEvents(now);
   updateSwitch(now);
   uiStack = debugMode ? UI_DEBUG : UI_USER;
-  updateButton(now);
+  updateButton(now, btnLeft, "left");
+  updateButton(now, btnMid, "mid");
+  updateButton(now, btnRight, "right");
   updateLed(now);
   if (focusMode && now >= focusModeUntilMs) {
     focusMode = false;
