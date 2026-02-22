@@ -3753,9 +3753,23 @@ HTML_PAGE = """
     .hp-card .radar-bodies-line { margin-top: 6px; margin-bottom: 8px; }
     .radar-bodies-line { font-size: 13px; font-weight: 600; color: #d6e4f3; }
     .radar-last-seen { margin-top: -3px; font-size: 11px; color: #8ea1b3; }
+    .radar-cycle-hint { display: inline-flex; align-items: center; width: fit-content; margin-top: -2px; padding: 2px 8px; border-radius: 999px; border: 1px solid #2a3b4f; background: #111820; color: #9fb3c8; font-size: 11px; }
     .hp-card .range-strip { margin-top: 12px; margin-bottom: 14px; }
     .range-strip { position: relative; padding: 10px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; transition: opacity 150ms ease-in-out; }
     .range-strip.no-target { opacity: 0.48; }
+    .sonar-wrap { position: relative; margin-top: 12px; margin-bottom: 14px; min-height: 170px; }
+    .sonar-cone { position: relative; width: calc(100% - 286px); min-width: 180px; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; }
+    .sonar-cone::before { content: ''; position: absolute; inset: 10px; background: linear-gradient(90deg, rgba(121,192,255,0.08), rgba(121,192,255,0.22)); clip-path: polygon(0% 48%, 100% 10%, 100% 90%); border-radius: 8px; }
+    .sonar-layer { position: absolute; inset: 0; }
+    .sonar-dot { position: absolute; border-radius: 999px; pointer-events: auto; transition: left 150ms ease, top 150ms ease, opacity 150ms ease; }
+    .sonar-dot.dot-move { background: rgba(132, 210, 255, 0.98); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.24); }
+    .sonar-dot.dot-still { background: rgba(102, 167, 235, 0.95); box-shadow: 0 0 0 4px rgba(62, 112, 182, 0.22); }
+    .sonar-dot.dot-composite { background: rgba(150, 214, 255, 0.96); box-shadow: 0 0 0 4px rgba(90, 170, 235, 0.25); }
+    .sonar-dot.is-active { box-shadow: 0 0 0 4px rgba(121,192,255,0.25), 0 0 18px rgba(121,192,255,0.30); }
+    .sonar-dot.is-moving { animation: hermesPulse 1.1s ease-in-out infinite; }
+    .sonar-dot.is-flicker { animation: sonarFlicker 0.45s steps(2, end) infinite; }
+    .sonar-callout { position: absolute; left: calc(100% - 270px); width: 260px; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; pointer-events: none; z-index: 6; box-shadow: 0 10px 24px rgba(0,0,0,0.35); transition: opacity 120ms ease; }
+    .sonar-leaderline { position: absolute; height: 1px; background: rgba(121,192,255,0.45); transform-origin: 0 50%; z-index: 5; }
     .zone-band { position: relative; display: grid; grid-template-columns: 0.8fr 0.7fr 1.5fr 2fr 1fr; gap: 6px; align-items: stretch; }
     .range-markers { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; }
     .zone-segment { min-height: 42px; border-radius: 8px; border: 1px solid #223244; display: flex; align-items: center; justify-content: center; text-align: center; padding: 4px 6px; color: #c7d7e8; font-size: 11px; line-height: 1.2; transition: opacity 150ms ease-in-out, filter 150ms ease-in-out, box-shadow 150ms ease-in-out, border-color 150ms ease-in-out; }
@@ -3769,6 +3783,8 @@ HTML_PAGE = """
     .zone-segment.active { border-color: #4f84bc; box-shadow: 0 0 0 2px rgba(79, 132, 188, 0.20) inset, 0 0 10px rgba(79, 132, 188, 0.15); filter: saturate(1.08); }
     .zone-marker { position: absolute; width: 14px; height: 14px; border-radius: 999px; transform: translateX(-50%); background: rgba(132, 210, 255, 0.96); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.20); pointer-events: none; transition: left 150ms ease-in-out, opacity 150ms ease-in-out, top 150ms ease-in-out; }
     .zone-marker-move { background: rgba(132, 210, 255, 0.98); }
+    .zone-marker-move.is-moving { animation: hermesPulse 1.1s ease-in-out infinite; }
+    .zone-marker.is-active { box-shadow: 0 0 0 4px rgba(121,192,255,0.25), 0 0 18px rgba(121,192,255,0.25); }
     .zone-marker-still { background: rgba(102, 167, 235, 0.95); box-shadow: 0 0 0 4px rgba(62, 112, 182, 0.22); }
     .zone-marker.hidden { display: none; }
     .radar-target-float { position: absolute; transform: translateX(-50%); width: 260px; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; pointer-events: none; z-index: 5; box-shadow: 0 10px 24px rgba(0,0,0,0.35); transition: opacity 150ms ease; }
@@ -3782,6 +3798,10 @@ HTML_PAGE = """
     .tbar-track { height: 8px; border-radius: 999px; background: #111a24; border: 1px solid #223041; overflow: hidden; }
     .tbar-fill { height: 100%; width: 0%; border-radius: 999px; background: #79c0ff; }
     .tbar-val { text-align: right; font-size: 11px; opacity: 0.85; }
+    @keyframes sonarFlicker {
+      0%, 100% { opacity: 0.95; }
+      50% { opacity: 0.45; }
+    }
     .marker { position: absolute; pointer-events: none; }
     .marker.hidden { display: none; }
     .marker.detect { top: 8px; width: 14px; height: 14px; border-radius: 999px; background: rgba(132, 210, 255, 0.95); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.18); }
@@ -3795,6 +3815,10 @@ HTML_PAGE = """
     .conf-fill { height: 100%; width: 0%; }
     .conf-fill.move { background: linear-gradient(90deg, #69b8ff, #9dd9ff); }
     .conf-fill.stat { background: linear-gradient(90deg, #2f5f9b, #5b82be); }
+    @keyframes hermesPulse {
+      0%, 100% { transform: translateX(-50%) scale(1.0); filter: brightness(1.0); }
+      50% { transform: translateX(-50%) scale(1.16); filter: brightness(1.2); }
+    }
     @keyframes detectPulseFast {
       0%, 100% { transform: scale(1.0); box-shadow: 0 0 0 3px rgba(76, 153, 220, 0.14); }
       50% { transform: scale(1.16); box-shadow: 0 0 0 8px rgba(76, 153, 220, 0.20); }
@@ -5113,6 +5137,10 @@ let radarDerivedPresent = false;
 let nextTrackId = 1;
 let tracks = [];
 let activeTrackId = null;
+let activeTrackLockedUntilMs = 0;
+let hpClickBound = false;
+let radarFloatXSmoothed = null;
+let radarHoverTrackId = null;
 const radarNow = {
   enabled: true,
   view: 'now',
@@ -5598,6 +5626,30 @@ function computeConfidence(distanceMeters) {
   return { label: 'Very Low', score: 0.2, css: 'conf-weak' };
 }
 
+function confidenceWithEnergy(base, energy) {
+  const e = Math.max(0, Math.min(Number(energy || 0), 100));
+  const bump = (e / 100) * 0.2;
+  return Math.max(0.05, Math.min(Number(base || 0) + bump, 0.98));
+}
+
+function confidenceBand(score) {
+  const value = Math.max(0.0, Math.min(Number(score || 0), 1.0));
+  if (value >= 0.85) return { label: 'Very High', css: 'conf-very-high' };
+  if (value >= 0.70) return { label: 'High', css: 'conf-high' };
+  if (value >= 0.50) return { label: 'Moderate', css: 'conf-moderate' };
+  if (value >= 0.30) return { label: 'Low', css: 'conf-low' };
+  return { label: 'Very Low', css: 'conf-weak' };
+}
+
+function trackEffectiveEnergy(track) {
+  if (!track) return 0;
+  const move = Number(track.move_en || 0);
+  const still = Number(track.stat_en || 0);
+  if (track.kind === 'composite') return Math.max(move, still);
+  if (track.kind === 'move') return move;
+  return still;
+}
+
 function formatPresenceDistanceMeters(cm) {
   const value = Number(cm || 0);
   if (!Number.isFinite(value) || value <= 0) return '—';
@@ -5691,25 +5743,80 @@ function updateTracksFromDetections(detections) {
   }
 }
 
+function bindPresenceClickCycle() {
+  if (hpClickBound) return;
+  const strip = document.getElementById('sonar-wrap');
+  if (!strip) return;
+  hpClickBound = true;
+  strip.addEventListener('click', () => {
+    if (!tracks || tracks.length <= 1) return;
+    const ids = tracks.map((track) => track.id);
+    const idx = Math.max(0, ids.indexOf(activeTrackId));
+    activeTrackId = ids[(idx + 1) % ids.length];
+    activeTrackLockedUntilMs = Date.now() + 1500;
+  });
+}
+
 function getActiveTrack() {
   if (!tracks.length) return null;
+  const now = Date.now();
+  const locked = now < activeTrackLockedUntilMs;
+  if (!locked) {
+    if (activeTrackId == null || !tracks.some((track) => track.id === activeTrackId)) {
+      activeTrackId = tracks[0].id;
+    }
+  }
   return tracks.find((track) => track.id === activeTrackId) || tracks[0];
 }
 
-function renderTrackMarkers(maxM) {
+function mergeGateMeters(d) {
+  if (d <= 1.5) return 0.35;
+  if (d <= 3.0) return 0.5;
+  return 0.7;
+}
+
+function buildUiTracks() {
+  if (!tracks || tracks.length <= 1) return tracks;
+  const move = tracks.find((track) => track.kind === 'move');
+  const still = tracks.find((track) => track.kind === 'still');
+  if (!move || !still) return tracks;
+  const mD = Number(move.distanceM || 0);
+  const sD = Number(still.distanceM || 0);
+  if (!(mD > 0 && sD > 0)) return tracks;
+  const err = Math.abs(mD - sD);
+  const gate = mergeGateMeters(Math.min(mD, sD));
+  if (err > gate) return tracks;
+  const composite = {
+    id: still.id,
+    kind: 'composite',
+    distanceM: sD || mD,
+    lastSeenMs: Math.max(Number(still.lastSeenMs || 0), Number(move.lastSeenMs || 0)),
+    move_en: Number(move.move_en || 0),
+    stat_en: Number(still.stat_en || 0),
+    mergedIds: [move.id, still.id],
+  };
+  return [composite];
+}
+
+function renderTrackMarkers(maxM, listOverride) {
+  const list = Array.isArray(listOverride) ? listOverride : tracks;
   const wrap = document.getElementById('range-markers');
   if (!wrap) return;
   const existing = new Map();
   for (const el of wrap.querySelectorAll('.zone-marker')) {
     existing.set(String(el.dataset.trackId || ''), el);
   }
-  for (let i = 0; i < tracks.length; i += 1) {
-    const track = tracks[i];
+  for (let i = 0; i < list.length; i += 1) {
+    const track = list[i];
     const key = String(track.id);
     let el = existing.get(key);
     if (!el) {
       el = document.createElement('div');
-      el.className = 'zone-marker ' + (track.kind === 'move' ? 'zone-marker-move' : 'zone-marker-still');
+      el.className = 'zone-marker ' + (
+        track.kind === 'move' ? 'zone-marker-move' :
+        track.kind === 'still' ? 'zone-marker-still' :
+        'zone-marker-still'
+      );
       el.dataset.trackId = key;
       el.title = (track.kind === 'move' ? 'Moving #' : 'Still #') + key;
       wrap.appendChild(el);
@@ -5724,8 +5831,21 @@ function renderTrackMarkers(maxM) {
     const pct = (clamped / maxM) * 100;
     el.style.left = pct + '%';
     el.style.opacity = String(hv.fade);
-    const baseTop = track.kind === 'move' ? -10 : 4;
-    el.style.top = (baseTop + (i * 6)) + 'px';
+    const normalizedKind = track.kind === 'move' ? 'move' : (track.kind === 'still' ? 'still' : 'composite');
+    let kindGroupIndex = 0;
+    for (let j = 0; j < i; j += 1) {
+      const prevKind = list[j].kind === 'move' ? 'move' : (list[j].kind === 'still' ? 'still' : 'composite');
+      if (prevKind === normalizedKind) kindGroupIndex += 1;
+    }
+    const baseTop = normalizedKind === 'move' ? -10 : 4;
+    el.style.top = (baseTop + (kindGroupIndex * 8)) + 'px';
+    el.classList.toggle('is-active', track.id === activeTrackId);
+    if (track.kind === 'move') {
+      const mv = Number(track.move_en || 0);
+      el.classList.toggle('is-moving', mv >= 20);
+    } else {
+      el.classList.remove('is-moving');
+    }
     existing.delete(key);
   }
   for (const leftover of existing.values()) {
@@ -5733,19 +5853,37 @@ function renderTrackMarkers(maxM) {
   }
 }
 
-function renderFloatingCapsule(active, maxM) {
+function sonarStableLane(trackId) {
+  const seed = Math.abs(Math.sin((Number(trackId || 0) + 1) * 12.9898) * 43758.5453);
+  const fract = seed - Math.floor(seed);
+  return (fract * 2.0) - 1.0;
+}
+
+function renderSonarCallout(activeTrack, dotMeta, maxM) {
+  const wrapEl = document.getElementById('sonar-wrap');
+  const coneEl = document.getElementById('sonar-cone');
   const floatEl = document.getElementById('radar-target-float');
-  const stripEl = document.getElementById('range-strip');
-  if (!floatEl || !stripEl) return;
-  if (!active) {
+  const lineEl = document.getElementById('sonar-leaderline');
+  if (!wrapEl || !coneEl || !floatEl || !lineEl) return;
+
+  if (!activeTrack || !dotMeta) {
     floatEl.classList.add('hidden');
+    lineEl.classList.add('hidden');
+    radarFloatXSmoothed = null;
     return;
   }
+
   floatEl.classList.remove('hidden');
-  const distance = Number(active.distanceM || 0);
+  lineEl.classList.remove('hidden');
+
+  const distance = Number(activeTrack.distanceM || 0);
   const distanceCm = distance * 100.0;
   const zone = zoneForDistanceCm(distanceCm);
-  const conf = computeConfidence(distance);
+  const sourceLabel = activeTrack.kind === 'composite' ? 'Move+Still' : (activeTrack.kind === 'move' ? 'Moving' : 'Still');
+  const baseConf = computeConfidence(distance);
+  const finalScore = confidenceWithEnergy(baseConf.score, trackEffectiveEnergy(activeTrack));
+  const conf = confidenceBand(finalScore);
+
   const distanceEl = document.getElementById('radar-target-distance');
   const zoneEl = document.getElementById('radar-target-zone');
   const confEl = document.getElementById('radar-target-confidence');
@@ -5753,22 +5891,100 @@ function renderFloatingCapsule(active, maxM) {
   const stValEl = document.getElementById('radar-float-still-val');
   const mvBarEl = document.getElementById('radar-float-move-bar');
   const stBarEl = document.getElementById('radar-float-still-bar');
+
+  const moveEnergy = clamp(Number(activeTrack.move_en || 0), 0, 100);
+  const stillEnergy = clamp(Number(activeTrack.stat_en || 0), 0, 100);
   if (distanceEl) distanceEl.textContent = distance.toFixed(1) + ' m';
-  if (zoneEl) zoneEl.textContent = zone.label;
-  if (confEl) confEl.textContent = conf.label + ' (' + Math.round(conf.score * 100) + '%)';
-  const moveEnergy = clamp(Number(active.move_en || 0), 0, 100);
-  const stillEnergy = clamp(Number(active.stat_en || 0), 0, 100);
+  if (zoneEl) zoneEl.textContent = zone.label + ' (' + sourceLabel + ')';
+  if (confEl) confEl.textContent = conf.label + ' (' + Math.round(finalScore * 100) + '%)';
   if (mvValEl) mvValEl.textContent = String(Math.round(moveEnergy));
   if (stValEl) stValEl.textContent = String(Math.round(stillEnergy));
   if (mvBarEl) mvBarEl.style.width = moveEnergy + '%';
   if (stBarEl) stBarEl.style.width = stillEnergy + '%';
-  const stripRect = stripEl.getBoundingClientRect();
-  const pct = clamp(distance / maxM, 0, 1);
-  const x = stripRect.left + (stripRect.width * pct);
-  const half = 130;
-  const clampedX = clamp(x, stripRect.left + half, stripRect.right - half);
-  floatEl.style.left = (clampedX - stripRect.left) + 'px';
-  floatEl.style.top = '-86px';
+
+  const coneWidth = coneEl.clientWidth || 1;
+  const targetX = coneWidth + 18;
+  if (radarFloatXSmoothed == null) radarFloatXSmoothed = targetX;
+  radarFloatXSmoothed = (radarFloatXSmoothed * 0.7) + (targetX * 0.3);
+  floatEl.style.left = radarFloatXSmoothed + 'px';
+
+  const calloutHeight = floatEl.offsetHeight || 92;
+  const coneHeight = coneEl.clientHeight || 150;
+  const top = clamp(dotMeta.y - (calloutHeight / 2), 4, Math.max(4, coneHeight - calloutHeight - 4));
+  floatEl.style.top = top + 'px';
+
+  const x1 = dotMeta.x;
+  const y1 = dotMeta.y;
+  const x2 = radarFloatXSmoothed;
+  const y2 = top + (calloutHeight / 2);
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.max(2, Math.sqrt((dx * dx) + (dy * dy)));
+  const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+  lineEl.style.left = x1 + 'px';
+  lineEl.style.top = y1 + 'px';
+  lineEl.style.width = len + 'px';
+  lineEl.style.transform = 'rotate(' + angle.toFixed(2) + 'deg)';
+}
+
+function renderSonarReturns(list, maxM) {
+  const coneEl = document.getElementById('sonar-cone');
+  const layerEl = document.getElementById('sonar-layer');
+  if (!coneEl || !layerEl) return { active: null };
+
+  layerEl.innerHTML = '';
+  const width = Math.max(1, coneEl.clientWidth);
+  const height = Math.max(1, coneEl.clientHeight);
+  const centerY = height / 2;
+  const live = [];
+  const metaById = {};
+
+  for (const track of (Array.isArray(list) ? list : [])) {
+    const hv = hangVisible(Number(track.lastSeenMs || 0));
+    if (!hv.visible) continue;
+    live.push(track);
+
+    const x = clamp(Number(track.distanceM || 0) / maxM, 0, 1) * width;
+    const ratio = clamp(x / width, 0, 1);
+    const halfCone = (height * (0.12 + (0.38 * ratio)));
+    const lane = sonarStableLane(track.id);
+    const y = clamp(centerY + lane * Math.max(4, halfCone - 12), 10, height - 10);
+    const energy = clamp(trackEffectiveEnergy(track), 0, 100);
+    const radius = 4 + (10 * (energy / 100.0));
+    const createdMs = Number(track.createdMs || track.lastSeenMs || 0);
+    const baseConf = computeConfidence(Number(track.distanceM || 0));
+    const finalScore = confidenceWithEnergy(baseConf.score, energy);
+    const flicker = ((Date.now() - createdMs) < 700) || finalScore < 0.35;
+    const pulse = track.kind === 'move' && energy >= 20;
+
+    const dot = document.createElement('div');
+    dot.className = 'sonar-dot ' + (track.kind === 'move' ? 'dot-move' : (track.kind === 'composite' ? 'dot-composite' : 'dot-still'));
+    dot.classList.toggle('is-active', track.id === activeTrackId);
+    dot.classList.toggle('is-moving', pulse);
+    dot.classList.toggle('is-flicker', flicker);
+    dot.style.left = x.toFixed(2) + 'px';
+    dot.style.top = y.toFixed(2) + 'px';
+    dot.style.width = (radius * 2).toFixed(1) + 'px';
+    dot.style.height = (radius * 2).toFixed(1) + 'px';
+    dot.style.marginLeft = (-radius).toFixed(1) + 'px';
+    dot.style.marginTop = (-radius).toFixed(1) + 'px';
+    dot.style.opacity = String(hv.fade);
+    dot.title = (track.kind || 'track') + ' #' + String(track.id);
+    dot.addEventListener('mouseenter', () => {
+      radarHoverTrackId = track.id;
+    });
+    dot.addEventListener('mouseleave', () => {
+      if (radarHoverTrackId === track.id) radarHoverTrackId = null;
+    });
+    layerEl.appendChild(dot);
+    metaById[String(track.id)] = { x, y };
+  }
+
+  const hoverTrack = live.find((track) => track.id === radarHoverTrackId) || null;
+  const activeTrack = hoverTrack || live.find((track) => track.id === activeTrackId) || (live.length ? live[0] : null);
+  const activeMeta = activeTrack ? metaById[String(activeTrack.id)] : null;
+  renderSonarCallout(activeTrack, activeMeta, maxM);
+  return { active: activeTrack };
 }
 
 function currentDistanceUnit() {
@@ -5944,6 +6160,7 @@ window.saveRadarCalibrationNote = async function saveRadarCalibrationNote() {
 };
 
 function updateRadarReadout(state) {
+  bindPresenceClickCycle();
   const alive = Number(state.alive || 0) === 1;
   const target = Number(state.target || 0);
   const moveMetric = clamp(Number(state.move_en || 0), 0, 100);
@@ -5953,6 +6170,7 @@ function updateRadarReadout(state) {
   const statePillEl = document.getElementById('radar-now-state-pill');
   const selfNoteEl = document.getElementById('radar-now-self-note');
   const lastSeenEl = document.getElementById('radar-last-seen');
+  const cycleHintEl = document.getElementById('radar-cycle-hint');
   const bodiesLineEl = document.getElementById('radar-bodies-line');
   const confBadgeEl = document.getElementById('radar-target-confidence-badge');
   const hasDerived = Object.prototype.hasOwnProperty.call(state || {}, 'present_derived');
@@ -5977,16 +6195,29 @@ function updateRadarReadout(state) {
     tracks = [];
     activeTrackId = null;
   }
-  const activeTrack = getActiveTrack();
+  const uiTracks = buildUiTracks();
+  let activeTrack = null;
+  if (uiTracks.length === 1 && uiTracks[0].kind === 'composite') {
+    activeTrack = uiTracks[0];
+    activeTrackId = uiTracks[0].id;
+  } else {
+    activeTrack = getActiveTrack();
+  }
   const activeDistanceCm = activeTrack ? (Number(activeTrack.distanceM || 0) * 100.0) : 0;
   const visible = !!activeTrack;
 
   updateSemanticDistanceBar(activeDistanceCm, visible, alive);
-  renderTrackMarkers(6.0);
-  renderFloatingCapsule(activeTrack, 6.0);
+  const sonarRender = renderSonarReturns(uiTracks, 6.0);
+  if (sonarRender && sonarRender.active) {
+    activeTrack = sonarRender.active;
+    activeTrackId = sonarRender.active.id;
+  }
 
   if (bodiesLineEl) {
-    bodiesLineEl.textContent = 'Bodies Detected: ' + String(tracks.length);
+    bodiesLineEl.textContent = 'Bodies Detected: ' + String(uiTracks.length);
+  }
+  if (cycleHintEl) {
+    cycleHintEl.classList.toggle('hidden', !(uiTracks.length > 1));
   }
   if (lastSeenEl) {
     if (activeTrack && activeTrack.lastSeenMs) {
@@ -6002,7 +6233,9 @@ function updateRadarReadout(state) {
       confBadgeEl.textContent = alive ? 'No Target' : 'Offline';
       confBadgeEl.className = 'status-pill conf-low';
     } else {
-      const conf = computeConfidence(Number(activeTrack.distanceM || 0));
+      const baseConf = computeConfidence(Number(activeTrack.distanceM || 0));
+      const score = confidenceWithEnergy(baseConf.score, trackEffectiveEnergy(activeTrack));
+      const conf = confidenceBand(score);
       confBadgeEl.textContent = conf.label;
       confBadgeEl.className = 'status-pill ' + conf.css;
     }
@@ -6674,6 +6907,7 @@ function initTrends() {
       '</div>' +
       '<div id="radar-bodies-line" class="radar-bodies-line">Bodies Detected: 0</div>' +
       '<div id="radar-last-seen" class="radar-last-seen">Last seen: —</div>' +
+      '<div id="radar-cycle-hint" class="radar-cycle-hint hidden">Click bar to cycle target</div>' +
       '<div id="radar-now-pane" class="radar-now-wrap">' +
         '<div id="radar-cal-panel" class="cal-panel hidden">' +
           '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
@@ -6697,22 +6931,16 @@ function initTrends() {
           '<div class="cal-actions"><button onclick="saveRadarCalibrationNote()">Save note</button></div>' +
           '<div id="radar-cal-history" class="cal-history"></div>' +
         '</div>' +
-        '<div id="range-strip" class="range-strip no-target">' +
-          '<div class="zone-band">' +
-            '<div class="zone-segment zone-intimate" data-zone="intimate"><div><span class="zone-name">Intimate</span></div></div>' +
-            '<div class="zone-segment zone-personal" data-zone="personal"><div><span class="zone-name">Personal</span></div></div>' +
-            '<div class="zone-segment zone-interaction" data-zone="interaction"><div><span class="zone-name">Interaction</span></div></div>' +
-            '<div class="zone-segment zone-room" data-zone="room"><div><span class="zone-name">Room</span></div></div>' +
-            '<div class="zone-segment zone-extended" data-zone="extended"><div><span class="zone-name">Extended</span><span class="zone-certainty">Low Certainty</span></div></div>' +
-            '<div id="range-markers" class="range-markers"></div>' +
-            '<div id="radar-target-float" class="radar-target-float hidden">' +
-              '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
-              '<div class="target-bars">' +
-                '<div class="tbar"><div class="tbar-label">Motion</div><div class="tbar-track"><div id="radar-float-move-bar" class="tbar-fill"></div></div><div id="radar-float-move-val" class="tbar-val">0</div></div>' +
-                '<div class="tbar"><div class="tbar-label">Still</div><div class="tbar-track"><div id="radar-float-still-bar" class="tbar-fill"></div></div><div id="radar-float-still-val" class="tbar-val">0</div></div>' +
-              '</div>' +
+        '<div id="sonar-wrap" class="sonar-wrap">' +
+          '<div id="sonar-cone" class="sonar-cone"><div id="sonar-layer" class="sonar-layer"></div></div>' +
+          '<div id="radar-target-float" class="sonar-callout hidden">' +
+            '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
+            '<div class="target-bars">' +
+              '<div class="tbar"><div class="tbar-label">Motion</div><div class="tbar-track"><div id="radar-float-move-bar" class="tbar-fill"></div></div><div id="radar-float-move-val" class="tbar-val">0</div></div>' +
+              '<div class="tbar"><div class="tbar-label">Still</div><div class="tbar-track"><div id="radar-float-still-bar" class="tbar-fill"></div></div><div id="radar-float-still-val" class="tbar-val">0</div></div>' +
             '</div>' +
           '</div>' +
+          '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
         '</div>' +
         '<div class="radar-readout">' +
           '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
@@ -6752,6 +6980,7 @@ function initTrends() {
     '</div>' +
     '<div id="radar-bodies-line" class="radar-bodies-line">Bodies Detected: 0</div>' +
     '<div id="radar-last-seen" class="radar-last-seen">Last seen: —</div>' +
+    '<div id="radar-cycle-hint" class="radar-cycle-hint hidden">Click bar to cycle target</div>' +
     '<div id="radar-now-pane" class="radar-now-wrap">' +
       '<div id="radar-cal-panel" class="cal-panel hidden">' +
         '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
@@ -6778,22 +7007,16 @@ function initTrends() {
         '<div class="cal-actions"><button onclick="saveRadarCalibrationNote()">Save note</button></div>' +
         '<div id="radar-cal-history" class="cal-history"></div>' +
       '</div>' +
-      '<div id="range-strip" class="range-strip no-target">' +
-        '<div class="zone-band">' +
-          '<div class="zone-segment zone-intimate" data-zone="intimate"><div><span class="zone-name">Intimate</span></div></div>' +
-          '<div class="zone-segment zone-personal" data-zone="personal"><div><span class="zone-name">Personal</span></div></div>' +
-          '<div class="zone-segment zone-interaction" data-zone="interaction"><div><span class="zone-name">Interaction</span></div></div>' +
-          '<div class="zone-segment zone-room" data-zone="room"><div><span class="zone-name">Room</span></div></div>' +
-          '<div class="zone-segment zone-extended" data-zone="extended"><div><span class="zone-name">Extended</span><span class="zone-certainty">Low Certainty</span></div></div>' +
-          '<div id="range-markers" class="range-markers"></div>' +
-          '<div id="radar-target-float" class="radar-target-float hidden">' +
-            '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
-            '<div class="target-bars">' +
-              '<div class="tbar"><div class="tbar-label">Motion</div><div class="tbar-track"><div id="radar-float-move-bar" class="tbar-fill"></div></div><div id="radar-float-move-val" class="tbar-val">0</div></div>' +
-              '<div class="tbar"><div class="tbar-label">Still</div><div class="tbar-track"><div id="radar-float-still-bar" class="tbar-fill"></div></div><div id="radar-float-still-val" class="tbar-val">0</div></div>' +
-            '</div>' +
+      '<div id="sonar-wrap" class="sonar-wrap">' +
+        '<div id="sonar-cone" class="sonar-cone"><div id="sonar-layer" class="sonar-layer"></div></div>' +
+        '<div id="radar-target-float" class="sonar-callout hidden">' +
+          '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
+          '<div class="target-bars">' +
+            '<div class="tbar"><div class="tbar-label">Motion</div><div class="tbar-track"><div id="radar-float-move-bar" class="tbar-fill"></div></div><div id="radar-float-move-val" class="tbar-val">0</div></div>' +
+            '<div class="tbar"><div class="tbar-label">Still</div><div class="tbar-track"><div id="radar-float-still-bar" class="tbar-fill"></div></div><div id="radar-float-still-val" class="tbar-val">0</div></div>' +
           '</div>' +
         '</div>' +
+        '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
       '</div>' +
       '<div class="radar-readout">' +
         '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
