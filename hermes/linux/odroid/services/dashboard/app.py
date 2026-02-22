@@ -3038,10 +3038,24 @@ HTML_PAGE = """
       background: #0b0f14;
       color: #e8eef5;
     }
-    h1 { margin: 0 0 4px 0; }
-    .top-nav { margin: 10px 0 14px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .brand-link { display: inline-flex; align-items: center; margin-right: 10px; text-decoration: none; }
-    .brand-logo { display: block; height: 30px; width: auto; border-radius: 3px; }
+    h1 { margin: 0 0 4px 98px; }
+    .top-nav { margin: 10px 0 14px 98px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .brand-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      width: 72px;
+      height: 72px;
+      text-decoration: none;
+      background: #111820;
+      border: 1px solid #26313d;
+      border-radius: 12px;
+      z-index: 20;
+    }
+    .brand-logo { display: block; height: 48px; width: auto; border-radius: 3px; }
     .nav-link {
       display: inline-flex;
       align-items: center;
@@ -3056,16 +3070,17 @@ HTML_PAGE = """
     .nav-link.active { background: #1f5f99; border-color: #1f5f99; color: #fff; }
     .nav-ticker { margin-left: auto; max-width: 620px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; opacity: 0.9; padding: 6px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; }
     .ticker-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background: rgba(120,180,255,0.9); margin-right: 8px; vertical-align: middle; }
-    .home-top-grid { display: grid; grid-template-columns: 1fr 360px; gap: 14px; align-items: start; }
+    .home-top-grid { display: grid; grid-template-columns: 1fr 420px; gap: 14px; align-items: start; }
     .section-title { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; margin: 6px 0 10px; }
     .sys-cards { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 12px; }
-    .card-compact { padding: 12px 14px; min-height: 86px; }
+    .card-compact { padding: 6px 8px; min-height: 70px; }
     .card-compact .card-title { font-size: 12px; opacity: 0.85; margin-bottom: 6px; }
     .card-compact .card-value { font-size: 22px; font-weight: 700; }
     .card-compact .card-sub { font-size: 12px; opacity: 0.75; margin-top: 4px; }
     .health-side { position: sticky; top: 16px; }
     .stream-row { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 10px; }
     .stream-row .tile { width: auto; }
+    .stream-row .card { padding: 8px 10px; }
     .field-entry { margin: 6px 0 12px 0; }
     .field-entry a {
       display: inline-flex;
@@ -3104,6 +3119,9 @@ HTML_PAGE = """
     @media (max-width: 1100px) {
       .home-top-grid { grid-template-columns: 1fr; }
       .stream-row { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+      .trend-window { width: 100%; max-width: 100%; }
+      .health-side .card { min-height: 0; }
+      #integrityFps { min-height: 0; }
     }
     @media (max-width: 900px) {
       .sys-cards { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
@@ -3210,7 +3228,7 @@ HTML_PAGE = """
     .radar-label { color: #8ea1b3; }
     .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
     .chart-slot-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
-    .trend-window { width: 100%; display: flex; flex-direction: column; }
+    .trend-window { width: calc(100% - 434px); max-width: calc(100% - 434px); display: flex; flex-direction: column; padding: 6px 8px; }
     .trend-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }
     .trend-range-pills { display: inline-flex; }
     .trend-slots { display:flex; gap:12px; flex-wrap:wrap; margin-top: 10px; }
@@ -3218,6 +3236,8 @@ HTML_PAGE = """
     .slot-ctrl { display: inline-flex; align-items: center; gap: 6px; }
     .slot-ctrl label { font-size: 12px; color: #9fb3c8; }
     .slot-ctrl select { background: #111820; color: #d9e6f3; border: 1px solid #26313d; border-radius: 8px; padding: 5px 8px; }
+    .health-side .card { min-height: 280px; }
+    #integrityFps { min-height: 210px; }
     .btn-diagnostics { padding: 6px 10px; font-size: 12px; }
     .rssi-box { border: 2px solid rgba(255,255,255,0.08); }
     .rssi-good { border-color: rgba(0, 200, 100, 0.70); box-shadow: 0 0 0 1px rgba(0,200,100,0.15) inset; }
@@ -3338,7 +3358,6 @@ def render_dashboard_page(active_path: str) -> str:
       <div class="trend-slots">
         <div id=\"chartSlotControls\" class=\"chart-slot-controls\"></div>
       </div>
-      <div class="trend-actions"><button onclick=\"window.location.href='/reports'\">Generate report</button></div>
     </div>
   </div>
 
@@ -3432,11 +3451,25 @@ def render_shell_page(active_path: str, title: str, body_html: str, script_js: s
       background: #0b0f14;
       color: #e8eef5;
     }}
-    h1 {{ margin: 0 0 4px 0; }}
+    h1 {{ margin: 0 0 4px 98px; }}
     .muted {{ color: #9fb3c8; }}
-    .top-nav {{ margin: 10px 0 14px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
-    .brand-link {{ display: inline-flex; align-items: center; margin-right: 10px; text-decoration: none; }}
-    .brand-logo {{ display: block; height: 30px; width: auto; border-radius: 3px; }}
+    .top-nav {{ margin: 10px 0 14px 98px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .brand-link {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      width: 72px;
+      height: 72px;
+      text-decoration: none;
+      background: #111820;
+      border: 1px solid #26313d;
+      border-radius: 12px;
+      z-index: 20;
+    }}
+    .brand-logo {{ display: block; height: 48px; width: auto; border-radius: 3px; }}
     .nav-link {{
       display: inline-flex;
       align-items: center;
@@ -4726,6 +4759,16 @@ function renderChartSlotControls() {
   if (!root) return;
   root.innerHTML = '';
   for (const slot of chartSlotOrder) {
+    if (slot === 'D') {
+      const reportWrap = document.createElement('span');
+      reportWrap.className = 'slot-ctrl';
+      const reportBtn = document.createElement('button');
+      reportBtn.type = 'button';
+      reportBtn.textContent = 'Generate report';
+      reportBtn.onclick = () => { window.location.href = '/reports'; };
+      reportWrap.appendChild(reportBtn);
+      root.appendChild(reportWrap);
+    }
     const wrap = document.createElement('span');
     wrap.className = 'slot-ctrl';
     const label = document.createElement('label');
