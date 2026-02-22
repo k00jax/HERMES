@@ -3749,11 +3749,15 @@ HTML_PAGE = """
     .hp-tab.active { background: #1f5f99; color: #fff; border-color: #1f5f99; }
     .hp-badges { justify-content: flex-start; }
     .radar-now-wrap { margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
+    #radar-now-pane { padding-bottom: 10px; }
+    .hp-card .radar-bodies-line { margin-top: 6px; margin-bottom: 8px; }
     .radar-bodies-line { font-size: 13px; font-weight: 600; color: #d6e4f3; }
     .radar-last-seen { margin-top: -3px; font-size: 11px; color: #8ea1b3; }
+    .hp-card .range-strip { margin-top: 12px; margin-bottom: 14px; }
     .range-strip { position: relative; padding: 10px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; transition: opacity 150ms ease-in-out; }
     .range-strip.no-target { opacity: 0.48; }
     .zone-band { position: relative; display: grid; grid-template-columns: 0.8fr 0.7fr 1.5fr 2fr 1fr; gap: 6px; align-items: stretch; }
+    .range-markers { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; }
     .zone-segment { min-height: 42px; border-radius: 8px; border: 1px solid #223244; display: flex; align-items: center; justify-content: center; text-align: center; padding: 4px 6px; color: #c7d7e8; font-size: 11px; line-height: 1.2; transition: opacity 150ms ease-in-out, filter 150ms ease-in-out, box-shadow 150ms ease-in-out, border-color 150ms ease-in-out; }
     .zone-segment .zone-name { opacity: 0.92; }
     .zone-segment .zone-certainty { display: block; font-size: 10px; color: #8ea1b3; margin-top: 2px; }
@@ -3763,11 +3767,21 @@ HTML_PAGE = """
     .zone-segment.zone-room { background: rgba(92, 175, 255, 0.10); }
     .zone-segment.zone-extended { background: rgba(92, 175, 255, 0.05); opacity: 0.55; }
     .zone-segment.active { border-color: #4f84bc; box-shadow: 0 0 0 2px rgba(79, 132, 188, 0.20) inset, 0 0 10px rgba(79, 132, 188, 0.15); filter: saturate(1.08); }
-    .zone-marker { position: absolute; top: -8px; width: 14px; height: 14px; border-radius: 999px; background: rgba(132, 210, 255, 0.96); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.20); pointer-events: none; transition: left 150ms ease-in-out, opacity 150ms ease-in-out; }
+    .zone-marker { position: absolute; width: 14px; height: 14px; border-radius: 999px; transform: translateX(-50%); background: rgba(132, 210, 255, 0.96); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.20); pointer-events: none; transition: left 150ms ease-in-out, opacity 150ms ease-in-out, top 150ms ease-in-out; }
+    .zone-marker-move { background: rgba(132, 210, 255, 0.98); }
+    .zone-marker-still { background: rgba(102, 167, 235, 0.95); box-shadow: 0 0 0 4px rgba(62, 112, 182, 0.22); }
     .zone-marker.hidden { display: none; }
-    .radar-target-float { position: absolute; top: -70px; left: 0; transform: translateX(-50%); background: #0f1620; border: 1px solid #26313d; border-radius: 10px; padding: 6px 10px; font-size: 12px; min-width: 120px; pointer-events: none; transition: opacity 150ms ease; z-index: 5; }
-    .target-line { line-height: 1.25; }
-    .evidence-line { display: flex; gap: 6px; font-size: 11px; opacity: 0.7; }
+    .radar-target-float { position: absolute; transform: translateX(-50%); width: 260px; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; pointer-events: none; z-index: 5; box-shadow: 0 10px 24px rgba(0,0,0,0.35); transition: opacity 150ms ease; }
+    .radar-target-float .target-top { display: grid; grid-template-columns: 1fr; gap: 2px; margin-bottom: 8px; }
+    .target-distance { font-weight: 700; font-size: 13px; }
+    .target-zone { opacity: 0.85; }
+    .target-conf { opacity: 0.75; }
+    .target-bars { display: flex; flex-direction: column; gap: 6px; }
+    .tbar { display: grid; grid-template-columns: 52px 1fr 36px; gap: 8px; align-items: center; }
+    .tbar-label { opacity: 0.75; font-size: 11px; }
+    .tbar-track { height: 8px; border-radius: 999px; background: #111a24; border: 1px solid #223041; overflow: hidden; }
+    .tbar-fill { height: 100%; width: 0%; border-radius: 999px; background: #79c0ff; }
+    .tbar-val { text-align: right; font-size: 11px; opacity: 0.85; }
     .marker { position: absolute; pointer-events: none; }
     .marker.hidden { display: none; }
     .marker.detect { top: 8px; width: 14px; height: 14px; border-radius: 999px; background: rgba(132, 210, 255, 0.95); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.18); }
@@ -3793,6 +3807,7 @@ HTML_PAGE = """
     .radar-target-title { color: #d6e4f3; font-weight: 700; margin-bottom: 2px; }
     .radar-target-row { display: flex; justify-content: space-between; gap: 10px; }
     .radar-target-row .label { color: #8ea1b3; }
+    .hp-card .radar-readout { margin-top: 12px; padding-top: 6px; }
     .radar-readout { margin-top: 2px; font-size: 12px; color: #b8c7d8; line-height: 1.6; }
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
@@ -3848,6 +3863,7 @@ HTML_PAGE = """
     .rssi-med  { border-color: rgba(255, 180, 0, 0.70); box-shadow: 0 0 0 1px rgba(255,180,0,0.12) inset; }
     .rssi-poor { border-color: rgba(255, 70, 70, 0.75); box-shadow: 0 0 0 1px rgba(255,70,70,0.12) inset; }
     .status-pill { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; border: 1px solid #2a3b4f; background: #111820; color: #c3d4e6; font-size: 11px; font-weight: 650; }
+    .hp-card .status-pill { margin-top: 8px; }
     .conf-very-high { border-color: #4ca9ff; color: #d4ecff; }
     .conf-high { border-color: #4f8ecc; color: #cae3fa; }
     .conf-moderate { border-color: #6a7f99; color: #c3d0df; }
@@ -5089,10 +5105,14 @@ const dashboardSettingDefaults = {
 let dashboardSettings = { ...dashboardSettingDefaults };
 let useDerivedPresence = false;
 const PRESENCE_HANG_MS = 3000;
+const MAX_TRACKS = 2;
 let radarLastSeenMs = 0;
 let radarLastSeenDistanceCm = 0;
 let radarRawPresent = false;
 let radarDerivedPresent = false;
+let nextTrackId = 1;
+let tracks = [];
+let activeTrackId = null;
 const radarNow = {
   enabled: true,
   view: 'now',
@@ -5584,10 +5604,9 @@ function formatPresenceDistanceMeters(cm) {
   return (value / 100).toFixed(1) + ' m';
 }
 
-function updateSemanticDistanceBar(distanceCm, visible, alive, markerOpacity) {
+function updateSemanticDistanceBar(distanceCm, visible, alive) {
   const stripEl = document.getElementById('range-strip');
-  const markerEl = document.getElementById('range-marker-detect');
-  if (!stripEl || !markerEl) return;
+  if (!stripEl) return;
 
   const segments = stripEl.querySelectorAll('.zone-segment');
   segments.forEach((segment) => segment.classList.remove('active'));
@@ -5595,8 +5614,6 @@ function updateSemanticDistanceBar(distanceCm, visible, alive, markerOpacity) {
   const showTarget = !!alive && !!visible;
   stripEl.classList.toggle('no-target', !showTarget);
   if (!showTarget) {
-    markerEl.classList.add('hidden');
-    markerEl.style.opacity = '0';
     return;
   }
 
@@ -5604,13 +5621,154 @@ function updateSemanticDistanceBar(distanceCm, visible, alive, markerOpacity) {
   const active = stripEl.querySelector(`.zone-segment[data-zone="${zone.key}"]`);
   if (active) active.classList.add('active');
 
-  const zoneMaxCm = Number.isFinite(zone.endCm) ? zone.endCm : 600;
-  const zoneSpan = Math.max(1, zoneMaxCm - zone.startCm);
-  const localNorm = clamp((distanceCm - zone.startCm) / zoneSpan, 0, 1);
-  const percent = clamp(((zone.index + localNorm) / RADAR_DISTANCE_ZONES.length) * 100, 0, 100);
-  markerEl.classList.remove('hidden');
-  markerEl.style.left = `calc(${percent.toFixed(2)}% - 7px)`;
-  markerEl.style.opacity = String(clamp(Number(markerOpacity == null ? 1 : markerOpacity), 0, 1));
+}
+
+function distanceGateMeters(d) {
+  if (d <= 1.5) return 0.25;
+  if (d <= 3.0) return 0.4;
+  return 0.6;
+}
+
+function hangVisible(lastSeenMs) {
+  if (!lastSeenMs) return { visible: false, fade: 0 };
+  const age = Date.now() - lastSeenMs;
+  if (age >= PRESENCE_HANG_MS) return { visible: false, fade: 0 };
+  const fade = 1 - Math.min(age / PRESENCE_HANG_MS, 1);
+  return { visible: true, fade };
+}
+
+function getDetectionsFromFrame(frame) {
+  const dets = [];
+  const moveCm = Number(frame && frame.move_cm ? frame.move_cm : 0);
+  const stillCm = Number(frame && frame.stat_cm ? frame.stat_cm : 0);
+  if (moveCm > 0) {
+    dets.push({ kind: 'move', distanceM: (moveCm / 100.0), move_en: Number(frame.move_en || 0), stat_en: Number(frame.stat_en || 0) });
+  }
+  if (stillCm > 0) {
+    dets.push({ kind: 'still', distanceM: (stillCm / 100.0), move_en: Number(frame.move_en || 0), stat_en: Number(frame.stat_en || 0) });
+  }
+  return dets;
+}
+
+function updateTracksFromDetections(detections) {
+  const now = Date.now();
+  const used = new Set();
+  for (const det of detections) {
+    let best = null;
+    let bestErr = Infinity;
+    for (const track of tracks) {
+      if (track.kind !== det.kind) continue;
+      if (used.has(track.id)) continue;
+      const err = Math.abs(Number(track.distanceM || 0) - Number(det.distanceM || 0));
+      const gate = distanceGateMeters(Number(det.distanceM || 0));
+      if (err <= gate && err < bestErr) {
+        best = track;
+        bestErr = err;
+      }
+    }
+    if (best) {
+      best.distanceM = Number(det.distanceM || 0);
+      best.lastSeenMs = now;
+      best.move_en = Number(det.move_en || 0);
+      best.stat_en = Number(det.stat_en || 0);
+      used.add(best.id);
+    } else {
+      tracks.push({
+        id: nextTrackId++,
+        kind: det.kind,
+        distanceM: Number(det.distanceM || 0),
+        lastSeenMs: now,
+        move_en: Number(det.move_en || 0),
+        stat_en: Number(det.stat_en || 0),
+      });
+    }
+  }
+  tracks = tracks.filter((track) => (now - Number(track.lastSeenMs || 0)) < PRESENCE_HANG_MS);
+  tracks.sort((a, b) => Number(a.distanceM || 0) - Number(b.distanceM || 0));
+  tracks = tracks.slice(0, MAX_TRACKS);
+  if (activeTrackId == null || !tracks.some((track) => track.id === activeTrackId)) {
+    activeTrackId = tracks.length ? tracks[0].id : null;
+  }
+}
+
+function getActiveTrack() {
+  if (!tracks.length) return null;
+  return tracks.find((track) => track.id === activeTrackId) || tracks[0];
+}
+
+function renderTrackMarkers(maxM) {
+  const wrap = document.getElementById('range-markers');
+  if (!wrap) return;
+  const existing = new Map();
+  for (const el of wrap.querySelectorAll('.zone-marker')) {
+    existing.set(String(el.dataset.trackId || ''), el);
+  }
+  for (let i = 0; i < tracks.length; i += 1) {
+    const track = tracks[i];
+    const key = String(track.id);
+    let el = existing.get(key);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'zone-marker ' + (track.kind === 'move' ? 'zone-marker-move' : 'zone-marker-still');
+      el.dataset.trackId = key;
+      el.title = (track.kind === 'move' ? 'Moving #' : 'Still #') + key;
+      wrap.appendChild(el);
+    }
+    const hv = hangVisible(Number(track.lastSeenMs || 0));
+    if (!hv.visible) {
+      el.remove();
+      existing.delete(key);
+      continue;
+    }
+    const clamped = Math.max(0, Math.min(Number(track.distanceM || 0), maxM));
+    const pct = (clamped / maxM) * 100;
+    el.style.left = pct + '%';
+    el.style.opacity = String(hv.fade);
+    const baseTop = track.kind === 'move' ? -10 : 4;
+    el.style.top = (baseTop + (i * 6)) + 'px';
+    existing.delete(key);
+  }
+  for (const leftover of existing.values()) {
+    leftover.remove();
+  }
+}
+
+function renderFloatingCapsule(active, maxM) {
+  const floatEl = document.getElementById('radar-target-float');
+  const stripEl = document.getElementById('range-strip');
+  if (!floatEl || !stripEl) return;
+  if (!active) {
+    floatEl.classList.add('hidden');
+    return;
+  }
+  floatEl.classList.remove('hidden');
+  const distance = Number(active.distanceM || 0);
+  const distanceCm = distance * 100.0;
+  const zone = zoneForDistanceCm(distanceCm);
+  const conf = computeConfidence(distance);
+  const distanceEl = document.getElementById('radar-target-distance');
+  const zoneEl = document.getElementById('radar-target-zone');
+  const confEl = document.getElementById('radar-target-confidence');
+  const mvValEl = document.getElementById('radar-float-move-val');
+  const stValEl = document.getElementById('radar-float-still-val');
+  const mvBarEl = document.getElementById('radar-float-move-bar');
+  const stBarEl = document.getElementById('radar-float-still-bar');
+  if (distanceEl) distanceEl.textContent = distance.toFixed(1) + ' m';
+  if (zoneEl) zoneEl.textContent = zone.label;
+  if (confEl) confEl.textContent = conf.label + ' (' + Math.round(conf.score * 100) + '%)';
+  const moveEnergy = clamp(Number(active.move_en || 0), 0, 100);
+  const stillEnergy = clamp(Number(active.stat_en || 0), 0, 100);
+  if (mvValEl) mvValEl.textContent = String(Math.round(moveEnergy));
+  if (stValEl) stValEl.textContent = String(Math.round(stillEnergy));
+  if (mvBarEl) mvBarEl.style.width = moveEnergy + '%';
+  if (stBarEl) stBarEl.style.width = stillEnergy + '%';
+  const stripRect = stripEl.getBoundingClientRect();
+  const pct = clamp(distance / maxM, 0, 1);
+  const x = stripRect.left + (stripRect.width * pct);
+  const half = 130;
+  const clampedX = clamp(x, stripRect.left + half, stripRect.right - half);
+  floatEl.style.left = (clampedX - stripRect.left) + 'px';
+  floatEl.style.top = '-86px';
 }
 
 function currentDistanceUnit() {
@@ -5796,12 +5954,6 @@ function updateRadarReadout(state) {
   const selfNoteEl = document.getElementById('radar-now-self-note');
   const lastSeenEl = document.getElementById('radar-last-seen');
   const bodiesLineEl = document.getElementById('radar-bodies-line');
-  const floatEl = document.getElementById('radar-target-float');
-  const targetDistanceEl = document.getElementById('radar-target-distance');
-  const targetZoneEl = document.getElementById('radar-target-zone');
-  const targetConfEl = document.getElementById('radar-target-confidence');
-  const targetMoveEl = document.getElementById('radar-target-move');
-  const targetStillEl = document.getElementById('radar-target-still');
   const confBadgeEl = document.getElementById('radar-target-confidence-badge');
   const hasDerived = Object.prototype.hasOwnProperty.call(state || {}, 'present_derived');
   const derivedEnabled = !!useDerivedPresence && hasDerived;
@@ -5810,60 +5962,47 @@ function updateRadarReadout(state) {
   const effectiveTarget = (derivedEnabled && !derivedPresent) ? 0 : target;
   const moveState = (derivedEnabled && !derivedPresent) ? false : (moveMetric > 0);
   const statState = (derivedEnabled && !derivedPresent) ? false : (statMetric > 0);
-  const detectCm = clamp(Number(state.detect_cm || state.move_cm || state.stat_cm || 0), 0, 600);
-  const visible = updatePresenceState({ target: effectiveTarget, detect_cm: detectCm });
-  const shownDistanceCm = visible ? Math.max(detectCm, radarLastSeenDistanceCm) : detectCm;
-  const ageMs = radarLastSeenMs > 0 ? Math.max(0, Date.now() - radarLastSeenMs) : PRESENCE_HANG_MS;
-  const fadeRatio = 1 - Math.min(ageMs / PRESENCE_HANG_MS, 1);
-  const bodies = getStableBodies(effectiveTarget);
-
-  updateSemanticDistanceBar(shownDistanceCm, visible, alive, fadeRatio);
-
-  if (floatEl) {
-    if (alive && visible) {
-      floatEl.classList.remove('hidden');
-      floatEl.style.opacity = String(clamp(fadeRatio, 0, 1));
-      const markerEl = document.getElementById('range-marker-detect');
-      const stripEl = document.getElementById('range-strip');
-      if (markerEl && stripEl) {
-        const markerRect = markerEl.getBoundingClientRect();
-        const stripRect = stripEl.getBoundingClientRect();
-        const offsetX = markerRect.left - stripRect.left + 7;
-        floatEl.style.left = offsetX + 'px';
-      }
-    } else {
-      floatEl.classList.add('hidden');
-      floatEl.style.opacity = '0';
-    }
+  const frame = {
+    target: effectiveTarget,
+    detect_cm: Number(state.detect_cm || 0),
+    move_cm: Number(state.move_cm || 0),
+    stat_cm: Number(state.stat_cm || 0),
+    move_en: moveMetric,
+    stat_en: statMetric,
+  };
+  const detections = getDetectionsFromFrame(frame);
+  if (alive) {
+    updateTracksFromDetections(detections);
+  } else {
+    tracks = [];
+    activeTrackId = null;
   }
+  const activeTrack = getActiveTrack();
+  const activeDistanceCm = activeTrack ? (Number(activeTrack.distanceM || 0) * 100.0) : 0;
+  const visible = !!activeTrack;
+
+  updateSemanticDistanceBar(activeDistanceCm, visible, alive);
+  renderTrackMarkers(6.0);
+  renderFloatingCapsule(activeTrack, 6.0);
 
   if (bodiesLineEl) {
-    bodiesLineEl.textContent = 'Bodies Detected: ' + String(bodies);
+    bodiesLineEl.textContent = 'Bodies Detected: ' + String(tracks.length);
   }
   if (lastSeenEl) {
-    if (radarLastSeenMs > 0) {
-      const ageSec = ((Date.now() - radarLastSeenMs) / 1000).toFixed(1);
+    if (activeTrack && activeTrack.lastSeenMs) {
+      const ageSec = ((Date.now() - Number(activeTrack.lastSeenMs || 0)) / 1000).toFixed(1);
       lastSeenEl.textContent = 'Last seen: ' + ageSec + 's ago';
     } else {
       lastSeenEl.textContent = 'Last seen: —';
     }
   }
-  if (targetMoveEl) targetMoveEl.textContent = String(Math.round(moveMetric));
-  if (targetStillEl) targetStillEl.textContent = String(Math.round(statMetric));
 
-  if (targetDistanceEl && targetZoneEl && targetConfEl && confBadgeEl) {
-    if (!alive || !visible) {
-      targetDistanceEl.textContent = '—';
-      targetZoneEl.textContent = 'Clear';
-      targetConfEl.textContent = alive ? 'No target' : 'Radar offline';
+  if (confBadgeEl) {
+    if (!alive || !activeTrack) {
       confBadgeEl.textContent = alive ? 'No Target' : 'Offline';
       confBadgeEl.className = 'status-pill conf-low';
     } else {
-      const zone = zoneForDistanceCm(shownDistanceCm);
-      const conf = computeConfidence(shownDistanceCm / 100.0);
-      targetDistanceEl.textContent = formatPresenceDistanceMeters(shownDistanceCm);
-      targetZoneEl.textContent = zone.label;
-      targetConfEl.textContent = conf.label + ' (' + Math.round(conf.score * 100) + '%)';
+      const conf = computeConfidence(Number(activeTrack.distanceM || 0));
       confBadgeEl.textContent = conf.label;
       confBadgeEl.className = 'status-pill ' + conf.css;
     }
@@ -5902,85 +6041,18 @@ function updateRadarReadout(state) {
 }
 
 function renderRadarReturnStrip(tracksPayload, radarAlive) {
-  const movingEl = document.getElementById('radar-move-strip');
-  const stillEl = document.getElementById('radar-still-strip');
   const statusEl = document.getElementById('radar-strip-status');
   const badgesEl = document.getElementById('radar-strip-badges');
-  if (!movingEl || !stillEl || !statusEl || !badgesEl) return;
-  const units = currentDistanceUnit();
-  const rangeCm = 300;
-  const nowMs = Date.now();
-  const pipRadius = 7;
-
-  function pruneGhosts(kind) {
-    const bucket = radarStripGhost[kind] || {};
-    for (const [trackId, ghost] of Object.entries(bucket)) {
-      if (!ghost || Number(ghost.expires || 0) < nowMs) {
-        delete bucket[trackId];
-      }
-    }
-    radarStripGhost[kind] = bucket;
-  }
-
-  function laneTracks(rawTracks, kind) {
-    const confirmed = (rawTracks || []).filter((item) => !!item.confirmed).sort((a, b) => Number(a.d_cm || 0) - Number(b.d_cm || 0));
-    const bucket = radarStripGhost[kind] || {};
-    for (const track of confirmed) {
-      const trackId = String(track.id || '');
-      if (!trackId) continue;
-      bucket[trackId] = { d_cm: Number(track.d_cm || 0), age_ms: Number(track.age_ms || 0), expires: nowMs + 1000 };
-    }
-    radarStripGhost[kind] = bucket;
-    const currentIds = new Set(confirmed.map((item) => String(item.id || '')));
-    const ghosts = Object.entries(bucket)
-      .filter(([trackId]) => !currentIds.has(trackId))
-      .map(([trackId, ghost]) => ({ id: trackId, d_cm: Number(ghost.d_cm || 0), age_ms: Number(ghost.age_ms || 0), ghost: true }));
-    return [...confirmed.map((item) => ({ ...item, ghost: false })), ...ghosts]
-      .sort((a, b) => Number(a.d_cm || 0) - Number(b.d_cm || 0))
-      .slice(0, 3);
-  }
-
-  function renderLane(stripEl, items, laneKind) {
-    stripEl.innerHTML = '';
-    let leadAssigned = false;
-    for (const track of items) {
-      const distanceCm = Number(track.d_cm || 0);
-      const norm = clamp(distanceCm / rangeCm, 0, 1);
-      const left = (norm * 100);
-      const pip = document.createElement('div');
-      const proximityClass = distanceCm <= 100 ? 'near' : (distanceCm <= 200 ? 'mid' : 'far');
-      const isLead = (laneKind === 'moving') && !track.ghost && !leadAssigned;
-      if (isLead) leadAssigned = true;
-      pip.className = 'radar-pip ' + laneKind + ' ' + proximityClass + (track.ghost ? ' ghost' : '') + (isLead ? ' pulse-lead' : '');
-      pip.style.left = `calc(${left.toFixed(2)}% - ${pipRadius}px)`;
-      pip.title = String(track.id || '?') + ' · ' + formatDistance(distanceCm, units) + ' · age ' + (Math.max(0, Number(track.age_ms || 0)) / 1000.0).toFixed(1) + 's';
-      stripEl.appendChild(pip);
-    }
-  }
-
+  if (!statusEl || !badgesEl) return;
   if (!radarAlive) {
-    movingEl.innerHTML = '';
-    stillEl.innerHTML = '';
     statusEl.textContent = 'Clear';
     badgesEl.innerHTML = '<span class="chip chip-neutral">Clutter: Unknown</span>';
     return;
   }
 
-  pruneGhosts('moving');
-  pruneGhosts('still');
-  const moving = Array.isArray(tracksPayload && tracksPayload.moving_tracks) ? tracksPayload.moving_tracks : [];
-  const still = Array.isArray(tracksPayload && tracksPayload.still_tracks) ? tracksPayload.still_tracks : [];
-  const movingLane = laneTracks(moving, 'moving');
-  const stillLane = laneTracks(still, 'still');
-  renderLane(movingEl, movingLane, 'moving');
-  renderLane(stillEl, stillLane, 'still');
-
-  const movingCurrent = moving.filter((item) => !!item.confirmed).sort((a, b) => Number(a.d_cm || 0) - Number(b.d_cm || 0));
-  const stillCurrent = still.filter((item) => !!item.confirmed).sort((a, b) => Number(a.d_cm || 0) - Number(b.d_cm || 0));
-  if (movingCurrent.length) {
-    statusEl.textContent = 'Moving at ' + formatDistance(Number(movingCurrent[0].d_cm || 0), units);
-  } else if (stillCurrent.length) {
-    statusEl.textContent = 'Still at ' + formatDistance(Number(stillCurrent[0].d_cm || 0), units);
+  const activeTrack = getActiveTrack();
+  if (activeTrack) {
+    statusEl.textContent = (activeTrack.kind === 'move' ? 'Moving at ' : 'Still at ') + activeTrack.distanceM.toFixed(1) + ' m';
   } else {
     statusEl.textContent = 'Clear';
   }
@@ -6632,12 +6704,13 @@ function initTrends() {
             '<div class="zone-segment zone-interaction" data-zone="interaction"><div><span class="zone-name">Interaction</span></div></div>' +
             '<div class="zone-segment zone-room" data-zone="room"><div><span class="zone-name">Room</span></div></div>' +
             '<div class="zone-segment zone-extended" data-zone="extended"><div><span class="zone-name">Extended</span><span class="zone-certainty">Low Certainty</span></div></div>' +
-            '<div id="range-marker-detect" class="zone-marker hidden"></div>' +
+            '<div id="range-markers" class="range-markers"></div>' +
             '<div id="radar-target-float" class="radar-target-float hidden">' +
-              '<div class="target-line"><b id="radar-target-distance">—</b></div>' +
-              '<div class="target-line"><span id="radar-target-zone">Clear</span></div>' +
-              '<div class="target-line"><span id="radar-target-confidence">No target</span></div>' +
-              '<div class="target-line evidence-line"><span>M:</span><span id="radar-target-move">0</span><span>S:</span><span id="radar-target-still">0</span></div>' +
+              '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
+              '<div class="target-bars">' +
+                '<div class="tbar"><div class="tbar-label">Motion</div><div class="tbar-track"><div id="radar-float-move-bar" class="tbar-fill"></div></div><div id="radar-float-move-val" class="tbar-val">0</div></div>' +
+                '<div class="tbar"><div class="tbar-label">Still</div><div class="tbar-track"><div id="radar-float-still-bar" class="tbar-fill"></div></div><div id="radar-float-still-val" class="tbar-val">0</div></div>' +
+              '</div>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -6649,12 +6722,7 @@ function initTrends() {
             '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
           '</div>' +
           '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
-          '<div id="radar-returns" class="radar-returns-strip">' +
-            '<div class="radar-evidence-label">Detection Evidence</div>' +
-            '<div class="radar-strip-row"><div class="label">Motion Energy</div><div id="radar-move-strip" class="radar-strip"></div></div>' +
-            '<div class="radar-strip-row"><div class="label">Still Energy</div><div id="radar-still-strip" class="radar-strip"></div></div>' +
-            '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
-          '</div>' +
+          '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
         '</div>' +
       '</div>' +
       '<div id="radar-history-pane" class="hidden">' +
@@ -6717,12 +6785,13 @@ function initTrends() {
           '<div class="zone-segment zone-interaction" data-zone="interaction"><div><span class="zone-name">Interaction</span></div></div>' +
           '<div class="zone-segment zone-room" data-zone="room"><div><span class="zone-name">Room</span></div></div>' +
           '<div class="zone-segment zone-extended" data-zone="extended"><div><span class="zone-name">Extended</span><span class="zone-certainty">Low Certainty</span></div></div>' +
-          '<div id="range-marker-detect" class="zone-marker hidden"></div>' +
+          '<div id="range-markers" class="range-markers"></div>' +
           '<div id="radar-target-float" class="radar-target-float hidden">' +
-            '<div class="target-line"><b id="radar-target-distance">—</b></div>' +
-            '<div class="target-line"><span id="radar-target-zone">Clear</span></div>' +
-            '<div class="target-line"><span id="radar-target-confidence">No target</span></div>' +
-            '<div class="target-line evidence-line"><span>M:</span><span id="radar-target-move">0</span><span>S:</span><span id="radar-target-still">0</span></div>' +
+            '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
+            '<div class="target-bars">' +
+              '<div class="tbar"><div class="tbar-label">Motion</div><div class="tbar-track"><div id="radar-float-move-bar" class="tbar-fill"></div></div><div id="radar-float-move-val" class="tbar-val">0</div></div>' +
+              '<div class="tbar"><div class="tbar-label">Still</div><div class="tbar-track"><div id="radar-float-still-bar" class="tbar-fill"></div></div><div id="radar-float-still-val" class="tbar-val">0</div></div>' +
+            '</div>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -6734,12 +6803,7 @@ function initTrends() {
           '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
         '</div>' +
         '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
-        '<div id="radar-returns" class="radar-returns-strip">' +
-          '<div class="radar-evidence-label">Detection Evidence</div>' +
-          '<div class="radar-strip-row"><div class="label">Motion Energy</div><div id="radar-move-strip" class="radar-strip"></div></div>' +
-          '<div class="radar-strip-row"><div class="label">Still Energy</div><div id="radar-still-strip" class="radar-strip"></div></div>' +
-          '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
-        '</div>' +
+        '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
       '</div>' +
     '</div>' +
     '<div id="radar-history-pane" class="hidden">' +
