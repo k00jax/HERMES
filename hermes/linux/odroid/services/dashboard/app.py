@@ -3232,6 +3232,11 @@ HTML_PAGE = """
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
     .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
+    .radar-people { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+    .radar-person { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 6px 8px; border: 1px solid #26313d; border-radius: 8px; background: #0f1620; }
+    .radar-person-name { font-weight: 700; color: #d8e6f4; }
+    .radar-person-meta { color: #9fb3c8; font-size: 11px; }
+    .radar-person-conf { color: #cfe2f4; font-weight: 600; white-space: nowrap; }
     .chart-slot-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
     .trend-window-card { width: 100%; display: flex; flex-direction: column; padding: 6px 8px; }
     .trend-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }
@@ -5044,11 +5049,7 @@ function updateRadarReadout(state) {
   const stateEl = document.getElementById('radar-now-state');
   const statePillEl = document.getElementById('radar-now-state-pill');
   const selfNoteEl = document.getElementById('radar-now-self-note');
-  const bodiesEl = document.getElementById('radar-now-bodies');
-  const detectEl = document.getElementById('radar-now-detect');
-  const moveSigEl = document.getElementById('radar-now-move-sig');
-  const statSigEl = document.getElementById('radar-now-stat-sig');
-  const targetEl = document.getElementById('radar-now-target');
+  const peopleEl = document.getElementById('radar-now-people');
   const units = currentDistanceUnit();
   const hasDerived = Object.prototype.hasOwnProperty.call(state || {}, 'present_derived');
   const derivedEnabled = !!useDerivedPresence && hasDerived;
@@ -5087,11 +5088,41 @@ function updateRadarReadout(state) {
   if (selfNoteEl) {
     selfNoteEl.textContent = selfSuppressed ? 'Self suppressed' : '';
   }
-  if (bodiesEl) bodiesEl.textContent = alive ? `${bodyCount}` : '--';
-  if (detectEl) detectEl.textContent = alive && target !== 0 ? formatDistance(detectCm, units) : '—';
-  if (moveSigEl) moveSigEl.textContent = moveState ? formatDistance(moveCm, units) : '—';
-  if (statSigEl) statSigEl.textContent = statState ? formatDistance(statCm, units) : '—';
-  if (targetEl) targetEl.textContent = `${target}/3`;
+  if (peopleEl) {
+    if (!alive || effectiveTarget === 0 || bodyCount <= 0) {
+      peopleEl.innerHTML = '<div class="muted">No humans detected.</div>';
+    } else {
+      const people = [];
+      const moveDist = moveCm > 0 ? moveCm : detectCm;
+      const statDist = statCm > 0 ? statCm : detectCm;
+      const moveConfidence = Math.round(clamp(moveMetric > 0 ? moveMetric : (moveState ? 55 : 0), 0, 100));
+      const statConfidence = Math.round(clamp(statMetric > 0 ? statMetric : (statState ? 55 : 0), 0, 100));
+
+      if (moveState) {
+        people.push({ mode: 'Moving', distanceCm: moveDist, confidence: moveConfidence });
+      }
+      if (statState) {
+        people.push({ mode: 'Stationary', distanceCm: statDist, confidence: statConfidence });
+      }
+      if (!people.length) {
+        people.push({ mode: 'Detected', distanceCm: detectCm, confidence: 50 });
+      }
+
+      people.sort((left, right) => Number(left.distanceCm || 0) - Number(right.distanceCm || 0));
+      peopleEl.innerHTML = people.slice(0, Math.max(1, bodyCount)).map((person, index) => {
+        const name = index === 0 ? 'You' : `Human ${index + 1}`;
+        const distance = formatDistance(person.distanceCm, units);
+        return ''
+          + '<div class="radar-person">'
+          +   '<div>'
+          +     `<div class="radar-person-name">${name}</div>`
+          +     `<div class="radar-person-meta">${person.mode} · ${distance}</div>`
+          +   '</div>'
+          +   `<div class="radar-person-conf">${person.confidence}%</div>`
+          + '</div>';
+      }).join('');
+    }
+  }
 }
 
 function drawRadarScope(state) {
@@ -5749,11 +5780,7 @@ function initTrends() {
           '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
         '</div>' +
         '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
-        '<div class="radar-line"><span class="radar-label">Bodies</span><span id="radar-now-bodies">--</span></div>' +
-        '<div class="radar-line"><span class="radar-label">Detect</span><span id="radar-now-detect">--</span></div>' +
-        '<div class="radar-line"><span class="radar-label">Motion signature</span><span id="radar-now-move-sig">--</span></div>' +
-        '<div class="radar-line"><span class="radar-label">Still signature</span><span id="radar-now-stat-sig">--</span></div>' +
-        '<div class="radar-line"><span class="radar-label">Target</span><span id="radar-now-target">0/3</span></div>' +
+        '<div id="radar-now-people" class="radar-people"><div class="muted">No humans detected.</div></div>' +
       '</div>' +
     '</div>' +
     '<div id="radar-history-pane" class="hidden">' +

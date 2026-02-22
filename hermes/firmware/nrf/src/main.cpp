@@ -226,7 +226,7 @@ static void testBeep(uint16_t freq, uint16_t durMs) {
   tone(BUZZER_PIN, freq, durMs);
 }
 
-static void runInputBuzzerTestSetup() {
+static void __attribute__((unused)) runInputBuzzerTestSetup() {
   delay(200);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(PIN_BTN_LEFT, INPUT_PULLUP);
@@ -243,7 +243,7 @@ static void runInputBuzzerTestSetup() {
   HERMES_SERIAL.println("HERMES input+buzzer test ready (D0 buzzer, D1/D2/D3 buttons).");
 }
 
-static void runInputBuzzerTestLoop() {
+static void __attribute__((unused)) runInputBuzzerTestLoop() {
   const bool prev = digitalRead(PIN_BTN_LEFT);
   const bool sel = digitalRead(PIN_BTN_MIDDLE);
   const bool next = digitalRead(PIN_BTN_RIGHT);
