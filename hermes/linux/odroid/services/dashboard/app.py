@@ -3210,6 +3210,11 @@ HTML_PAGE = """
     .radar-label { color: #8ea1b3; }
     .radar-state { margin-bottom: 6px; font-weight: 700; color: #d8e6f4; }
     .chart-slot-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+    .trend-window { width: 100%; display: flex; flex-direction: column; }
+    .trend-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }
+    .trend-range-pills { display: inline-flex; }
+    .trend-slots { display:flex; gap:12px; flex-wrap:wrap; margin-top: 10px; }
+    .trend-actions { margin-top: 10px; }
     .slot-ctrl { display: inline-flex; align-items: center; gap: 6px; }
     .slot-ctrl label { font-size: 12px; color: #9fb3c8; }
     .slot-ctrl select { background: #111820; color: #d9e6f3; border: 1px solid #26313d; border-radius: 8px; padding: 5px 8px; }
@@ -3290,30 +3295,58 @@ HTML_PAGE = """
     </div>
   </div>
 
+  {{HOME_CHARTS_SECTION}}
+
+  {{EVENTS_DATA_SECTION}}
+
+<script src="/app.js"></script>
+</body>
+</html>
+"""
+
+
+def render_top_nav(active_path: str) -> str:
+  links: List[str] = []
+  for label, href in NAV_LINKS:
+    is_active = href == active_path
+    cls = "nav-link active" if is_active else "nav-link"
+    links.append(f'<a href="{href}" class="{cls}">{label}</a>')
+  brand = '<a href="/" class="brand-link" aria-label="HERMES Home"><img src="/static/hermes-logo-h.jpg" class="brand-logo" alt="HERMES logo" /></a>'
+  ticker = ""
+  if active_path == "/":
+    ticker = '<div class="nav-ticker" id="navTicker"><span class="ticker-dot" id="tickerDot"></span><span class="ticker-text" id="tickerText">Loading transitions…</span></div>'
+  return '<nav class="top-nav" aria-label="Primary">' + brand + "".join(links) + ticker + "</nav>"
+
+
+def render_dashboard_page(active_path: str) -> str:
+  home_charts_section = """
   <div class=\"row\">
-    <div class=\"card\">
-      <b>Trend window</b>
-      <div class=\"muted small\">Affects sparklines and badges</div>
-      <div style=\"margin-top:8px\" class=\"seg\">
-        <label>Startup
-          <div class="muted" style="margin-top:2px">Plays when dashboard restart/startup is detected.</div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
-            <select id="chimeStartup" style="flex:1"></select>
-            <button id="previewStartup" type="button">Preview</button>
+    <div class=\"card trend-window\">
+      <div class="trend-head">
+        <div>
+          <div class="card-title">Trend window</div>
+          <div class="card-sub muted small">Affects sparklines and badges</div>
+        </div>
+        <div class="trend-range-pills">
+          <div class=\"seg\">
+            <button id=\"win-5\" onclick=\"setTrendMinutes(5)\">5m</button>
+            <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
+            <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
           </div>
-        </label>
-        <button id=\"win-5\" onclick=\"setTrendMinutes(5)\">5m</button>
-        <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
-        <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
+        </div>
       </div>
-      <div id=\"chartSlotControls\" class=\"chart-slot-controls\"></div>
-      <div style=\"margin-top:10px\"><button onclick=\"window.location.href='/reports'\">Generate report</button></div>
+      <div class="trend-slots">
+        <div id=\"chartSlotControls\" class=\"chart-slot-controls\"></div>
+      </div>
+      <div class="trend-actions"><button onclick=\"window.location.href='/reports'\">Generate report</button></div>
     </div>
   </div>
 
   <div class="section-title">Human Presences & Trends</div>
   <div class=\"row\" id=\"trends\"></div>
+  """
 
+  events_data_section = """
   <div class=\"row\">
     <div class=\"card events-card\">
       <div style=\"display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;\">
@@ -3371,28 +3404,16 @@ HTML_PAGE = """
 
   <h3>Raw health</h3>
   <pre id=\"rawHealth\">loading...</pre>
+  """
 
-<script src="/app.js"></script>
-</body>
-</html>
-"""
-
-
-def render_top_nav(active_path: str) -> str:
-  links: List[str] = []
-  for label, href in NAV_LINKS:
-    is_active = href == active_path
-    cls = "nav-link active" if is_active else "nav-link"
-    links.append(f'<a href="{href}" class="{cls}">{label}</a>')
-  brand = '<a href="/" class="brand-link" aria-label="HERMES Home"><img src="/static/hermes-logo-h.jpg" class="brand-logo" alt="HERMES logo" /></a>'
-  ticker = ""
-  if active_path == "/":
-    ticker = '<div class="nav-ticker" id="navTicker"><span class="ticker-dot" id="tickerDot"></span><span class="ticker-text" id="tickerText">Loading transitions…</span></div>'
-  return '<nav class="top-nav" aria-label="Primary">' + brand + "".join(links) + ticker + "</nav>"
-
-
-def render_dashboard_page(active_path: str) -> str:
-  return HTML_PAGE.replace("{{TOP_NAV}}", render_top_nav(active_path))
+  show_home_charts = active_path == "/"
+  show_events_data = active_path == "/events"
+  return (
+    HTML_PAGE
+    .replace("{{TOP_NAV}}", render_top_nav(active_path))
+    .replace("{{HOME_CHARTS_SECTION}}", home_charts_section if show_home_charts else "")
+    .replace("{{EVENTS_DATA_SECTION}}", events_data_section if show_events_data else "")
+  )
 
 
 def render_shell_page(active_path: str, title: str, body_html: str, script_js: str, extra_style: str = "") -> str:
@@ -3734,6 +3755,13 @@ def render_settings_page() -> str:
     <b>Chime assignments</b>
     <div class=\"muted\" style=\"margin-top:4px\">Assign a melody to each event type.</div>
     <div style=\"display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px;margin-top:10px\">
+      <label>Startup
+        <div class="muted" style="margin-top:2px">Plays when dashboard restart/startup is detected.</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+          <select id="chimeStartup" style="flex:1"></select>
+          <button id="previewStartup" type="button">Preview</button>
+        </div>
+      </label>
       <label>Air spike
         <div style=\"display:flex;gap:8px;align-items:center;margin-top:4px\">
           <select id=\"chimeAirSpike\" style=\"flex:1\"></select>
@@ -5600,6 +5628,7 @@ function rowMatchesSearch(row, searchTerm) {
 
 function initTables() {
   const root = document.getElementById('tables');
+  if (!root) return;
   for (const t of tables) {
     tableRowLimit[t] = 20;
     const state = buildTableCard(t);
@@ -6179,13 +6208,18 @@ async function pollStatus() {
       fetchJson('/api/health', controller),
     ]);
 
-    document.getElementById('daemon').innerText = status.daemon_running ? 'running' : 'down';
-    document.getElementById('port').innerText = status.port || 'unknown';
-    document.getElementById('lines').innerText = status.lines_in || 'unknown';
-    document.getElementById('error').innerText = status.last_error || 'unknown';
+    const daemonEl = document.getElementById('daemon');
+    if (daemonEl) daemonEl.innerText = status.daemon_running ? 'running' : 'down';
+    const portEl = document.getElementById('port');
+    if (portEl) portEl.innerText = status.port || 'unknown';
+    const linesEl = document.getElementById('lines');
+    if (linesEl) linesEl.innerText = status.lines_in || 'unknown';
+    const errorEl = document.getElementById('error');
+    if (errorEl) errorEl.innerText = status.last_error || 'unknown';
 
     renderFreshness(health.freshness || {});
-    document.getElementById('rawHealth').innerText = health.raw || '';
+    const rawHealthEl = document.getElementById('rawHealth');
+    if (rawHealthEl) rawHealthEl.innerText = health.raw || '';
     setLastUpdatedNow();
   } catch (err) {
     if (!(err instanceof DOMException && err.name === 'AbortError')) {
@@ -6407,31 +6441,63 @@ async function pollEvents() {
 }
 
 (async () => {
-  initEvents();
-  chartSlots = loadChartSlots();
-  await loadDashboardSettings();
-  renderChartSlotControls();
-  initTrends();
-  primeTrendImages();
-  bindPresenceToggleUi();
-  setTrendMinutes(60);
-  initTables();
+  const hasTrends = !!document.getElementById('trends');
+  const hasTables = !!document.getElementById('tables');
+  const hasEvents = !!document.getElementById('events-body');
+  const hasIntegrity = !!document.getElementById('integrityFps');
+  const hasTicker = !!document.getElementById('navTicker');
+
+  if (hasEvents) {
+    initEvents();
+  }
+  if (hasTrends) {
+    chartSlots = loadChartSlots();
+    await loadDashboardSettings();
+    renderChartSlotControls();
+    initTrends();
+    primeTrendImages();
+    bindPresenceToggleUi();
+    setTrendMinutes(60);
+    await loadRadarCalibrationHistory();
+    await refreshDashboardSettingsLight();
+  }
+  if (hasTables) {
+    initTables();
+  }
+
   await pollReady();
   await pollStatus();
-  await pollTables();
-  await pollEvents();
-  await pollIntegrity();
-  await refreshTicker();
-  await loadRadarCalibrationHistory();
-  await refreshDashboardSettingsLight();
+  if (hasTables) {
+    await pollTables();
+  }
+  if (hasEvents) {
+    await pollEvents();
+  }
+  if (hasIntegrity) {
+    await pollIntegrity();
+  }
+  if (hasTicker) {
+    await refreshTicker();
+  }
+
   setInterval(pollStatus, 1000);
   setInterval(pollReady, 3000);
-  setInterval(pollTables, 3000);
-  setInterval(pollTrends, 7000);
-  setInterval(pollEvents, 4000);
-  setInterval(pollIntegrity, 5000);
-  setInterval(refreshTicker, 4000);
-  setInterval(refreshDashboardSettingsLight, 5000);
+  if (hasTables) {
+    setInterval(pollTables, 3000);
+  }
+  if (hasTrends) {
+    setInterval(pollTrends, 7000);
+    setInterval(refreshDashboardSettingsLight, 5000);
+  }
+  if (hasEvents) {
+    setInterval(pollEvents, 4000);
+  }
+  if (hasIntegrity) {
+    setInterval(pollIntegrity, 5000);
+  }
+  if (hasTicker) {
+    setInterval(refreshTicker, 4000);
+  }
   setInterval(refreshRelativeTimes, 1000);
   setInterval(refreshLastUpdatedLabel, 1000);
 })();
