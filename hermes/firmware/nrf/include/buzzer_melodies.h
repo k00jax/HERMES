@@ -87,6 +87,23 @@ inline constexpr Note MELODY_WARN_LOW_POWER[] = {
 };
 inline constexpr size_t MELODY_WARN_LOW_POWER_COUNT = sizeof(MELODY_WARN_LOW_POWER) / sizeof(MELODY_WARN_LOW_POWER[0]);
 
+inline constexpr Note MELODY_BEEP_SINGLE_HIGH[] = {
+  {2000, 120},
+};
+inline constexpr size_t MELODY_BEEP_SINGLE_HIGH_COUNT = sizeof(MELODY_BEEP_SINGLE_HIGH) / sizeof(MELODY_BEEP_SINGLE_HIGH[0]);
+
+inline constexpr Note MELODY_BEEP_SINGLE_LOW[] = {
+  {900, 140},
+};
+inline constexpr size_t MELODY_BEEP_SINGLE_LOW_COUNT = sizeof(MELODY_BEEP_SINGLE_LOW) / sizeof(MELODY_BEEP_SINGLE_LOW[0]);
+
+inline constexpr Note MELODY_BEEP_DOUBLE[] = {
+  {1600, 100},
+  {0, 80},
+  {1600, 100},
+};
+inline constexpr size_t MELODY_BEEP_DOUBLE_COUNT = sizeof(MELODY_BEEP_DOUBLE) / sizeof(MELODY_BEEP_DOUBLE[0]);
+
 void play_melody(const Note* notes, size_t count, int gap_ms = 30);
 void play_warning_chime();
 void play_error_chime();

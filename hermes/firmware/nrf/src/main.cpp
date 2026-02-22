@@ -997,6 +997,18 @@ static void playBuzzerJingle(const char *name) {
     play_melody(MELODY_WARN_LOW_POWER, MELODY_WARN_LOW_POWER_COUNT);
     return;
   }
+  if (name && strcasecmp(name, "beep_single_high") == 0) {
+    play_melody(MELODY_BEEP_SINGLE_HIGH, MELODY_BEEP_SINGLE_HIGH_COUNT, 40);
+    return;
+  }
+  if (name && strcasecmp(name, "beep_single_low") == 0) {
+    play_melody(MELODY_BEEP_SINGLE_LOW, MELODY_BEEP_SINGLE_LOW_COUNT, 40);
+    return;
+  }
+  if (name && strcasecmp(name, "beep_double") == 0) {
+    play_melody(MELODY_BEEP_DOUBLE, MELODY_BEEP_DOUBLE_COUNT, 40);
+    return;
+  }
 
   play_melody(MELODY_STARTUP_FIELD_UNIT_ONLINE, MELODY_STARTUP_FIELD_UNIT_ONLINE_COUNT);
 }
