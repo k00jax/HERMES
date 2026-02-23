@@ -3876,10 +3876,13 @@ HTML_PAGE = """
     .home2-card { grid-column: span 6; grid-row: span 10; min-height: 120px; position: relative; min-width: 0; }
     .home2-grid.is-editing .home2-card { outline: 1px dashed rgba(121,192,255,0.35); }
     .home2-combo-card { min-width: 0; }
-    .home2-combo-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
-    .home2-metric { border: 1px solid #26313d; border-radius: 8px; background: #0f1620; padding: 6px 8px; }
+    .home2-combo-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; align-items: stretch; }
+    .home2-metric { border: 1px solid #26313d; border-radius: 8px; background: #0f1620; padding: 6px 8px; display: flex; flex-direction: column; min-height: 122px; }
     .home2-metric .title { color: #9fb3c8; font-size: 12px; margin-bottom: 2px; }
-    .home2-metric .value { font-size: 26px; line-height: 1.1; font-weight: 700; margin-bottom: 2px; }
+    .home2-metric .value { font-size: 26px; line-height: 1.1; font-weight: 700; margin-bottom: 2px; min-height: 30px; display: flex; align-items: flex-end; }
+    .home2-metric .trend-badges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; align-content: start; min-height: 28px; }
+    .home2-metric .trend-badges .badge,
+    .home2-metric .trend-badges .pill { text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; padding: 3px 6px; }
     .home2-presence { min-width: 0; }
     .home2-presence .hp-card { height: 100%; }
     .card-drag-handle { cursor: default; user-select: none; }
