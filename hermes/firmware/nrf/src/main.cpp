@@ -723,6 +723,11 @@ static void handleSerial1() {
           emitFrame("RADAR", rxBuffer + 6);
           lastLineMs = now;
           linesOk++;
+        } else if (strncmp(rxBuffer, "CAM,", 4) == 0) {
+          const uint32_t now = millis();
+          emitFrame("CAM", rxBuffer + 4);
+          lastLineMs = now;
+          linesOk++;
         }
       }
       rxLen = 0;
