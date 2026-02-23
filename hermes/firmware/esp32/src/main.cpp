@@ -3,6 +3,7 @@
 #include <Wire.h>
 
 #include "esp_camera.h"
+#include "img_converters.h"
 #include "cam_pins.h"
 #if __has_include(<ESP_I2S.h>)
 #include <ESP_I2S.h>
@@ -392,8 +393,10 @@ static I2SClass micI2S;
 #endif
 
 
-static char cmdBuffer[256];
-static size_t cmdLen = 0;
+static char cmdUartBuffer[256];
+static size_t cmdUartLen = 0;
+static char cmdUsbBuffer[256];
+static size_t cmdUsbLen = 0;
 
 static void formatFloat(char *buffer, size_t size, float value, int precision) {
   if (isnan(value)) {
@@ -1097,7 +1100,26 @@ static void performSnapshotCapture(uint32_t now) {
   camera_fb_t *fb = esp_camera_fb_get();
   int httpCode = -1;
   size_t postedBytes = 0;
-  if (fb && fb->format == PIXFORMAT_JPEG && fb->len > 0) {
+  uint8_t *jpegBuf = nullptr;
+  size_t jpegLen = 0;
+  bool jpegAllocated = false;
+  if (fb && fb->len > 0) {
+    const bool hasJpegMarkers = fb->len >= 4
+        && fb->buf[0] == 0xFF
+        && fb->buf[1] == 0xD8
+        && fb->buf[fb->len - 2] == 0xFF
+        && fb->buf[fb->len - 1] == 0xD9;
+    if (fb->format == PIXFORMAT_JPEG && hasJpegMarkers) {
+      jpegBuf = fb->buf;
+      jpegLen = fb->len;
+    } else {
+      if (frame2jpg(fb, SNAPSHOT_JPEG_QUALITY, &jpegBuf, &jpegLen)) {
+        jpegAllocated = true;
+      }
+    }
+  }
+
+  if (jpegBuf && jpegLen > 0) {
     const char *baseUrl = snapshotUrlOverride[0] ? snapshotUrlOverride : SNAPSHOT_UPLOAD_URL;
     const uint32_t seq = ++snapshotSeq;
     const unsigned long tsValue = (ntpEpoch > 0) ? static_cast<unsigned long>(ntpEpoch) : static_cast<unsigned long>(now / 1000UL);
@@ -1118,10 +1140,14 @@ static void performSnapshotCapture(uint32_t now) {
     http.setTimeout(5000);
     if (http.begin(uploadUrl)) {
       http.addHeader("Content-Type", "image/jpeg");
-      httpCode = http.POST(fb->buf, fb->len);
-      postedBytes = fb->len;
+      httpCode = http.POST(jpegBuf, jpegLen);
+      postedBytes = jpegLen;
       http.end();
     }
+  }
+
+  if (jpegAllocated && jpegBuf) {
+    free(jpegBuf);
   }
 
   if (fb) {
@@ -1144,59 +1170,76 @@ static void performSnapshotCapture(uint32_t now) {
 #endif
 }
 
-static void handleSerial1Commands() {
-#if ENABLE_ESP_CMD
-  while (Serial1.available() > 0) {
-    const char c = static_cast<char>(Serial1.read());
+static void handleCommandLine(const char *line, size_t lineLen) {
+  if (strcmp(line, "CMD,reboot") == 0) {
+    Serial.println("ESP CMD reboot");
+    delay(20);
+    ESP.restart();
+    return;
+  }
+
+  if (strncmp(line, "CAM,CAPTURE", 11) != 0) {
+    return;
+  }
+
+  char reason[24] = "manual";
+  char url[192] = "";
+  if (lineLen > 11) {
+    char parseBuf[256];
+    snprintf(parseBuf, sizeof(parseBuf), "%s", line);
+    char *savePtr = nullptr;
+    char *token = strtok_r(parseBuf, ",", &savePtr);  // CAM
+    token = strtok_r(nullptr, ",", &savePtr);         // CAPTURE
+    while (true) {
+      token = strtok_r(nullptr, ",", &savePtr);
+      if (!token) {
+        break;
+      }
+      char *eq = strchr(token, '=');
+      if (!eq) {
+        continue;
+      }
+      *eq = '\0';
+      const char *key = token;
+      const char *value = eq + 1;
+      if (strcmp(key, "reason") == 0) {
+        snprintf(reason, sizeof(reason), "%s", value);
+      } else if (strcmp(key, "url") == 0) {
+        snprintf(url, sizeof(url), "%s", value);
+      }
+    }
+  }
+
+  requestSnapshotCapture(reason, url);
+  Serial.printf("ESP CMD CAM capture requested (reason=%s)\n", reason);
+}
+
+static void handleCommandStream(Stream &stream, char *buffer, size_t &bufferLen) {
+  while (stream.available() > 0) {
+    const char c = static_cast<char>(stream.read());
     if (c == '\r') {
       continue;
     }
     if (c == '\n') {
-      cmdBuffer[cmdLen] = '\0';
-      if (strcmp(cmdBuffer, "CMD,reboot") == 0) {
-        Serial.println("ESP CMD reboot");
-        delay(20);
-        ESP.restart();
-      } else if (strncmp(cmdBuffer, "CAM,CAPTURE", 11) == 0) {
-        char reason[24] = "manual";
-        char url[192] = "";
-        if (cmdLen > 11) {
-          char parseBuf[sizeof(cmdBuffer)];
-          snprintf(parseBuf, sizeof(parseBuf), "%s", cmdBuffer);
-          char *savePtr = nullptr;
-          char *token = strtok_r(parseBuf, ",", &savePtr);  // CAM
-          token = strtok_r(nullptr, ",", &savePtr);         // CAPTURE
-          while (true) {
-            token = strtok_r(nullptr, ",", &savePtr);
-            if (!token) {
-              break;
-            }
-            char *eq = strchr(token, '=');
-            if (!eq) {
-              continue;
-            }
-            *eq = '\0';
-            const char *key = token;
-            const char *value = eq + 1;
-            if (strcmp(key, "reason") == 0) {
-              snprintf(reason, sizeof(reason), "%s", value);
-            } else if (strcmp(key, "url") == 0) {
-              snprintf(url, sizeof(url), "%s", value);
-            }
-          }
-        }
-        requestSnapshotCapture(reason, url);
-        Serial.printf("ESP CMD CAM capture requested (reason=%s)\n", reason);
+      buffer[bufferLen] = '\0';
+      if (bufferLen > 0) {
+        handleCommandLine(buffer, bufferLen);
       }
-      cmdLen = 0;
+      bufferLen = 0;
       continue;
     }
-    if (cmdLen + 1 < sizeof(cmdBuffer)) {
-      cmdBuffer[cmdLen++] = c;
+    if (bufferLen + 1 < 256) {
+      buffer[bufferLen++] = c;
     } else {
-      cmdLen = 0;
+      bufferLen = 0;
     }
   }
+}
+
+static void handleSerial1Commands() {
+#if ENABLE_ESP_CMD
+  handleCommandStream(Serial1, cmdUartBuffer, cmdUartLen);
+  handleCommandStream(Serial, cmdUsbBuffer, cmdUsbLen);
 #endif
 }
 

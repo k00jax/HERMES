@@ -1,5 +1,6 @@
 import json
 import base64
+import glob
 import re
 import sqlite3
 import subprocess
@@ -171,6 +172,45 @@ def run_cmd(args: List[str], timeout_sec: float) -> Dict[str, object]:
         "stdout": proc.stdout.strip(),
         "stderr": proc.stderr.strip(),
     }
+
+
+def resolve_esp_command_port() -> str:
+    explicit = str(os.environ.get("HERMES_ESP_CMD_PORT") or "").strip()
+    if explicit:
+      return explicit if Path(explicit).exists() else ""
+
+    if Path("/dev/hermes-esp").exists():
+      return "/dev/hermes-esp"
+
+    for device in sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")):
+      info = run_cmd(["udevadm", "info", "--query=property", f"--name={device}"], timeout_sec=1.5)
+      if not info.get("ok"):
+        continue
+      for line in str(info.get("stdout") or "").splitlines():
+        if not line.startswith("ID_VENDOR_ID="):
+          continue
+        vid = line.split("=", 1)[1].strip().lower()
+        if vid == "303a":
+          return device
+    return ""
+
+
+def send_esp_direct_command(command: str) -> Dict[str, object]:
+    port = resolve_esp_command_port()
+    if not port:
+      return {"attempted": False, "ok": False, "port": "", "error": "esp serial port not found"}
+    try:
+      import serial  # type: ignore
+    except Exception as exc:
+      return {"attempted": False, "ok": False, "port": port, "error": f"pyserial unavailable: {exc}"}
+
+    try:
+      with serial.Serial(port, 115200, timeout=0.2, write_timeout=0.5) as ser:
+        ser.write((command.strip() + "\n").encode("utf-8"))
+        ser.flush()
+      return {"attempted": True, "ok": True, "port": port, "error": ""}
+    except Exception as exc:
+      return {"attempted": True, "ok": False, "port": port, "error": str(exc)}
 
 
 def parse_ok_kv(line: str) -> Dict[str, str]:
@@ -2911,17 +2951,27 @@ def api_vision_capture(request: Request, payload: Dict[str, object] = Body(defau
     if "reason=" not in command_lc:
       command = f"{command},reason={reason}"
     if "url=" not in command.lower():
-      command = f"{command},url={upload_url}"
+      host_only = host.split(":", 1)[0].strip("[]").lower()
+      is_loopback_host = host_only in {"127.0.0.1", "localhost", "::1"}
+      if not is_loopback_host:
+        command = f"{command},url={upload_url}"
 
-  cmd = run_cmd(["python3", str(CLIENT_PATH), "send", command], timeout_sec=2)
-  raw = str(cmd.get("stdout") or cmd.get("stderr") or "")
+  direct = {"attempted": False, "ok": False, "port": "", "error": ""}
+  cmd = {"ok": False, "stdout": "", "stderr": "", "code": 1}
+  if command_lc.startswith("cam,capture"):
+    direct = send_esp_direct_command(command)
+  if not direct.get("ok"):
+    cmd = run_cmd(["python3", str(CLIENT_PATH), "send", command], timeout_sec=2)
+
+  raw = "OK" if direct.get("ok") else str(cmd.get("stdout") or cmd.get("stderr") or "")
   return {
-    "ok": bool(cmd.get("ok")),
+    "ok": bool(direct.get("ok") or cmd.get("ok")),
     "reason": reason,
     "command": command,
-    "accepted": bool(cmd.get("ok")),
-    "stub": not bool(cmd.get("ok")),
+    "accepted": bool(direct.get("ok") or cmd.get("ok")),
+    "stub": not bool(direct.get("ok") or cmd.get("ok")),
     "raw": raw,
+    "direct": direct,
   }
 
 
