@@ -3892,6 +3892,8 @@ HTML_PAGE = """
     .home2-grid.is-editing .card-resize-handle { opacity: 0.9; pointer-events: auto; cursor: nwse-resize; }
     .chart-slot-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
     .trend-window-card { width: 100%; display: flex; flex-direction: column; padding: 6px 8px; }
+    .home2-window-mini-wrap { display: flex; justify-content: flex-end; margin: 0 0 8px 0; }
+    .home2-window-mini { display: inline-flex; align-items: center; padding: 6px 8px; gap: 8px; }
     .trend-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }
     .trend-range-pills { display: inline-flex; }
     .trend-slots { display:flex; gap:12px; flex-wrap:wrap; margin-top: 10px; }
@@ -4034,21 +4036,6 @@ def render_dashboard_page(active_path: str) -> str:
   """
 
   home2_trend_window = """
-  <div class=\"card trend-window-card\">
-    <div class="trend-head">
-      <div>
-        <div class="card-title">Trend window</div>
-        <div class="card-sub muted small">Affects sparklines and badges</div>
-      </div>
-      <div class="trend-range-pills">
-        <div class=\"seg\">
-          <button id=\"win-5\" onclick=\"setTrendMinutes(5)\">5m</button>
-          <button id=\"win-60\" onclick=\"setTrendMinutes(60)\">60m</button>
-          <button id=\"win-240\" onclick=\"setTrendMinutes(240)\">4h</button>
-        </div>
-      </div>
-    </div>
-  </div>
   """
 
   home_charts_section = """
@@ -4057,6 +4044,15 @@ def render_dashboard_page(active_path: str) -> str:
   """
 
   home2_charts_section = """
+  <div class="home2-window-mini-wrap">
+    <div class="card home2-window-mini">
+      <div class="seg">
+        <button id="win-5" onclick="setTrendMinutes(5)">5m</button>
+        <button id="win-60" onclick="setTrendMinutes(60)">60m</button>
+        <button id="win-240" onclick="setTrendMinutes(240)">4h</button>
+      </div>
+    </div>
+  </div>
   <div class="section-title">Home 2 · Layout Test</div>
   <div class=\"row\" id=\"trends\"></div>
   """
