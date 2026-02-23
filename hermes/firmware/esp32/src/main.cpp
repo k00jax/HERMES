@@ -785,11 +785,7 @@ static void sendCameraTelemetryLine(uint32_t now) {
   char sceneBuffer[16];
   formatFloat(lightBuffer, sizeof(lightBuffer), cameraLight, 3);
   formatFloat(sceneBuffer, sizeof(sceneBuffer), cameraScene, 3);
-
-  char line[220];
-  snprintf(
-      line,
-      sizeof(line),
+  Serial1.printf(
       "CAM,n=%lu,camok=%d,camerr=%d,w=%d,h=%d,light=%s,scene=%s\n",
       static_cast<unsigned long>(++cameraReportSeq),
       cameraOk ? 1 : 0,
@@ -798,7 +794,6 @@ static void sendCameraTelemetryLine(uint32_t now) {
       cameraFrameHeight,
       lightBuffer,
       sceneBuffer);
-  Serial1.print(line);
 #else
   (void)now;
 #endif
