@@ -3761,7 +3761,7 @@ HTML_PAGE = """
     .sonar-wrap { position: relative; margin-top: 12px; margin-bottom: 14px; min-height: 170px; }
     .hp-card .sonar-wrap { height: 140px; min-height: 140px; margin-top: 10px; margin-bottom: 10px; }
     .sonar-cone { position: relative; width: calc(100% - 286px); min-width: 180px; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; box-sizing: border-box; padding-right: 24px; }
-    .hp-card .sonar-cone { height: 140px; }
+    .hp-card .sonar-cone { height: 140px; width: calc(100% - 352px); }
     .sonar-cone::before { content: ''; position: absolute; inset: 10px; background: linear-gradient(90deg, rgba(121,192,255,0.22), rgba(121,192,255,0.08)); clip-path: polygon(0% 48%, 100% 10%, 100% 90%); border-radius: 8px; }
     .sonar-rings { position: absolute; inset: 10px 56px 10px 10px; pointer-events: none; z-index: 1; }
     .sonar-ring { position: absolute; top: 8%; bottom: 8%; width: 1px; background: rgba(121,192,255,0.22); }
@@ -3778,6 +3778,7 @@ HTML_PAGE = """
     .sonar-dot.is-moving { animation: hermesPulse 1.1s ease-in-out infinite; }
     .sonar-dot.is-flicker { animation: sonarFlicker 0.45s steps(2, end) infinite; }
     .sonar-callout { position: absolute; left: calc(100% - 270px); width: 260px; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; pointer-events: none; z-index: 6; box-shadow: 0 10px 24px rgba(0,0,0,0.35); transition: opacity 120ms ease; }
+    .hp-card .sonar-callout { left: calc(100% - 332px); width: 320px; }
     .sonar-leaderline { position: absolute; height: 1px; background: rgba(121,192,255,0.45); transform-origin: 0 50%; z-index: 5; }
     .zone-band { position: relative; display: grid; grid-template-columns: 0.8fr 0.7fr 1.5fr 2fr 1fr; gap: 6px; align-items: stretch; }
     .range-markers { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; }
@@ -3872,6 +3873,7 @@ HTML_PAGE = """
       display: none !important;
     }
     .home2-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .home2-toolbar-range { margin-left: auto; }
     .home2-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); grid-auto-rows: 24px; gap: 12px; width: 100%; position: relative; align-items: stretch; }
     .home2-card { grid-column: span 6; grid-row: span 10; min-height: 120px; position: relative; min-width: 0; }
     .home2-grid.is-editing .home2-card { outline: 1px dashed rgba(121,192,255,0.35); }
@@ -4044,15 +4046,6 @@ def render_dashboard_page(active_path: str) -> str:
   """
 
   home2_charts_section = """
-  <div class="home2-window-mini-wrap">
-    <div class="card home2-window-mini">
-      <div class="seg">
-        <button id="win-5" onclick="setTrendMinutes(5)">5m</button>
-        <button id="win-60" onclick="setTrendMinutes(60)">60m</button>
-        <button id="win-240" onclick="setTrendMinutes(240)">4h</button>
-      </div>
-    </div>
-  </div>
   <div class="section-title">Home 2 · Layout Test</div>
   <div class=\"row\" id=\"trends\"></div>
   """
@@ -7164,6 +7157,13 @@ function initTrends() {
       '<div id="home2-customize-actions" class="hidden">' +
         '<button id="home2-save-btn" class="btn primary">Save</button>' +
         '<button id="home2-cancel-btn" class="btn">Cancel</button>' +
+      '</div>' +
+      '<div class="home2-toolbar-range">' +
+        '<div class="seg">' +
+          '<button id="win-5" onclick="setTrendMinutes(5)">5m</button>' +
+          '<button id="win-60" onclick="setTrendMinutes(60)">60m</button>' +
+          '<button id="win-240" onclick="setTrendMinutes(240)">4h</button>' +
+        '</div>' +
       '</div>';
     root.appendChild(toolbar);
 
