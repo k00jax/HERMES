@@ -62,6 +62,7 @@ FRAME_MARKERS = (
     "PROTO,",
     "NACK,",
     "SYS,",
+    "CAM,",
 )
 
 EXPECTED_PREFIXES = {
@@ -70,6 +71,7 @@ EXPECTED_PREFIXES = {
     "AIR": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
     "LIGHT": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
     "MIC": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
+    "CAM": {"period_s": 2.0, "stale_s": 10.0, "dead_s": 30.0},
     "ESP,NET": {"period_s": 5.0, "stale_s": 20.0, "dead_s": 60.0},
     "RADAR": {"period_s": 0.1, "stale_s": 2.0, "dead_s": 10.0},
 }
@@ -292,6 +294,21 @@ def init_db(conn: sqlite3.Connection):
         );
         """)
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS vision_cam (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            ts_local TEXT,
+            source TEXT NOT NULL,
+            seq INTEGER,
+            camok INTEGER,
+            camerr INTEGER,
+            width INTEGER,
+            height INTEGER,
+            light REAL,
+            scene REAL
+        );
+        """)
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS esp_net (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_utc TEXT NOT NULL,
@@ -354,6 +371,15 @@ def init_db(conn: sqlite3.Connection):
         ensure_column(conn, "acks", "ts_local", "TEXT")
         ensure_column(conn, "light", "ts_local", "TEXT")
         ensure_column(conn, "mic_noise", "ts_local", "TEXT")
+        ensure_column(conn, "vision_cam", "ts_local", "TEXT")
+        ensure_column(conn, "vision_cam", "source", "TEXT")
+        ensure_column(conn, "vision_cam", "seq", "INTEGER")
+        ensure_column(conn, "vision_cam", "camok", "INTEGER")
+        ensure_column(conn, "vision_cam", "camerr", "INTEGER")
+        ensure_column(conn, "vision_cam", "width", "INTEGER")
+        ensure_column(conn, "vision_cam", "height", "INTEGER")
+        ensure_column(conn, "vision_cam", "light", "REAL")
+        ensure_column(conn, "vision_cam", "scene", "REAL")
         ensure_column(conn, "esp_net", "ts_local", "TEXT")
         ensure_column(conn, "radar", "ts_local", "TEXT")
         ensure_column(conn, "radar", "alive", "INTEGER")
@@ -384,6 +410,8 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_light_local ON light(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mic_noise_ts ON mic_noise(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mic_noise_local ON mic_noise(ts_local);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_vision_cam_ts ON vision_cam(ts_utc);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_vision_cam_local ON vision_cam(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_esp_net_ts ON esp_net(ts_utc);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_esp_net_local ON esp_net(ts_local);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_radar_ts ON radar(ts_utc);")
@@ -555,7 +583,7 @@ def record_ingest_health(
         bump_counter(ingest_health["frame_counts_window"], prefix)
         ingest_health["last_seen_by_prefix"][prefix] = ts
         stats["last_seen_nrf"] = ts
-        if prefix in {"SENS", "LOG", "LIGHT", "ESP,NET", "RADAR"}:
+        if prefix in {"SENS", "LOG", "LIGHT", "CAM", "ESP,NET", "RADAR"}:
             stats["last_seen_esp"] = ts
 
         if corrupt:
@@ -827,6 +855,29 @@ def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: 
             (ts, ts_local, "nrf", mic_rms, mic_peak, noise_floor, roc, delta, spike, sustain),
         )
         return
+    if kind == "CAM":
+        seq = parse_int(kvs.get("n"))
+        camok = parse_int(kvs.get("camok"))
+        camerr = parse_int(kvs.get("camerr"))
+        width = parse_int(kvs.get("w"))
+        height = parse_int(kvs.get("h"))
+        light = parse_float(kvs.get("light"))
+        scene = parse_float(kvs.get("scene"))
+        if (
+            seq is None
+            and camok is None
+            and camerr is None
+            and width is None
+            and height is None
+            and light is None
+            and scene is None
+        ):
+            return
+        conn.execute(
+            "INSERT INTO vision_cam (ts_utc, ts_local, source, seq, camok, camerr, width, height, light, scene) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, ts_local, "nrf", seq, camok, camerr, width, height, light, scene),
+        )
+        return
 
 def classify_parse_failure(line: str):
     kind, kvs = parse_kv_pairs(line)
@@ -1006,6 +1057,91 @@ def classify_parse_failure(line: str):
             return "bad_int", prefix
         if sustain_raw is not None and sustain is None:
             return "bad_int", prefix
+        return None, prefix
+
+    if prefix == "CAM":
+        seq_raw = kvs.get("n")
+        camok_raw = kvs.get("camok")
+        camerr_raw = kvs.get("camerr")
+        width_raw = kvs.get("w")
+        height_raw = kvs.get("h")
+        light_raw = kvs.get("light")
+        scene_raw = kvs.get("scene")
+
+        seq = parse_int(seq_raw)
+        camok = parse_int(camok_raw)
+        camerr = parse_int(camerr_raw)
+        width = parse_int(width_raw)
+        height = parse_int(height_raw)
+        light = parse_float(light_raw)
+        scene = parse_float(scene_raw)
+
+        if all(raw is None for raw in [seq_raw, camok_raw, camerr_raw, width_raw, height_raw, light_raw, scene_raw]):
+            return "missing_fields", prefix
+        for raw, parsed in [
+            (seq_raw, seq),
+            (camok_raw, camok),
+            (camerr_raw, camerr),
+            (width_raw, width),
+            (height_raw, height),
+        ]:
+            if raw is not None and parsed is None:
+                return "bad_int", prefix
+        for raw, parsed in [
+            (light_raw, light),
+            (scene_raw, scene),
+        ]:
+            if raw is not None and parsed is None:
+                return "bad_float", prefix
+
+        if camok is not None and camok not in {0, 1}:
+            return "bad_range", prefix
+        if width is not None and width < 0:
+            return "bad_range", prefix
+        if height is not None and height < 0:
+            return "bad_range", prefix
+        return None, prefix
+    if prefix == "CAM":
+        seq_raw = kvs.get("n")
+        camok_raw = kvs.get("camok")
+        camerr_raw = kvs.get("camerr")
+        width_raw = kvs.get("w")
+        height_raw = kvs.get("h")
+        light_raw = kvs.get("light")
+        scene_raw = kvs.get("scene")
+
+        seq = parse_int(seq_raw)
+        camok = parse_int(camok_raw)
+        camerr = parse_int(camerr_raw)
+        width = parse_int(width_raw)
+        height = parse_int(height_raw)
+        light = parse_float(light_raw)
+        scene = parse_float(scene_raw)
+
+        if all(raw is None for raw in [seq_raw, camok_raw, camerr_raw, width_raw, height_raw, light_raw, scene_raw]):
+            return "missing_fields", prefix
+        for raw, parsed in [
+            (seq_raw, seq),
+            (camok_raw, camok),
+            (camerr_raw, camerr),
+            (width_raw, width),
+            (height_raw, height),
+        ]:
+            if raw is not None and parsed is None:
+                return "bad_int", prefix
+        for raw, parsed in [
+            (light_raw, light),
+            (scene_raw, scene),
+        ]:
+            if raw is not None and parsed is None:
+                return "bad_float", prefix
+
+        if camok is not None and camok not in {0, 1}:
+            return "bad_range", prefix
+        if width is not None and width < 0:
+            return "bad_range", prefix
+        if height is not None and height < 0:
+            return "bad_range", prefix
         return None, prefix
 
     kind_num, kvs_num = parse_line(line)

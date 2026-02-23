@@ -49,9 +49,9 @@ DB_TIMEOUT_SECS = float(os.environ.get("HERMES_DB_TIMEOUT_SECS", "2.0"))
 MAX_CACHE_KEYS = int(os.environ.get("HERMES_CHART_CACHE_KEYS", "64"))
 MAX_RANGE_DAYS = 31
 
-TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net", "radar")
+TABLES = ("hb", "env", "air", "light", "mic_noise", "vision_cam", "esp_net", "radar")
 READY_TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
-FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "ESP,NET", "RADAR")
+FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "CAM", "ESP,NET", "RADAR")
 NAV_LINKS = (
   ("Home", "/"),
   ("Home 2", "/home2"),
@@ -2732,6 +2732,69 @@ def api_radar_tracks() -> Dict[str, object]:
     raise
 
 
+@APP.get("/api/vision/now")
+def api_vision_now() -> Dict[str, object]:
+  default = {
+    "present": False,
+    "ts_utc": None,
+    "seq": None,
+    "camok": None,
+    "camerr": None,
+    "width": None,
+    "height": None,
+    "light": None,
+    "scene": None,
+  }
+  if not DB_PATH.exists():
+    return default
+
+  try:
+    with open_db() as conn:
+      conn.row_factory = sqlite3.Row
+      row = conn.execute(
+        "SELECT ts_utc, seq, camok, camerr, width, height, light, scene "
+        "FROM vision_cam ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      if not row:
+        return default
+      return {
+        "present": True,
+        "ts_utc": row["ts_utc"],
+        "seq": row["seq"],
+        "camok": row["camok"],
+        "camerr": row["camerr"],
+        "width": row["width"],
+        "height": row["height"],
+        "light": row["light"],
+        "scene": row["scene"],
+      }
+  except sqlite3.OperationalError as exc:
+    if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+      return default
+    raise
+
+
+@APP.get("/api/vision/history")
+def api_vision_history(limit: int = Query(120, ge=1, le=1000), minutes: int = Query(60, ge=1, le=24 * 60)) -> Dict[str, object]:
+  if not DB_PATH.exists():
+    return {"rows": []}
+
+  cutoff = cutoff_iso(minutes)
+  try:
+    with open_db() as conn:
+      conn.row_factory = sqlite3.Row
+      rows = conn.execute(
+        "SELECT id, ts_utc, ts_local, seq, camok, camerr, width, height, light, scene "
+        "FROM vision_cam WHERE ts_utc >= ? ORDER BY id DESC LIMIT ?",
+        (cutoff, int(limit)),
+      ).fetchall()
+      return {"rows": [dict(row) for row in rows]}
+  except sqlite3.OperationalError as exc:
+    if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+      return {"rows": []}
+    raise
+
+
 @APP.post("/api/radar/calibrate")
 def api_radar_calibrate_start(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
     duration_s = int(payload.get("duration_s", 60) or 60)
@@ -3886,6 +3949,12 @@ HTML_PAGE = """
     .home2-metric .trend-badges .badge,
     .home2-metric .trend-badges .pill { text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; padding: 3px 6px; }
     .home2-presence { min-width: 0; }
+    .home2-vision-card { min-width: 0; display: flex; flex-direction: column; }
+    .home2-vision-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+    .home2-vision-kv { border: 1px solid #26313d; border-radius: 8px; background: #0f1620; padding: 8px; }
+    .home2-vision-kv .k { color: #9fb3c8; font-size: 11px; }
+    .home2-vision-kv .v { margin-top: 2px; font-size: 18px; font-weight: 700; line-height: 1.2; }
+    .home2-vision-foot { margin-top: auto; color: #9fb3c8; font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
     .home2-presence .hp-card { height: 100%; }
     .card-drag-handle { cursor: default; user-select: none; }
     .home2-grid.is-editing .card-drag-handle { cursor: grab; }
@@ -5075,17 +5144,18 @@ def render_history_page() -> str:
 
 
 JS_BUNDLE = r"""
-const tables = ['hb','env','air','light','mic_noise','esp_net','radar'];
+const tables = ['hb','env','air','light','mic_noise','vision_cam','esp_net','radar'];
 const tableLabels = {
   hb: 'Heartbeat',
   env: 'Environment',
   air: 'Air Quality',
   light: 'Light',
   mic_noise: 'Microphone',
+  vision_cam: 'Vision Camera',
   esp_net: 'Wi-Fi',
   radar: 'Human Presence',
 };
-const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','ESP,NET','RADAR'];
+const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','CAM','ESP,NET','RADAR'];
 const EXPECTED_INTERVALS = {
   radar: 1,
   env: 5,
@@ -5094,6 +5164,7 @@ const EXPECTED_INTERVALS = {
   therm: 1,
   light: 5,
   mic: 5,
+  cam: 2,
   esp_net: 5,
   hb: 1,
 };
@@ -5103,6 +5174,7 @@ const FRESHNESS_TABLE_BY_PREFIX = {
   'AIR': 'air',
   'LIGHT': 'light',
   'MIC': 'mic_noise',
+  'CAM': 'vision_cam',
   'ESP,NET': 'esp_net',
   'RADAR': 'radar',
 };
@@ -5112,6 +5184,7 @@ const EXPECTED_KEY_BY_PREFIX = {
   'AIR': 'air',
   'LIGHT': 'light',
   'MIC': 'mic',
+  'CAM': 'cam',
   'ESP,NET': 'esp_net',
   'RADAR': 'radar',
 };
@@ -5331,6 +5404,56 @@ function bindPresenceToggleUi() {
     useDerivedPresence = !!toggleEl.checked;
     drawRadarScope(radarNow.state || {});
   });
+}
+
+function formatVisionRatio(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 'n/a';
+  const pct = Math.max(0, Math.min(100, Math.round(num * 100)));
+  return String(pct) + '%';
+}
+
+function renderVisionNow(data) {
+  const stateEl = document.getElementById('vision-now-state');
+  const lightEl = document.getElementById('vision-now-light');
+  const sceneEl = document.getElementById('vision-now-scene');
+  const resEl = document.getElementById('vision-now-res');
+  const ageEl = document.getElementById('vision-now-age');
+  const seqEl = document.getElementById('vision-now-seq');
+  if (!stateEl || !lightEl || !sceneEl || !resEl || !ageEl || !seqEl) return;
+
+  const present = !!(data && data.present);
+  const camok = Number(data && data.camok);
+  const camerr = Number(data && data.camerr);
+  const width = Number(data && data.width);
+  const height = Number(data && data.height);
+  const ts = String((data && data.ts_utc) || '');
+  const stale = tableIsStale('vision_cam') || !present;
+
+  if (!present) {
+    stateEl.textContent = 'No CAM data';
+    lightEl.textContent = 'n/a';
+    sceneEl.textContent = 'n/a';
+    resEl.textContent = 'n/a';
+    ageEl.textContent = 'Last seen: n/a';
+    seqEl.textContent = 'seq: n/a';
+  } else {
+    stateEl.textContent = (camok === 1 ? 'Camera OK' : 'Camera Fault') + (Number.isFinite(camerr) ? (' (err ' + String(camerr) + ')') : '');
+    lightEl.textContent = formatVisionRatio(data.light);
+    sceneEl.textContent = formatVisionRatio(data.scene);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      resEl.textContent = String(Math.round(width)) + '×' + String(Math.round(height));
+    } else {
+      resEl.textContent = 'n/a';
+    }
+    ageEl.textContent = 'Last seen: ' + (ts ? relativeAge(ts) : 'n/a');
+    seqEl.textContent = 'seq: ' + (data.seq === null || data.seq === undefined ? 'n/a' : String(data.seq));
+  }
+
+  const card = stateEl.closest('.trend-card');
+  if (card) {
+    card.classList.toggle('stale-card', stale);
+  }
 }
 
 function getChartRenderSize(imgEl) {
@@ -5573,8 +5696,9 @@ function snapshotCurrentHome2Layout() {
 
 function defaultHome2Layout() {
   return [
-    { id: 'combo-env', x: 0, y: 0, w: 6, h: 12 },
-    { id: 'combo-air', x: 0, y: 12, w: 6, h: 12 },
+    { id: 'combo-env', x: 0, y: 0, w: 6, h: 8 },
+    { id: 'combo-air', x: 0, y: 8, w: 6, h: 8 },
+    { id: 'vision-card', x: 0, y: 16, w: 6, h: 8 },
     { id: 'hp-card', x: 6, y: 0, w: 6, h: 24 },
   ];
 }
@@ -7209,6 +7333,22 @@ function initTrends() {
       'air'
     ));
 
+    const visionCard = document.createElement('div');
+    visionCard.className = 'card trend-card chart home2-card home2-vision-card';
+    visionCard.dataset.cardId = 'vision-card';
+    visionCard.innerHTML =
+      '<div class="trend-top card-header"><div class="card-drag-handle"><b>Vision Data</b></div></div>' +
+      '<div id="vision-now-state" class="status-pill state-offline" style="width:max-content">No CAM data</div>' +
+      '<div class="home2-vision-grid">' +
+        '<div class="home2-vision-kv"><div class="k">Light</div><div id="vision-now-light" class="v">n/a</div></div>' +
+        '<div class="home2-vision-kv"><div class="k">Scene Delta</div><div id="vision-now-scene" class="v">n/a</div></div>' +
+        '<div class="home2-vision-kv"><div class="k">Resolution</div><div id="vision-now-res" class="v">n/a</div></div>' +
+        '<div class="home2-vision-kv"><div class="k">Frame Seq</div><div id="vision-now-seq" class="v">n/a</div></div>' +
+      '</div>' +
+      '<div class="home2-vision-foot"><span id="vision-now-age">Last seen: n/a</span></div>' +
+      '<div class="card-resize-handle"></div>';
+    home2Grid.appendChild(visionCard);
+
     const radarCard = document.createElement('div');
     radarCard.className = 'card trend-card chart hp-card home2-card';
     radarCard.dataset.cardId = 'hp-card';
@@ -7950,9 +8090,10 @@ async function pollTrends() {
     for (const [key, data] of results) {
       trendData[key] = data;
     }
-    const [radarLatest, radarTracks] = await Promise.all([
+    const [radarLatest, radarTracks, visionNow] = await Promise.all([
       fetchJson('/api/radar/latest', controller),
       fetchJson('/api/radar/tracks', controller),
+      fetchJson('/api/vision/now', controller),
     ]);
     const derivedToggleEl = document.getElementById('radar-use-derived');
     if (derivedToggleEl) {
@@ -7961,6 +8102,9 @@ async function pollTrends() {
     radarNow.state = radarLatest || radarNow.state;
     radarTracksNow = radarTracks || radarTracksNow;
     drawRadarScope(radarNow.state);
+    if (isHome2Layout()) {
+      renderVisionNow(visionNow || null);
+    }
 
     const cacheBust = Date.now();
     {

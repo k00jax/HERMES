@@ -322,6 +322,7 @@ static void ld2410EmitIfNeeded(uint32_t now) {
 }
 
 static const uint32_t CAMERA_INTERVAL_MS = 2000;
+static const uint32_t CAMERA_REPORT_INTERVAL_MS = 2000;
 static const int SCENE_STRIDE = 4;
 static const int SCENE_SAMPLES = (160 / SCENE_STRIDE) * (120 / SCENE_STRIDE);
 
@@ -359,7 +360,11 @@ static int cameraScl = CAM_PIN_SIOC;
 static float cameraLight = NAN;
 static float cameraScene = NAN;
 static uint32_t lastCameraMs = 0;
+static uint32_t lastCameraReportMs = 0;
+static uint32_t cameraReportSeq = 0;
 static bool scenePrevValid = false;
+static int cameraFrameWidth = 0;
+static int cameraFrameHeight = 0;
 static uint8_t scenePrev[SCENE_SAMPLES];
 
 static bool micOk = false;
@@ -686,6 +691,8 @@ static void sampleCamera(uint32_t now) {
 
   const int width = fb->width;
   const int height = fb->height;
+  cameraFrameWidth = width;
+  cameraFrameHeight = height;
   const int stride = SCENE_STRIDE;
   const int samplesX = width / stride;
   const int samplesY = height / stride;
@@ -747,6 +754,36 @@ static void sampleCamera(uint32_t now) {
       scenePrevValid = true;
     }
   }
+#else
+  (void)now;
+#endif
+}
+
+static void sendCameraTelemetryLine(uint32_t now) {
+#if ENABLE_CAMERA
+  if ((now - lastCameraReportMs) < CAMERA_REPORT_INTERVAL_MS) {
+    return;
+  }
+  lastCameraReportMs = now;
+
+  char lightBuffer[16];
+  char sceneBuffer[16];
+  formatFloat(lightBuffer, sizeof(lightBuffer), cameraLight, 3);
+  formatFloat(sceneBuffer, sizeof(sceneBuffer), cameraScene, 3);
+
+  char line[220];
+  snprintf(
+      line,
+      sizeof(line),
+      "CAM,n=%lu,camok=%d,camerr=%d,w=%d,h=%d,light=%s,scene=%s\n",
+      static_cast<unsigned long>(++cameraReportSeq),
+      cameraOk ? 1 : 0,
+      cameraErr,
+      cameraFrameWidth,
+      cameraFrameHeight,
+      lightBuffer,
+      sceneBuffer);
+  Serial1.print(line);
 #else
   (void)now;
 #endif
@@ -1108,6 +1145,7 @@ void loop() {
   sampleCamera(now);
   sampleMic(now);
   updateWifi(now);
+  sendCameraTelemetryLine(now);
   if (now - lastSendMs >= 1000) {
     lastSendMs = now;
     sendTelemetryLine();
