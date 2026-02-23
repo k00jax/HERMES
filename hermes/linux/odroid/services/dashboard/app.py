@@ -3764,7 +3764,7 @@ HTML_PAGE = """
     .sonar-ring { position: absolute; top: 8%; bottom: 8%; width: 1px; background: rgba(121,192,255,0.22); }
     .sonar-ring.extended { background: rgba(121,192,255,0.10); }
     .sonar-ring-label-top { position: absolute; top: 2px; transform: translateX(-50%); font-size: 10px; color: #8ea1b3; white-space: nowrap; }
-    .sonar-ring-label-bottom { position: absolute; bottom: 2px; transform: translateX(-50%); font-size: 10px; color: #7f92a6; white-space: nowrap; }
+    .sonar-ring-label-bottom { position: absolute; top: auto; bottom: 6px; transform: translateX(-50%); font-size: 10px; color: #89a0b8; white-space: nowrap; }
     .sonar-ring-label-top.extended, .sonar-ring-label-bottom.extended { opacity: 0.7; }
     .sonar-layer { position: absolute; inset: 0; }
     .sonar-dot { position: absolute; border-radius: 999px; pointer-events: auto; transition: left 150ms ease, top 150ms ease, opacity 150ms ease; }
@@ -3776,7 +3776,6 @@ HTML_PAGE = """
     .sonar-dot.is-flicker { animation: sonarFlicker 0.45s steps(2, end) infinite; }
     .sonar-callout { position: absolute; left: calc(100% - 270px); width: 260px; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; pointer-events: none; z-index: 6; box-shadow: 0 10px 24px rgba(0,0,0,0.35); transition: opacity 120ms ease; }
     .sonar-leaderline { position: absolute; height: 1px; background: rgba(121,192,255,0.45); transform-origin: 0 50%; z-index: 5; }
-    .sonar-legend { margin-top: 6px; font-size: 11px; color: #8ea1b3; }
     .zone-band { position: relative; display: grid; grid-template-columns: 0.8fr 0.7fr 1.5fr 2fr 1fr; gap: 6px; align-items: stretch; }
     .range-markers { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; }
     .zone-segment { min-height: 42px; border-radius: 8px; border: 1px solid #223244; display: flex; align-items: center; justify-content: center; text-align: center; padding: 4px 6px; color: #c7d7e8; font-size: 11px; line-height: 1.2; transition: opacity 150ms ease-in-out, filter 150ms ease-in-out, box-shadow 150ms ease-in-out, border-color 150ms ease-in-out; }
@@ -7012,7 +7011,6 @@ function initTrends() {
           '</div>' +
           '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
         '</div>' +
-        '<div class="sonar-legend">X = distance. Y = visual separation only.</div>' +
         '<div class="radar-readout">' +
           '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
           '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
@@ -7098,7 +7096,6 @@ function initTrends() {
         '</div>' +
         '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
       '</div>' +
-      '<div class="sonar-legend">X = distance. Y = visual separation only.</div>' +
       '<div class="radar-readout">' +
         '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
         '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
