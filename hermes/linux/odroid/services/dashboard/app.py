@@ -3759,7 +3759,7 @@ HTML_PAGE = """
     .range-strip.no-target { opacity: 0.48; }
     .sonar-wrap { position: relative; margin-top: 12px; margin-bottom: 14px; min-height: 170px; }
     .sonar-cone { position: relative; width: calc(100% - 286px); min-width: 180px; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; }
-    .sonar-cone::before { content: ''; position: absolute; inset: 10px; background: linear-gradient(90deg, rgba(121,192,255,0.08), rgba(121,192,255,0.22)); clip-path: polygon(0% 48%, 100% 10%, 100% 90%); border-radius: 8px; }
+    .sonar-cone::before { content: ''; position: absolute; inset: 10px; background: linear-gradient(90deg, rgba(121,192,255,0.22), rgba(121,192,255,0.08)); clip-path: polygon(0% 48%, 100% 10%, 100% 90%); border-radius: 8px; }
     .sonar-layer { position: absolute; inset: 0; }
     .sonar-dot { position: absolute; border-radius: 999px; pointer-events: auto; transition: left 150ms ease, top 150ms ease, opacity 150ms ease; }
     .sonar-dot.dot-move { background: rgba(132, 210, 255, 0.98); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.24); }
@@ -5729,6 +5729,7 @@ function updateTracksFromDetections(detections) {
         id: nextTrackId++,
         kind: det.kind,
         distanceM: Number(det.distanceM || 0),
+        createdMs: now,
         lastSeenMs: now,
         move_en: Number(det.move_en || 0),
         stat_en: Number(det.stat_en || 0),
@@ -5951,10 +5952,12 @@ function renderSonarReturns(list, maxM) {
     const y = clamp(centerY + lane * Math.max(4, halfCone - 12), 10, height - 10);
     const energy = clamp(trackEffectiveEnergy(track), 0, 100);
     const radius = 4 + (10 * (energy / 100.0));
-    const createdMs = Number(track.createdMs || track.lastSeenMs || 0);
+    const createdMs = Number(track.createdMs || 0);
     const baseConf = computeConfidence(Number(track.distanceM || 0));
     const finalScore = confidenceWithEnergy(baseConf.score, energy);
-    const flicker = ((Date.now() - createdMs) < 700) || finalScore < 0.35;
+    const isNewTrack = createdMs > 0 && (Date.now() - createdMs) < 700;
+    const isLowConfidenceTail = finalScore < 0.35 && hv.fade < 0.28;
+    const flicker = isNewTrack || isLowConfidenceTail;
     const pulse = track.kind === 'move' && energy >= 20;
 
     const dot = document.createElement('div');
