@@ -44,6 +44,8 @@ BASE_DIR = Path("/home/odroid/hermes-src/hermes")
 CLIENT_PATH = BASE_DIR / "linux/logger/client.py"
 DOCTOR_PATH = BASE_DIR / "tools/hermes-doctor.sh"
 DB_PATH = Path("/home/odroid/hermes-data/db/hermes.sqlite3")
+VISION_DIR = Path("/home/odroid/hermes-data/vision")
+VISION_SNAPSHOT_PATH = VISION_DIR / "latest.jpg"
 REPORTS_DIR = Path(os.environ.get("HERMES_REPORTS_DIR", "/home/odroid/hermes-data/reports"))
 DB_TIMEOUT_SECS = float(os.environ.get("HERMES_DB_TIMEOUT_SECS", "2.0"))
 MAX_CACHE_KEYS = int(os.environ.get("HERMES_CHART_CACHE_KEYS", "64"))
@@ -322,6 +324,23 @@ def ensure_settings_table(conn: sqlite3.Connection) -> None:
     """
   )
   conn.execute("CREATE INDEX IF NOT EXISTS idx_settings_updated ON settings(updated_ts_utc);")
+
+
+def ensure_vision_snapshots_table(conn: sqlite3.Connection) -> None:
+  conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS vision_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts_utc TEXT NOT NULL,
+      ts_local TEXT,
+      seq INTEGER,
+      reason TEXT,
+      path TEXT,
+      bytes INTEGER
+    );
+    """
+  )
+  conn.execute("CREATE INDEX IF NOT EXISTS idx_vision_snapshots_ts ON vision_snapshots(ts_utc);")
 
 
 def get_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
@@ -2744,6 +2763,9 @@ def api_vision_now() -> Dict[str, object]:
     "height": None,
     "light": None,
     "scene": None,
+    "snap_ts_utc": None,
+    "snap_reason": None,
+    "snap_bytes": None,
   }
   if not DB_PATH.exists():
     return default
@@ -2751,23 +2773,38 @@ def api_vision_now() -> Dict[str, object]:
   try:
     with open_db() as conn:
       conn.row_factory = sqlite3.Row
+      ensure_vision_snapshots_table(conn)
       row = conn.execute(
         "SELECT ts_utc, seq, camok, camerr, width, height, light, scene "
         "FROM vision_cam ORDER BY id DESC LIMIT 1"
       ).fetchone()
-      if not row:
-        return default
-      return {
-        "present": True,
-        "ts_utc": row["ts_utc"],
-        "seq": row["seq"],
-        "camok": row["camok"],
-        "camerr": row["camerr"],
-        "width": row["width"],
-        "height": row["height"],
-        "light": row["light"],
-        "scene": row["scene"],
-      }
+      snap_row = conn.execute(
+        "SELECT ts_utc, reason, bytes FROM vision_snapshots ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      payload = dict(default)
+      if row:
+        payload.update(
+          {
+            "present": True,
+            "ts_utc": row["ts_utc"],
+            "seq": row["seq"],
+            "camok": row["camok"],
+            "camerr": row["camerr"],
+            "width": row["width"],
+            "height": row["height"],
+            "light": row["light"],
+            "scene": row["scene"],
+          }
+        )
+      if snap_row:
+        payload.update(
+          {
+            "snap_ts_utc": snap_row["ts_utc"],
+            "snap_reason": snap_row["reason"],
+            "snap_bytes": snap_row["bytes"],
+          }
+        )
+      return payload
   except sqlite3.OperationalError as exc:
     if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
       return default
@@ -2793,6 +2830,88 @@ def api_vision_history(limit: int = Query(120, ge=1, le=1000), minutes: int = Qu
     if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
       return {"rows": []}
     raise
+
+
+@APP.post("/api/vision/snapshot")
+async def api_vision_snapshot_upload(
+  request: Request,
+  seq: int = Query(None),
+  ts: str = Query(""),
+  reason: str = Query("event"),
+) -> Dict[str, object]:
+  raw = await request.body()
+  if not raw:
+    raise HTTPException(status_code=400, detail="empty body")
+  if len(raw) < 32:
+    raise HTTPException(status_code=400, detail="snapshot too small")
+
+  content_type = str(request.headers.get("content-type") or "").lower()
+  if content_type and ("image/jpeg" not in content_type and "application/octet-stream" not in content_type):
+    raise HTTPException(status_code=415, detail="content-type must be image/jpeg")
+
+  if not (raw.startswith(b"\xff\xd8") and raw.endswith(b"\xff\xd9")):
+    raise HTTPException(status_code=400, detail="invalid jpeg data")
+
+  ts_utc = now_utc_iso()
+  parsed_ts = parse_iso_utc_maybe(ts)
+  if parsed_ts is not None:
+    ts_utc = parsed_ts.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+  ts_local = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+  cleaned_reason = str(reason or "event").strip()[:64] or "event"
+
+  VISION_DIR.mkdir(parents=True, exist_ok=True)
+  temp_path = VISION_DIR / f"latest_{uuid.uuid4().hex}.jpg.tmp"
+  temp_path.write_bytes(raw)
+  os.replace(str(temp_path), str(VISION_SNAPSHOT_PATH))
+
+  with open_db() as conn:
+    ensure_vision_snapshots_table(conn)
+    conn.execute(
+      "INSERT INTO vision_snapshots (ts_utc, ts_local, seq, reason, path, bytes) VALUES (?, ?, ?, ?, ?, ?)",
+      (ts_utc, ts_local, seq, cleaned_reason, str(VISION_SNAPSHOT_PATH), int(len(raw))),
+    )
+    conn.commit()
+
+  return {
+    "ok": True,
+    "ts_utc": ts_utc,
+    "seq": seq,
+    "reason": cleaned_reason,
+    "bytes": int(len(raw)),
+    "path": str(VISION_SNAPSHOT_PATH),
+  }
+
+
+@APP.get("/api/vision/snapshot/latest.jpg")
+def api_vision_snapshot_latest() -> FileResponse:
+  if not VISION_SNAPSHOT_PATH.exists():
+    raise HTTPException(status_code=404, detail="no snapshot")
+  return FileResponse(
+    str(VISION_SNAPSHOT_PATH),
+    media_type="image/jpeg",
+    filename="latest.jpg",
+    headers={
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "Pragma": "no-cache",
+      "Expires": "0",
+    },
+  )
+
+
+@APP.post("/api/vision/capture")
+def api_vision_capture(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+  reason = str(payload.get("reason") or "manual").strip()[:64] or "manual"
+  command = str(payload.get("command") or "CAM,CAPTURE").strip() or "CAM,CAPTURE"
+  cmd = run_cmd(["python3", str(CLIENT_PATH), "send", command], timeout_sec=2)
+  raw = str(cmd.get("stdout") or cmd.get("stderr") or "")
+  return {
+    "ok": bool(cmd.get("ok")),
+    "reason": reason,
+    "command": command,
+    "accepted": bool(cmd.get("ok")),
+    "stub": not bool(cmd.get("ok")),
+    "raw": raw,
+  }
 
 
 @APP.post("/api/radar/calibrate")
@@ -3955,6 +4074,15 @@ HTML_PAGE = """
     .home2-vision-kv .k { color: #9fb3c8; font-size: 11px; }
     .home2-vision-kv .v { margin-top: 2px; font-size: 18px; font-weight: 700; line-height: 1.2; }
     .home2-vision-foot { margin-top: auto; color: #9fb3c8; font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
+    .vision-snap-wrap { margin-top: 8px; border: 1px solid #26313d; border-radius: 8px; background: #0f1620; overflow: hidden; aspect-ratio: 16 / 9; cursor: pointer; }
+    .vision-snap { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .vision-actions { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+    .vision-snap-meta { margin-top: 6px; color: #9fb3c8; font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
+    .vision-modal { position: fixed; inset: 0; z-index: 1100; display: flex; align-items: center; justify-content: center; background: rgba(7, 11, 16, 0.86); padding: 24px; }
+    .vision-modal.hidden { display: none !important; }
+    .vision-modal-content { position: relative; width: min(92vw, 1080px); max-height: 88vh; border-radius: 10px; border: 1px solid #2a3948; background: #0b121a; padding: 10px; }
+    .vision-modal-content img { width: 100%; max-height: calc(88vh - 20px); object-fit: contain; border-radius: 8px; display: block; }
+    .vision-modal-close { position: absolute; right: 14px; top: 12px; }
     .home2-presence .hp-card { height: 100%; }
     .card-drag-handle { cursor: default; user-select: none; }
     .home2-grid.is-editing .card-drag-handle { cursor: grab; }
@@ -5301,6 +5429,7 @@ let home2IsEditing = false;
 let home2LayoutSnapshot = null;
 let home2DragState = null;
 let home2ResizeState = null;
+let visionSnapshotLastTs = '';
 
 function updateTickerDots() {
   const tickerDot = document.getElementById('tickerDot');
@@ -5413,6 +5542,48 @@ function formatVisionRatio(value) {
   return String(pct) + '%';
 }
 
+function refreshVisionSnapshotImage(cacheBuster) {
+  const img = document.getElementById('vision-snap-img');
+  if (!img) return;
+  const stamp = String(cacheBuster || Date.now());
+  img.src = '/api/vision/snapshot/latest.jpg?ts=' + encodeURIComponent(stamp);
+}
+
+function bindVisionSnapshotUi() {
+  const img = document.getElementById('vision-snap-img');
+  const captureBtn = document.getElementById('vision-snap-capture');
+  const modal = document.getElementById('vision-snap-modal');
+  const modalImg = document.getElementById('vision-snap-modal-img');
+  const closeBtn = document.getElementById('vision-snap-modal-close');
+  if (!img || !captureBtn || !modal || !modalImg || !closeBtn) return;
+  if (img.dataset.bound === '1') return;
+  img.dataset.bound = '1';
+
+  img.onclick = () => {
+    modal.classList.remove('hidden');
+    modalImg.src = img.src || ('/api/vision/snapshot/latest.jpg?ts=' + encodeURIComponent(String(Date.now())));
+  };
+  closeBtn.onclick = () => {
+    modal.classList.add('hidden');
+  };
+  modal.onclick = (e) => {
+    if (e.target === modal) {
+      modal.classList.add('hidden');
+    }
+  };
+  captureBtn.onclick = async () => {
+    captureBtn.disabled = true;
+    try {
+      await postJson('/api/vision/capture', { reason: 'manual' });
+    } catch (err) {
+      console.error(err);
+    } finally {
+      captureBtn.disabled = false;
+      refreshVisionSnapshotImage(Date.now());
+    }
+  };
+}
+
 function renderVisionNow(data) {
   const stateEl = document.getElementById('vision-now-state');
   const lightEl = document.getElementById('vision-now-light');
@@ -5420,7 +5591,9 @@ function renderVisionNow(data) {
   const resEl = document.getElementById('vision-now-res');
   const ageEl = document.getElementById('vision-now-age');
   const seqEl = document.getElementById('vision-now-seq');
-  if (!stateEl || !lightEl || !sceneEl || !resEl || !ageEl || !seqEl) return;
+  const snapAgeEl = document.getElementById('vision-snap-age');
+  const snapTriggerEl = document.getElementById('vision-snap-trigger');
+  if (!stateEl || !lightEl || !sceneEl || !resEl || !ageEl || !seqEl || !snapAgeEl || !snapTriggerEl) return;
 
   const present = !!(data && data.present);
   const camok = Number(data && data.camok);
@@ -5428,6 +5601,8 @@ function renderVisionNow(data) {
   const width = Number(data && data.width);
   const height = Number(data && data.height);
   const ts = String((data && data.ts_utc) || '');
+  const snapTs = String((data && data.snap_ts_utc) || '');
+  const snapReason = String((data && data.snap_reason) || 'none');
   const stale = tableIsStale('vision_cam') || !present;
 
   if (!present) {
@@ -5448,6 +5623,13 @@ function renderVisionNow(data) {
     }
     ageEl.textContent = 'Last seen: ' + (ts ? relativeAge(ts) : 'n/a');
     seqEl.textContent = 'seq: ' + (data.seq === null || data.seq === undefined ? 'n/a' : String(data.seq));
+  }
+
+  snapAgeEl.textContent = 'Last snapshot: ' + (snapTs ? relativeAge(snapTs) : 'n/a');
+  snapTriggerEl.textContent = 'Trigger: ' + (snapReason || 'none');
+  if (snapTs && snapTs !== visionSnapshotLastTs) {
+    visionSnapshotLastTs = snapTs;
+    refreshVisionSnapshotImage(snapTs);
   }
 
   const card = stateEl.closest('.trend-card');
@@ -7339,6 +7521,9 @@ function initTrends() {
     visionCard.innerHTML =
       '<div class="trend-top card-header"><div class="card-drag-handle"><b>Vision Data</b></div></div>' +
       '<div id="vision-now-state" class="status-pill state-offline" style="width:max-content">No CAM data</div>' +
+      '<div class="vision-snap-wrap"><img id="vision-snap-img" class="vision-snap" alt="Vision snapshot" src="/api/vision/snapshot/latest.jpg?ts=0" /></div>' +
+      '<div class="vision-actions"><button id="vision-snap-capture" class="btn">Capture</button></div>' +
+      '<div class="vision-snap-meta"><span id="vision-snap-age">Last snapshot: n/a</span><span id="vision-snap-trigger">Trigger: none</span></div>' +
       '<div class="home2-vision-grid">' +
         '<div class="home2-vision-kv"><div class="k">Light</div><div id="vision-now-light" class="v">n/a</div></div>' +
         '<div class="home2-vision-kv"><div class="k">Scene Delta</div><div id="vision-now-scene" class="v">n/a</div></div>' +
@@ -7346,8 +7531,10 @@ function initTrends() {
         '<div class="home2-vision-kv"><div class="k">Frame Seq</div><div id="vision-now-seq" class="v">n/a</div></div>' +
       '</div>' +
       '<div class="home2-vision-foot"><span id="vision-now-age">Last seen: n/a</span></div>' +
+      '<div id="vision-snap-modal" class="vision-modal hidden"><div class="vision-modal-content"><button id="vision-snap-modal-close" class="btn vision-modal-close">Close</button><img id="vision-snap-modal-img" alt="Vision snapshot large" src="" /></div></div>' +
       '<div class="card-resize-handle"></div>';
     home2Grid.appendChild(visionCard);
+    bindVisionSnapshotUi();
 
     const radarCard = document.createElement('div');
     radarCard.className = 'card trend-card chart hp-card home2-card';
