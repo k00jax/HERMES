@@ -3871,8 +3871,10 @@ HTML_PAGE = """
     .hp-card .still-presence-block {
       display: none !important;
     }
-    .home2-grid { display: grid; grid-template-columns: minmax(640px, 2fr) minmax(520px, 2.2fr); gap: 14px; width: 100%; align-items: stretch; }
-    .home2-left { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+    .home2-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .home2-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); grid-auto-rows: 24px; gap: 12px; width: 100%; position: relative; align-items: stretch; }
+    .home2-card { grid-column: span 6; grid-row: span 10; min-height: 120px; position: relative; min-width: 0; }
+    .home2-grid.is-editing .home2-card { outline: 1px dashed rgba(121,192,255,0.35); }
     .home2-combo-card { min-width: 0; }
     .home2-combo-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
     .home2-metric { border: 1px solid #26313d; border-radius: 8px; background: #0f1620; padding: 6px 8px; }
@@ -3880,9 +3882,11 @@ HTML_PAGE = """
     .home2-metric .value { font-size: 26px; line-height: 1.1; font-weight: 700; margin-bottom: 2px; }
     .home2-presence { min-width: 0; }
     .home2-presence .hp-card { height: 100%; }
-    @media (max-width: 1400px) {
-      .home2-grid { grid-template-columns: 1fr; }
-    }
+    .card-drag-handle { cursor: default; user-select: none; }
+    .home2-grid.is-editing .card-drag-handle { cursor: grab; }
+    .home2-grid.is-editing .card-drag-handle:active { cursor: grabbing; }
+    .card-resize-handle { position: absolute; right: 8px; bottom: 8px; width: 14px; height: 14px; border-right: 2px solid rgba(121,192,255,0.7); border-bottom: 2px solid rgba(121,192,255,0.7); opacity: 0; pointer-events: none; }
+    .home2-grid.is-editing .card-resize-handle { opacity: 0.9; pointer-events: auto; cursor: nwse-resize; }
     .chart-slot-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
     .trend-window-card { width: 100%; display: flex; flex-direction: column; padding: 6px 8px; }
     .trend-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }
@@ -5225,6 +5229,13 @@ const radarBodiesState = {
 };
 let integrityWarningActive = false;
 let tickerHealthy = true;
+const HOME2_LAYOUT_KEY = 'home2_layout_v1';
+const HOME2_GRID_COLS = 12;
+const HOME2_ROW_PX = 24;
+let home2IsEditing = false;
+let home2LayoutSnapshot = null;
+let home2DragState = null;
+let home2ResizeState = null;
 
 function updateTickerDots() {
   const tickerDot = document.getElementById('tickerDot');
@@ -5505,6 +5516,207 @@ function saveChartSlots() {
     localStorage.setItem(chartSlotsStorageKey, JSON.stringify(chartSlots));
   } catch (_err) {
   }
+}
+
+function loadHome2Layout() {
+  try {
+    return JSON.parse(localStorage.getItem(HOME2_LAYOUT_KEY) || 'null');
+  } catch (_err) {
+    return null;
+  }
+}
+
+function saveHome2Layout(layout) {
+  try {
+    localStorage.setItem(HOME2_LAYOUT_KEY, JSON.stringify(Array.isArray(layout) ? layout : []));
+  } catch (_err) {
+  }
+}
+
+function parseGridSpan(raw, fallback) {
+  const match = String(raw || '').match(/span\s+(\d+)/i);
+  if (!match) return fallback;
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function applyHome2Layout(layout) {
+  if (!Array.isArray(layout) || !layout.length) return;
+  for (const item of layout) {
+    if (!item || !item.id) continue;
+    const el = document.querySelector('.home2-card[data-card-id="' + String(item.id) + '"]');
+    if (!el) continue;
+    const w = Math.max(1, Math.min(HOME2_GRID_COLS, Number.parseInt(item.w, 10) || 6));
+    const x = Math.max(0, Math.min(HOME2_GRID_COLS - w, Number.parseInt(item.x, 10) || 0));
+    const y = Math.max(0, Number.parseInt(item.y, 10) || 0);
+    const h = Math.max(4, Number.parseInt(item.h, 10) || 10);
+    el.style.gridColumnStart = String(x + 1);
+    el.style.gridColumnEnd = 'span ' + String(w);
+    el.style.gridRowStart = String(y + 1);
+    el.style.gridRowEnd = 'span ' + String(h);
+  }
+}
+
+function snapshotCurrentHome2Layout() {
+  const cards = Array.from(document.querySelectorAll('.home2-card[data-card-id]'));
+  return cards.map((el) => {
+    const cs = window.getComputedStyle(el);
+    const colStartRaw = String(cs.gridColumnStart || '1');
+    const rowStartRaw = String(cs.gridRowStart || '1');
+    const colEndRaw = String(cs.gridColumnEnd || 'span 6');
+    const rowEndRaw = String(cs.gridRowEnd || 'span 10');
+    const colStart = Number.parseInt(colStartRaw, 10) || 1;
+    const rowStart = Number.parseInt(rowStartRaw, 10) || 1;
+    const w = parseGridSpan(colEndRaw, 6);
+    const h = parseGridSpan(rowEndRaw, 10);
+    return {
+      id: String(el.dataset.cardId || ''),
+      x: Math.max(0, colStart - 1),
+      y: Math.max(0, rowStart - 1),
+      w,
+      h,
+    };
+  }).filter((item) => item.id.length > 0);
+}
+
+function defaultHome2Layout() {
+  return [
+    { id: 'combo-env', x: 0, y: 0, w: 6, h: 12 },
+    { id: 'combo-air', x: 0, y: 12, w: 6, h: 12 },
+    { id: 'hp-card', x: 6, y: 0, w: 6, h: 24 },
+  ];
+}
+
+function unbindHome2DragResize() {
+  home2DragState = null;
+  home2ResizeState = null;
+}
+
+function bindHome2DragResize() {
+  const grid = document.getElementById('home2-grid');
+  if (!grid) return;
+  const cards = Array.from(grid.querySelectorAll('.home2-card[data-card-id]'));
+  for (const card of cards) {
+    const handle = card.querySelector('.card-drag-handle');
+    const resizer = card.querySelector('.card-resize-handle');
+
+    if (handle) {
+      handle.onpointerdown = (e) => {
+        if (!home2IsEditing) return;
+        e.preventDefault();
+        card.setPointerCapture(e.pointerId);
+        const gridRect = grid.getBoundingClientRect();
+        const startLayout = snapshotCurrentHome2Layout().find((item) => item.id === String(card.dataset.cardId || ''));
+        if (!startLayout) return;
+        home2DragState = {
+          card,
+          pointerId: e.pointerId,
+          startX: e.clientX,
+          startY: e.clientY,
+          gridRect,
+          startLayout,
+        };
+      };
+    }
+
+    if (resizer) {
+      resizer.onpointerdown = (e) => {
+        if (!home2IsEditing) return;
+        e.preventDefault();
+        card.setPointerCapture(e.pointerId);
+        const gridRect = grid.getBoundingClientRect();
+        const startLayout = snapshotCurrentHome2Layout().find((item) => item.id === String(card.dataset.cardId || ''));
+        if (!startLayout) return;
+        home2ResizeState = {
+          card,
+          pointerId: e.pointerId,
+          startX: e.clientX,
+          startY: e.clientY,
+          gridRect,
+          startLayout,
+        };
+      };
+    }
+
+    card.onpointermove = (e) => {
+      if (!home2IsEditing) return;
+
+      if (home2DragState && home2DragState.pointerId === e.pointerId) {
+        const dx = e.clientX - home2DragState.startX;
+        const dy = e.clientY - home2DragState.startY;
+        const colW = home2DragState.gridRect.width / HOME2_GRID_COLS;
+        const dCols = Math.round(dx / Math.max(1, colW));
+        const dRows = Math.round(dy / HOME2_ROW_PX);
+        const nextX = Math.max(0, Math.min(HOME2_GRID_COLS - home2DragState.startLayout.w, home2DragState.startLayout.x + dCols));
+        const nextY = Math.max(0, home2DragState.startLayout.y + dRows);
+        home2DragState.card.style.gridColumnStart = String(nextX + 1);
+        home2DragState.card.style.gridColumnEnd = 'span ' + String(home2DragState.startLayout.w);
+        home2DragState.card.style.gridRowStart = String(nextY + 1);
+        home2DragState.card.style.gridRowEnd = 'span ' + String(home2DragState.startLayout.h);
+      }
+
+      if (home2ResizeState && home2ResizeState.pointerId === e.pointerId) {
+        const dx = e.clientX - home2ResizeState.startX;
+        const dy = e.clientY - home2ResizeState.startY;
+        const colW = home2ResizeState.gridRect.width / HOME2_GRID_COLS;
+        const dCols = Math.round(dx / Math.max(1, colW));
+        const dRows = Math.round(dy / HOME2_ROW_PX);
+        const nextW = Math.max(1, Math.min(HOME2_GRID_COLS - home2ResizeState.startLayout.x, home2ResizeState.startLayout.w + dCols));
+        const nextH = Math.max(4, home2ResizeState.startLayout.h + dRows);
+        home2ResizeState.card.style.gridColumnStart = String(home2ResizeState.startLayout.x + 1);
+        home2ResizeState.card.style.gridColumnEnd = 'span ' + String(nextW);
+        home2ResizeState.card.style.gridRowStart = String(home2ResizeState.startLayout.y + 1);
+        home2ResizeState.card.style.gridRowEnd = 'span ' + String(nextH);
+      }
+    };
+
+    card.onpointerup = (e) => {
+      if (home2DragState && home2DragState.pointerId === e.pointerId) {
+        home2DragState = null;
+      }
+      if (home2ResizeState && home2ResizeState.pointerId === e.pointerId) {
+        home2ResizeState = null;
+      }
+    };
+  }
+}
+
+function setHome2Editing(on) {
+  const grid = document.getElementById('home2-grid');
+  const actions = document.getElementById('home2-customize-actions');
+  const btn = document.getElementById('home2-customize-btn');
+  if (!grid || !actions || !btn) return;
+
+  home2IsEditing = !!on;
+  grid.classList.toggle('is-editing', home2IsEditing);
+  actions.classList.toggle('hidden', !home2IsEditing);
+  btn.textContent = home2IsEditing ? 'Customizing…' : 'Customize cards';
+  btn.disabled = home2IsEditing;
+
+  if (home2IsEditing) {
+    home2LayoutSnapshot = snapshotCurrentHome2Layout();
+    bindHome2DragResize();
+  } else {
+    unbindHome2DragResize();
+  }
+}
+
+function initHome2LayoutControls() {
+  const btn = document.getElementById('home2-customize-btn');
+  const saveBtn = document.getElementById('home2-save-btn');
+  const cancelBtn = document.getElementById('home2-cancel-btn');
+  if (!btn || !saveBtn || !cancelBtn) return;
+
+  btn.onclick = () => setHome2Editing(true);
+  cancelBtn.onclick = () => {
+    applyHome2Layout(home2LayoutSnapshot || defaultHome2Layout());
+    setHome2Editing(false);
+  };
+  saveBtn.onclick = () => {
+    const layout = snapshotCurrentHome2Layout();
+    saveHome2Layout(layout);
+    setHome2Editing(false);
+  };
 }
 
 function renderChartSlotControls() {
@@ -6946,17 +7158,26 @@ function initTrends() {
   root.innerHTML = '';
 
   if (isHome2Layout()) {
-    const home2Grid = document.createElement('div');
-    home2Grid.className = 'home2-grid';
+    const toolbar = document.createElement('div');
+    toolbar.className = 'home2-toolbar';
+    toolbar.innerHTML =
+      '<button id="home2-customize-btn" class="btn">Customize cards</button>' +
+      '<div id="home2-customize-actions" class="hidden">' +
+        '<button id="home2-save-btn" class="btn primary">Save</button>' +
+        '<button id="home2-cancel-btn" class="btn">Cancel</button>' +
+      '</div>';
+    root.appendChild(toolbar);
 
-    const leftCol = document.createElement('div');
-    leftCol.className = 'home2-left';
+    const home2Grid = document.createElement('div');
+    home2Grid.id = 'home2-grid';
+    home2Grid.className = 'home2-grid';
 
     const makeComboCard = (title, left, right, comboId) => {
       const card = document.createElement('div');
-      card.className = 'card trend-card chart home2-combo-card';
+      card.className = 'card trend-card chart home2-combo-card home2-card';
+      card.dataset.cardId = 'combo-' + comboId;
       card.innerHTML =
-        '<div class="trend-top card-header"><div><b>' + title + '</b></div></div>' +
+        '<div class="trend-top card-header"><div class="card-drag-handle"><b>' + title + '</b></div></div>' +
         '<div class="home2-combo-meta">' +
           '<div class="home2-metric">' +
             '<div class="title">' + left.title + '</div>' +
@@ -6971,30 +7192,31 @@ function initTrends() {
         '</div>' +
         '<div class="chart-wrap plot">' +
           '<img id="trend-img-home2-combo-' + comboId + '" class="trend-img" data-overlay-left="' + left.trendKey + '" data-overlay-right="' + right.trendKey + '" alt="' + title + ' trend" src="" />' +
-        '</div>';
+        '</div>' +
+        '<div class="card-resize-handle"></div>';
       return card;
     };
 
-    leftCol.appendChild(makeComboCard(
+    home2Grid.appendChild(makeComboCard(
       'Temp + Humidity',
       { trendKey: 'env_temp', title: 'Temp' },
       { trendKey: 'env_hum', title: 'Humidity' },
       'env'
     ));
-    leftCol.appendChild(makeComboCard(
+    home2Grid.appendChild(makeComboCard(
       'ECO2 + TVOC',
       { trendKey: 'air_eco2', title: 'ECO2' },
       { trendKey: 'air_tvoc', title: 'TVOC' },
       'air'
     ));
 
-    const radarWrap = document.createElement('div');
-    radarWrap.className = 'home2-presence';
     const radarCard = document.createElement('div');
-    radarCard.className = 'card trend-card chart hp-card';
+    radarCard.className = 'card trend-card chart hp-card home2-card';
+    radarCard.dataset.cardId = 'hp-card';
     radarCard.innerHTML =
       '<div class="trend-top card-header hp-head">' +
-        '<div><b>' + radarTrend.title + '</b><button class="cal-btn" onclick="startRadarCalibration()">Calibration</button></div>' +
+        '<div class="card-drag-handle"><b>' + radarTrend.title + '</b></div>' +
+        '<button class="cal-btn" onclick="startRadarCalibration()">Calibration</button>' +
         '<div class="hp-tabs">' +
           '<button id="radar-view-now" class="hp-tab active" onclick="setRadarView(\'now\')">Now</button>' +
           '<button id="radar-view-history" class="hp-tab" onclick="setRadarView(\'history\')">History</button>' +
@@ -7060,12 +7282,13 @@ function initTrends() {
         '<div class="chart-wrap plot">' +
           '<img id="trend-img-' + radarTrend.key + '" class="trend-img" data-trend-key="' + radarTrend.key + '" alt="' + radarTrend.title + ' trend" src="" />' +
         '</div>' +
-      '</div>';
-    radarWrap.appendChild(radarCard);
+      '</div>' +
+      '<div class="card-resize-handle"></div>';
 
-    home2Grid.appendChild(leftCol);
-    home2Grid.appendChild(radarWrap);
+    home2Grid.appendChild(radarCard);
     root.appendChild(home2Grid);
+    applyHome2Layout(loadHome2Layout() || defaultHome2Layout());
+    initHome2LayoutControls();
     radarViewButtonsActive();
     initChartResizeObserver();
     return;
