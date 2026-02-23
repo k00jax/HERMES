@@ -3760,6 +3760,11 @@ HTML_PAGE = """
     .sonar-wrap { position: relative; margin-top: 12px; margin-bottom: 14px; min-height: 170px; }
     .sonar-cone { position: relative; width: calc(100% - 286px); min-width: 180px; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; }
     .sonar-cone::before { content: ''; position: absolute; inset: 10px; background: linear-gradient(90deg, rgba(121,192,255,0.22), rgba(121,192,255,0.08)); clip-path: polygon(0% 48%, 100% 10%, 100% 90%); border-radius: 8px; }
+    .sonar-rings { position: absolute; inset: 10px; pointer-events: none; z-index: 1; }
+    .sonar-ring { position: absolute; top: 8%; bottom: 8%; width: 1px; background: rgba(121,192,255,0.22); }
+    .sonar-ring.extended { background: rgba(121,192,255,0.10); }
+    .sonar-ring-label { position: absolute; top: 2px; transform: translateX(-50%); font-size: 10px; color: #8ea1b3; white-space: nowrap; }
+    .sonar-ring-label.extended { opacity: 0.7; }
     .sonar-layer { position: absolute; inset: 0; }
     .sonar-dot { position: absolute; border-radius: 999px; pointer-events: auto; transition: left 150ms ease, top 150ms ease, opacity 150ms ease; }
     .sonar-dot.dot-move { background: rgba(132, 210, 255, 0.98); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.24); }
@@ -3770,6 +3775,7 @@ HTML_PAGE = """
     .sonar-dot.is-flicker { animation: sonarFlicker 0.45s steps(2, end) infinite; }
     .sonar-callout { position: absolute; left: calc(100% - 270px); width: 260px; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; pointer-events: none; z-index: 6; box-shadow: 0 10px 24px rgba(0,0,0,0.35); transition: opacity 120ms ease; }
     .sonar-leaderline { position: absolute; height: 1px; background: rgba(121,192,255,0.45); transform-origin: 0 50%; z-index: 5; }
+    .sonar-legend { margin-top: 6px; font-size: 11px; color: #8ea1b3; }
     .zone-band { position: relative; display: grid; grid-template-columns: 0.8fr 0.7fr 1.5fr 2fr 1fr; gap: 6px; align-items: stretch; }
     .range-markers { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; }
     .zone-segment { min-height: 42px; border-radius: 8px; border: 1px solid #223244; display: flex; align-items: center; justify-content: center; text-align: center; padding: 4px 6px; color: #c7d7e8; font-size: 11px; line-height: 1.2; transition: opacity 150ms ease-in-out, filter 150ms ease-in-out, box-shadow 150ms ease-in-out, border-color 150ms ease-in-out; }
@@ -5719,10 +5725,23 @@ function updateTracksFromDetections(detections) {
       }
     }
     if (best) {
+      const prevDistance = Number(best.distanceM || 0);
+      const prevTrendDistance = Number(best.trendStartDistanceM || prevDistance);
+      const prevTrendTs = Number(best.trendStartTsMs || now);
       best.distanceM = Number(det.distanceM || 0);
       best.lastSeenMs = now;
       best.move_en = Number(det.move_en || 0);
       best.stat_en = Number(det.stat_en || 0);
+      best.prevDistanceM = prevDistance;
+      best.prevTsMs = Number(best.prevTsMs || prevTrendTs);
+      best.inbound = !!best.inbound;
+      if ((now - prevTrendTs) >= 500) {
+        const delta = prevTrendDistance - best.distanceM;
+        if (delta > 0.08) best.inbound = true;
+        else if (delta < -0.08) best.inbound = false;
+        best.trendStartDistanceM = best.distanceM;
+        best.trendStartTsMs = now;
+      }
       used.add(best.id);
     } else {
       tracks.push({
@@ -5731,6 +5750,11 @@ function updateTracksFromDetections(detections) {
         distanceM: Number(det.distanceM || 0),
         createdMs: now,
         lastSeenMs: now,
+        prevDistanceM: Number(det.distanceM || 0),
+        prevTsMs: now,
+        trendStartDistanceM: Number(det.distanceM || 0),
+        trendStartTsMs: now,
+        inbound: false,
         move_en: Number(det.move_en || 0),
         stat_en: Number(det.stat_en || 0),
       });
@@ -5762,12 +5786,32 @@ function getActiveTrack() {
   if (!tracks.length) return null;
   const now = Date.now();
   const locked = now < activeTrackLockedUntilMs;
-  if (!locked) {
-    if (activeTrackId == null || !tracks.some((track) => track.id === activeTrackId)) {
-      activeTrackId = tracks[0].id;
-    }
+  if (locked) {
+    return tracks.find((track) => track.id === activeTrackId) || tracks[0];
+  }
+  if (activeTrackId == null || !tracks.some((track) => track.id === activeTrackId)) {
+    activeTrackId = tracks[0].id;
   }
   return tracks.find((track) => track.id === activeTrackId) || tracks[0];
+}
+
+function scoreTrack(track) {
+  const d = Number(track.distanceM || 0);
+  const mv = Number(track.move_en || 0);
+  const st = Number(track.stat_en || 0);
+  const distScore = Math.min(d, 5.0) / 5.0;
+  const moveScore = Math.min(mv, 100) / 100;
+  const stillScore = Math.min(st, 100) / 100;
+  const inboundScore = track && track.inbound ? 1 : 0;
+  let score = (distScore * 0.45) + (moveScore * 0.35) + (inboundScore * 0.15) + (stillScore * 0.05);
+  if (d < 0.7) score -= 0.35;
+  return score;
+}
+
+function pickActiveTrack(uiTracks) {
+  if (!uiTracks || !uiTracks.length) return null;
+  const ranked = [...uiTracks].sort((a, b) => scoreTrack(b) - scoreTrack(a));
+  return ranked[0] || null;
 }
 
 function mergeGateMeters(d) {
@@ -5948,8 +5992,10 @@ function renderSonarReturns(list, maxM) {
     const x = clamp(Number(track.distanceM || 0) / maxM, 0, 1) * width;
     const ratio = clamp(x / width, 0, 1);
     const halfCone = (height * (0.12 + (0.38 * ratio)));
-    const lane = sonarStableLane(track.id);
-    const y = clamp(centerY + lane * Math.max(4, halfCone - 12), 10, height - 10);
+    const laneOffsets = [-0.45, 0.0, 0.45];
+    const laneIdx = Math.abs(Number(track.id || 0)) % laneOffsets.length;
+    const lane = laneOffsets[laneIdx];
+    const y = clamp(centerY + lane * Math.max(6, halfCone - 12), 10, height - 10);
     const energy = clamp(trackEffectiveEnergy(track), 0, 100);
     const radius = 4 + (10 * (energy / 100.0));
     const createdMs = Number(track.createdMs || 0);
@@ -5984,7 +6030,18 @@ function renderSonarReturns(list, maxM) {
   }
 
   const hoverTrack = live.find((track) => track.id === radarHoverTrackId) || null;
-  const activeTrack = hoverTrack || live.find((track) => track.id === activeTrackId) || (live.length ? live[0] : null);
+  const locked = Date.now() < activeTrackLockedUntilMs;
+  let activeTrack = null;
+  if (hoverTrack) {
+    activeTrack = hoverTrack;
+  } else if (locked) {
+    activeTrack = live.find((track) => track.id === activeTrackId) || null;
+  } else {
+    activeTrack = pickActiveTrack(live);
+  }
+  if (!activeTrack) {
+    activeTrack = live.find((track) => track.id === activeTrackId) || (live.length ? live[0] : null);
+  }
   const activeMeta = activeTrack ? metaById[String(activeTrack.id)] : null;
   renderSonarCallout(activeTrack, activeMeta, maxM);
   return { active: activeTrack };
@@ -6935,7 +6992,16 @@ function initTrends() {
           '<div id="radar-cal-history" class="cal-history"></div>' +
         '</div>' +
         '<div id="sonar-wrap" class="sonar-wrap">' +
-          '<div id="sonar-cone" class="sonar-cone"><div id="sonar-layer" class="sonar-layer"></div></div>' +
+          '<div id="sonar-cone" class="sonar-cone">' +
+            '<div class="sonar-rings">' +
+              '<div class="sonar-ring" style="left:13.33%"></div><div class="sonar-ring-label" style="left:13.33%">Intimate 0–0.8m</div>' +
+              '<div class="sonar-ring" style="left:25%"></div><div class="sonar-ring-label" style="left:25%">Personal 0.8–1.5m</div>' +
+              '<div class="sonar-ring" style="left:50%"></div><div class="sonar-ring-label" style="left:50%">Interaction 1.5–3m</div>' +
+              '<div class="sonar-ring" style="left:83.33%"></div><div class="sonar-ring-label" style="left:83.33%">Room 3–5m</div>' +
+              '<div class="sonar-ring extended" style="left:100%"></div><div class="sonar-ring-label extended" style="left:100%">Extended 5m+</div>' +
+            '</div>' +
+            '<div id="sonar-layer" class="sonar-layer"></div>' +
+          '</div>' +
           '<div id="radar-target-float" class="sonar-callout hidden">' +
             '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
             '<div class="target-bars">' +
@@ -6945,6 +7011,7 @@ function initTrends() {
           '</div>' +
           '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
         '</div>' +
+        '<div class="sonar-legend">X = distance. Y = visual separation only.</div>' +
         '<div class="radar-readout">' +
           '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
           '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
@@ -7011,7 +7078,16 @@ function initTrends() {
         '<div id="radar-cal-history" class="cal-history"></div>' +
       '</div>' +
       '<div id="sonar-wrap" class="sonar-wrap">' +
-        '<div id="sonar-cone" class="sonar-cone"><div id="sonar-layer" class="sonar-layer"></div></div>' +
+        '<div id="sonar-cone" class="sonar-cone">' +
+          '<div class="sonar-rings">' +
+            '<div class="sonar-ring" style="left:13.33%"></div><div class="sonar-ring-label" style="left:13.33%">Intimate 0–0.8m</div>' +
+            '<div class="sonar-ring" style="left:25%"></div><div class="sonar-ring-label" style="left:25%">Personal 0.8–1.5m</div>' +
+            '<div class="sonar-ring" style="left:50%"></div><div class="sonar-ring-label" style="left:50%">Interaction 1.5–3m</div>' +
+            '<div class="sonar-ring" style="left:83.33%"></div><div class="sonar-ring-label" style="left:83.33%">Room 3–5m</div>' +
+            '<div class="sonar-ring extended" style="left:100%"></div><div class="sonar-ring-label extended" style="left:100%">Extended 5m+</div>' +
+          '</div>' +
+          '<div id="sonar-layer" class="sonar-layer"></div>' +
+        '</div>' +
         '<div id="radar-target-float" class="sonar-callout hidden">' +
           '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
           '<div class="target-bars">' +
@@ -7021,6 +7097,7 @@ function initTrends() {
         '</div>' +
         '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
       '</div>' +
+      '<div class="sonar-legend">X = distance. Y = visual separation only.</div>' +
       '<div class="radar-readout">' +
         '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
         '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
