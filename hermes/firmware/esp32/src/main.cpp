@@ -1092,6 +1092,14 @@ static void performSnapshotCapture(uint32_t now) {
   sensor->set_quality(sensor, SNAPSHOT_JPEG_QUALITY);
   delay(60);
 
+  for (int warmup = 0; warmup < 2; ++warmup) {
+    camera_fb_t *warmupFb = esp_camera_fb_get();
+    if (warmupFb) {
+      esp_camera_fb_return(warmupFb);
+    }
+    delay(30);
+  }
+
   camera_fb_t *fb = esp_camera_fb_get();
   int httpCode = -1;
   size_t postedBytes = 0;
