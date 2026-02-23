@@ -43,6 +43,26 @@ FRAME_PREFIX_RE = re.compile(r"^[A-Z]{2,8},")
 ESP_NET_KV_RE = re.compile(r"(wifist|rssi|ntp|ip)=([^,\s]+)")
 MAX_LEN = int(os.environ.get("HERMES_INGEST_MAX_LEN", "240"))
 INTEGRITY_WINDOWS = (10, 60)
+INGEST_DIAG_INTERVAL_SECS = 10.0
+
+FRAME_MARKERS = (
+    "RADAR,",
+    "HB,",
+    "ENV,",
+    "AIR,",
+    "LIGHT,",
+    "MIC,",
+    "ACK,",
+    "ESP,NET",
+    "LOG,",
+    "SENS,",
+    "EVT,",
+    "BTN,",
+    "DBG,",
+    "PROTO,",
+    "NACK,",
+    "SYS,",
+)
 
 EXPECTED_PREFIXES = {
     "HB": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
@@ -104,6 +124,9 @@ INGEST_STATS = {
     "prefix_counts": defaultdict(int),
     "parse_fail": 0,
     "truncated": 0,
+    "over_max_len": 0,
+    "no_newline": 0,
+    "concat_suspect": 0,
     "line_samples": deque(maxlen=5000),
 }
 
@@ -483,6 +506,20 @@ def bump_counter(counter: dict, key: str):
 def looks_like_frame(line: str) -> bool:
     return FRAME_PREFIX_RE.match(line) is not None
 
+def has_embedded_frame_marker(line: str) -> bool:
+    for marker in FRAME_MARKERS:
+        idx = line.find(marker)
+        if idx > 0:
+            return True
+    return False
+
+def percentile(values, pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * pct)))
+    return float(ordered[idx])
+
 def parse_ts_to_unix(ts: str):
     try:
         return datetime.datetime.fromisoformat(ts).timestamp()
@@ -666,6 +703,9 @@ def get_ingest_snapshot():
             "fps_1m": dict(fps_1m),
             "parse_fail": int(INGEST_STATS["parse_fail"]),
             "truncated": int(INGEST_STATS["truncated"]),
+            "over_max_len": int(INGEST_STATS["over_max_len"]),
+            "no_newline": int(INGEST_STATS["no_newline"]),
+            "concat_suspect": int(INGEST_STATS["concat_suspect"]),
         }
 
 def insert_typed_frames(conn: sqlite3.Connection, ts: str, ts_local: str, line: str):
@@ -1080,19 +1120,35 @@ def release_nrf_lock():
         pass
     nrf_lock_handle = None
 
-def handle_line(conn: sqlite3.Connection, line: str):
+def handle_line(conn: sqlite3.Connection, line: str, *, had_newline: bool = True):
+    t0 = time.perf_counter()
+    parse_ms = 0.0
+    insert_ms = 0.0
+    commit_ms = 0.0
+    effective_prefix = "UNKNOWN"
+
     dt = utc_now()
     ts = dt.isoformat()
     ts_local = local_now().isoformat()
     non_ascii_count = sum(1 for c in line if ord(c) > 127)
     decode_replacement_count = line.count("\ufffd")
     corrupt = not looks_like_frame(line)
-    truncated_line = len(line) > MAX_LEN
+    over_max_len = len(line) > MAX_LEN
+    concat_suspect = has_embedded_frame_marker(line)
+    truncated_line = over_max_len and ((not had_newline) or concat_suspect)
 
-    if truncated_line:
+    if over_max_len or (not had_newline) or concat_suspect or truncated_line:
         with stats_lock:
-            INGEST_STATS["truncated"] += 1
+            if over_max_len:
+                INGEST_STATS["over_max_len"] += 1
+            if not had_newline:
+                INGEST_STATS["no_newline"] += 1
+            if concat_suspect:
+                INGEST_STATS["concat_suspect"] += 1
+            if truncated_line:
+                INGEST_STATS["truncated"] += 1
 
+    insert_started = time.perf_counter()
     with open(raw_path(dt), "a", encoding="utf-8") as f:
         f.write(f"{ts}\t{line}\n")
 
@@ -1100,8 +1156,11 @@ def handle_line(conn: sqlite3.Connection, line: str):
         "INSERT INTO raw_lines (ts_utc, ts_local, source, line) VALUES (?, ?, ?, ?)",
         (ts, ts_local, "nrf", line),
     )
+    insert_ms += (time.perf_counter() - insert_started) * 1000.0
 
     if corrupt:
+        effective_prefix = "CORRUPT"
+        insert_started = time.perf_counter()
         with stats_lock:
             INGEST_STATS["prefix_counts"]["CORRUPT"] += 1
             INGEST_STATS["line_samples"].append(("CORRUPT", time.time()))
@@ -1116,21 +1175,41 @@ def handle_line(conn: sqlite3.Connection, line: str):
             parse_failed=True,
         )
         maybe_log_parse_fail_summary(time.time())
+        insert_ms += (time.perf_counter() - insert_started) * 1000.0
+        commit_started = time.perf_counter()
         conn.commit()
+        commit_ms += (time.perf_counter() - commit_started) * 1000.0
         with stats_lock:
             stats["lines_in"] += 1
             stats["last_line_ts"] = ts
             if stats["lines_in"] % 50 == 0:
                 log_info(f"[hermesd] lines_in={stats['lines_in']}")
-        return
+        total_ms = (time.perf_counter() - t0) * 1000.0
+        return {
+            "prefix": effective_prefix,
+            "parse_ms": parse_ms,
+            "insert_ms": insert_ms,
+            "commit_ms": commit_ms,
+            "total_ms": total_ms,
+            "over_max_len": over_max_len,
+            "truncated": truncated_line,
+            "concat_suspect": concat_suspect,
+            "had_newline": had_newline,
+            "line_len": len(line),
+        }
 
+    parse_started = time.perf_counter()
     kind, kvs = parse_line(line)
+    oled_status = parse_oled_status(line)
+    reason, prefix = classify_parse_failure(line)
+    parse_ms += (time.perf_counter() - parse_started) * 1000.0
+
+    insert_started = time.perf_counter()
     if kind and kvs:
         conn.executemany(
             "INSERT INTO metrics (ts_utc, ts_local, source, kind, key, value) VALUES (?, ?, ?, ?, ?, ?)",
             [(ts, ts_local, "nrf", kind, k, v) for (k, v) in kvs],
         )
-    oled_status = parse_oled_status(line)
     if oled_status:
         conn.execute(
             """
@@ -1149,7 +1228,6 @@ def handle_line(conn: sqlite3.Connection, line: str):
             ),
         )
     insert_typed_frames(conn, ts, ts_local, line)
-    reason, prefix = classify_parse_failure(line)
     if reason:
         with stats_lock:
             INGEST_STATS["parse_fail"] += 1
@@ -1167,18 +1245,50 @@ def handle_line(conn: sqlite3.Connection, line: str):
         parse_failed=bool(reason),
     )
     maybe_log_parse_fail_summary(time.time())
+    insert_ms += (time.perf_counter() - insert_started) * 1000.0
+    commit_started = time.perf_counter()
     conn.commit()
+    commit_ms += (time.perf_counter() - commit_started) * 1000.0
     with stats_lock:
         stats["lines_in"] += 1
         stats["last_line_ts"] = ts
         if stats["lines_in"] % 50 == 0:
             log_info(f"[hermesd] lines_in={stats['lines_in']}")
+    total_ms = (time.perf_counter() - t0) * 1000.0
+    return {
+        "prefix": effective_prefix,
+        "parse_ms": parse_ms,
+        "insert_ms": insert_ms,
+        "commit_ms": commit_ms,
+        "total_ms": total_ms,
+        "over_max_len": over_max_len,
+        "truncated": truncated_line,
+        "concat_suspect": concat_suspect,
+        "had_newline": had_newline,
+        "line_len": len(line),
+    }
 
 def serial_worker(shutdown: threading.Event, out_q: queue.Queue):
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
     ser = None
     last_cleanup = 0.0
+    diag_window = {
+        "start": time.time(),
+        "lines": 0,
+        "bytes": 0,
+        "no_newline": 0,
+        "over_max_len": 0,
+        "truncated": 0,
+        "concat_suspect": 0,
+        "timing_parse_ms": [],
+        "timing_insert_ms": [],
+        "timing_commit_ms": [],
+        "timing_total_ms": [],
+        "prefix_counts": defaultdict(int),
+        "over_max_prefix_counts": defaultdict(int),
+        "max_len_by_prefix": {},
+    }
     while not shutdown.is_set():
         if ser is None:
             try:
@@ -1197,9 +1307,94 @@ def serial_worker(shutdown: threading.Event, out_q: queue.Queue):
         try:
             line_bytes = ser.readline()
             if line_bytes:
+                had_newline = line_bytes.endswith(b"\n") or line_bytes.endswith(b"\r")
                 line = line_bytes.decode(errors="replace").strip()
                 if line:
-                    handle_line(conn, line)
+                    info = handle_line(conn, line, had_newline=had_newline)
+                    if info:
+                        diag_window["lines"] += 1
+                        diag_window["bytes"] += len(line_bytes)
+                        if not info.get("had_newline", True):
+                            diag_window["no_newline"] += 1
+                        if info.get("over_max_len"):
+                            diag_window["over_max_len"] += 1
+                        if info.get("truncated"):
+                            diag_window["truncated"] += 1
+                        if info.get("concat_suspect"):
+                            diag_window["concat_suspect"] += 1
+                        prefix = info.get("prefix", "UNKNOWN")
+                        diag_window["prefix_counts"][prefix] += 1
+                        if info.get("over_max_len"):
+                            diag_window["over_max_prefix_counts"][prefix] += 1
+                        line_len = int(info.get("line_len", 0) or 0)
+                        prev_max = diag_window["max_len_by_prefix"].get(prefix, 0)
+                        if line_len > prev_max:
+                            diag_window["max_len_by_prefix"][prefix] = line_len
+                        diag_window["timing_parse_ms"].append(float(info.get("parse_ms", 0.0) or 0.0))
+                        diag_window["timing_insert_ms"].append(float(info.get("insert_ms", 0.0) or 0.0))
+                        diag_window["timing_commit_ms"].append(float(info.get("commit_ms", 0.0) or 0.0))
+                        diag_window["timing_total_ms"].append(float(info.get("total_ms", 0.0) or 0.0))
+
+            now_diag = time.time()
+            elapsed_diag = now_diag - diag_window["start"]
+            if elapsed_diag >= INGEST_DIAG_INTERVAL_SECS:
+                lines = diag_window["lines"]
+                fps = (lines / elapsed_diag) if elapsed_diag > 0 else 0.0
+                parse_vals = diag_window["timing_parse_ms"]
+                insert_vals = diag_window["timing_insert_ms"]
+                commit_vals = diag_window["timing_commit_ms"]
+                total_vals = diag_window["timing_total_ms"]
+
+                top_prefixes = sorted(
+                    diag_window["prefix_counts"].items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:4]
+                top_prefix_text = "|".join([f"{k}:{v}" for k, v in top_prefixes]) if top_prefixes else "none"
+
+                over_prefixes = sorted(
+                    diag_window["over_max_prefix_counts"].items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:4]
+                over_tokens = []
+                for prefix, count in over_prefixes:
+                    max_len = diag_window["max_len_by_prefix"].get(prefix, 0)
+                    over_tokens.append(f"{prefix}:{count}(max={max_len})")
+                over_text = "|".join(over_tokens) if over_tokens else "none"
+
+                parse_avg = (sum(parse_vals) / len(parse_vals)) if parse_vals else 0.0
+                insert_avg = (sum(insert_vals) / len(insert_vals)) if insert_vals else 0.0
+                commit_avg = (sum(commit_vals) / len(commit_vals)) if commit_vals else 0.0
+                total_avg = (sum(total_vals) / len(total_vals)) if total_vals else 0.0
+
+                log_info(
+                    "[hermesd] ingest10s "
+                    f"lines={lines} fps={fps:.2f} bytes={diag_window['bytes']} "
+                    f"no_newline={diag_window['no_newline']} over_max_len={diag_window['over_max_len']} "
+                    f"truncated={diag_window['truncated']} concat_suspect={diag_window['concat_suspect']} "
+                    f"prefix_top={top_prefix_text} over_max_by_prefix={over_text} "
+                    f"parse_ms(avg/p95)={parse_avg:.3f}/{percentile(parse_vals, 0.95):.3f} "
+                    f"insert_ms(avg/p95)={insert_avg:.3f}/{percentile(insert_vals, 0.95):.3f} "
+                    f"commit_ms(avg/p95)={commit_avg:.3f}/{percentile(commit_vals, 0.95):.3f} "
+                    f"total_ms(avg/p95/max)={total_avg:.3f}/{percentile(total_vals, 0.95):.3f}/{(max(total_vals) if total_vals else 0.0):.3f}"
+                )
+                diag_window = {
+                    "start": now_diag,
+                    "lines": 0,
+                    "bytes": 0,
+                    "no_newline": 0,
+                    "over_max_len": 0,
+                    "truncated": 0,
+                    "concat_suspect": 0,
+                    "timing_parse_ms": [],
+                    "timing_insert_ms": [],
+                    "timing_commit_ms": [],
+                    "timing_total_ms": [],
+                    "prefix_counts": defaultdict(int),
+                    "over_max_prefix_counts": defaultdict(int),
+                    "max_len_by_prefix": {},
+                }
 
             while True:
                 try:
