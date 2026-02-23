@@ -3749,7 +3749,8 @@ HTML_PAGE = """
     .hp-tab.active { background: #1f5f99; color: #fff; border-color: #1f5f99; }
     .hp-badges { justify-content: flex-start; }
     .radar-now-wrap { margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
-    #radar-now-pane { padding-bottom: 10px; }
+    #radar-now-pane { padding-bottom: 8px; }
+    .hp-card .radar-now-wrap { padding-bottom: 8px; }
     .hp-card .radar-bodies-line { margin-top: 6px; margin-bottom: 8px; }
     .radar-bodies-line { font-size: 13px; font-weight: 600; color: #d6e4f3; }
     .radar-last-seen { margin-top: -3px; font-size: 11px; color: #8ea1b3; }
@@ -3758,7 +3759,9 @@ HTML_PAGE = """
     .range-strip { position: relative; padding: 10px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; transition: opacity 150ms ease-in-out; }
     .range-strip.no-target { opacity: 0.48; }
     .sonar-wrap { position: relative; margin-top: 12px; margin-bottom: 14px; min-height: 170px; }
+    .hp-card .sonar-wrap { height: 140px; min-height: 140px; margin-top: 10px; margin-bottom: 10px; }
     .sonar-cone { position: relative; width: calc(100% - 286px); min-width: 180px; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; box-sizing: border-box; padding-right: 24px; }
+    .hp-card .sonar-cone { height: 140px; }
     .sonar-cone::before { content: ''; position: absolute; inset: 10px; background: linear-gradient(90deg, rgba(121,192,255,0.22), rgba(121,192,255,0.08)); clip-path: polygon(0% 48%, 100% 10%, 100% 90%); border-radius: 8px; }
     .sonar-rings { position: absolute; inset: 10px 56px 10px 10px; pointer-events: none; z-index: 1; }
     .sonar-ring { position: absolute; top: 8%; bottom: 8%; width: 1px; background: rgba(121,192,255,0.22); }
@@ -3837,7 +3840,7 @@ HTML_PAGE = """
     .radar-target-title { color: #d6e4f3; font-weight: 700; margin-bottom: 2px; }
     .radar-target-row { display: flex; justify-content: space-between; gap: 10px; }
     .radar-target-row .label { color: #8ea1b3; }
-    .hp-card .radar-readout { margin-top: 12px; padding-top: 6px; }
+    .hp-card .radar-readout { margin-top: 10px; padding-top: 0; }
     .radar-readout { margin-top: 2px; font-size: 12px; color: #b8c7d8; line-height: 1.6; }
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
@@ -3862,6 +3865,12 @@ HTML_PAGE = """
     .radar-strip-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .radar-strip-status { color: #d8e6f4; font-size: 12px; font-weight: 600; }
     .radar-strip-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+    .hp-card .radar-long-notes,
+    .hp-card .radar-state,
+    .hp-card .radar-returns-strip,
+    .hp-card .still-presence-block {
+      display: none !important;
+    }
     .home2-grid { display: grid; grid-template-columns: minmax(640px, 2fr) minmax(520px, 2.2fr); gap: 14px; width: 100%; align-items: stretch; }
     .home2-left { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
     .home2-combo-card { min-width: 0; }
@@ -6330,24 +6339,50 @@ function updateRadarReadout(state) {
   if (selfNoteEl) {
     selfNoteEl.textContent = selfSuppressed ? 'Self suppressed' : '';
   }
-  renderRadarReturnStrip(radarTracksNow, alive);
+  renderRadarReturnStrip(radarTracksNow, alive, {
+    moveState: !!moveState,
+    statState: !!statState,
+    effectiveTarget: Number(effectiveTarget || 0),
+    selfSuppressed: !!selfSuppressed,
+  });
 }
 
-function renderRadarReturnStrip(tracksPayload, radarAlive) {
+function renderRadarReturnStrip(tracksPayload, radarAlive, opts) {
   const statusEl = document.getElementById('radar-strip-status');
   const badgesEl = document.getElementById('radar-strip-badges');
   if (!statusEl || !badgesEl) return;
+  const options = opts || {};
+  const moveState = !!options.moveState;
+  const statState = !!options.statState;
+  const effectiveTarget = Number(options.effectiveTarget || 0);
+  const selfSuppressed = !!options.selfSuppressed;
+
   if (!radarAlive) {
-    statusEl.textContent = 'Clear';
+    statusEl.textContent = 'State: Radar offline';
     badgesEl.innerHTML = '<span class="chip chip-neutral">Clutter: Unknown</span>';
     return;
   }
 
   const activeTrack = getActiveTrack();
-  if (activeTrack) {
-    statusEl.textContent = (activeTrack.kind === 'move' ? 'Moving at ' : 'Still at ') + activeTrack.distanceM.toFixed(1) + ' m';
+  let presenceText = 'No presence';
+  if (effectiveTarget !== 0) {
+    if (moveState && statState) presenceText = 'Moving+Still';
+    else if (moveState) presenceText = 'Moving';
+    else if (statState) presenceText = 'Still';
+    else presenceText = 'Presence';
+  }
+  if (activeTrack && Number.isFinite(activeTrack.distanceM)) {
+    presenceText += ' at ' + Number(activeTrack.distanceM).toFixed(1) + 'm';
+  }
+  if (selfSuppressed) {
+    presenceText += ' · Self suppressed';
+  }
+  statusEl.textContent = 'State: ' + presenceText;
+
+  if (!activeTrack && effectiveTarget === 0) {
+    statusEl.textContent = 'State: No presence' + (selfSuppressed ? ' · Self suppressed' : '');
   } else {
-    statusEl.textContent = 'Clear';
+    statusEl.textContent = 'State: ' + presenceText;
   }
 
   const clutterRaw = String((tracksPayload && tracksPayload.clutter_level) || 'unknown').toLowerCase();
@@ -7018,7 +7053,6 @@ function initTrends() {
             '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
             '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
           '</div>' +
-          '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
           '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
         '</div>' +
       '</div>' +
@@ -7103,7 +7137,6 @@ function initTrends() {
           '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
           '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
         '</div>' +
-        '<div id="radar-now-state" class="radar-state">Radar offline</div>' +
         '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
       '</div>' +
     '</div>' +
