@@ -3763,8 +3763,9 @@ HTML_PAGE = """
     .sonar-rings { position: absolute; inset: 10px; pointer-events: none; z-index: 1; }
     .sonar-ring { position: absolute; top: 8%; bottom: 8%; width: 1px; background: rgba(121,192,255,0.22); }
     .sonar-ring.extended { background: rgba(121,192,255,0.10); }
-    .sonar-ring-label { position: absolute; top: 2px; transform: translateX(-50%); font-size: 10px; color: #8ea1b3; white-space: nowrap; }
-    .sonar-ring-label.extended { opacity: 0.7; }
+    .sonar-ring-label-top { position: absolute; top: 2px; transform: translateX(-50%); font-size: 10px; color: #8ea1b3; white-space: nowrap; }
+    .sonar-ring-label-bottom { position: absolute; bottom: 2px; transform: translateX(-50%); font-size: 10px; color: #7f92a6; white-space: nowrap; }
+    .sonar-ring-label-top.extended, .sonar-ring-label-bottom.extended { opacity: 0.7; }
     .sonar-layer { position: absolute; inset: 0; }
     .sonar-dot { position: absolute; border-radius: 999px; pointer-events: auto; transition: left 150ms ease, top 150ms ease, opacity 150ms ease; }
     .sonar-dot.dot-move { background: rgba(132, 210, 255, 0.98); box-shadow: 0 0 0 4px rgba(76, 153, 220, 0.24); }
@@ -6994,11 +6995,11 @@ function initTrends() {
         '<div id="sonar-wrap" class="sonar-wrap">' +
           '<div id="sonar-cone" class="sonar-cone">' +
             '<div class="sonar-rings">' +
-              '<div class="sonar-ring" style="left:13.33%"></div><div class="sonar-ring-label" style="left:13.33%">Intimate 0–0.8m</div>' +
-              '<div class="sonar-ring" style="left:25%"></div><div class="sonar-ring-label" style="left:25%">Personal 0.8–1.5m</div>' +
-              '<div class="sonar-ring" style="left:50%"></div><div class="sonar-ring-label" style="left:50%">Interaction 1.5–3m</div>' +
-              '<div class="sonar-ring" style="left:83.33%"></div><div class="sonar-ring-label" style="left:83.33%">Room 3–5m</div>' +
-              '<div class="sonar-ring extended" style="left:100%"></div><div class="sonar-ring-label extended" style="left:100%">Extended 5m+</div>' +
+              '<div class="sonar-ring" style="left:13.33%"></div><div class="sonar-ring-label-top" style="left:13.33%">Intimate</div><div class="sonar-ring-label-bottom" style="left:13.33%">0–0.8m</div>' +
+              '<div class="sonar-ring" style="left:25%"></div><div class="sonar-ring-label-top" style="left:25%">Personal</div><div class="sonar-ring-label-bottom" style="left:25%">0.8–1.5m</div>' +
+              '<div class="sonar-ring" style="left:50%"></div><div class="sonar-ring-label-top" style="left:50%">Interaction</div><div class="sonar-ring-label-bottom" style="left:50%">1.5–3m</div>' +
+              '<div class="sonar-ring" style="left:83.33%"></div><div class="sonar-ring-label-top" style="left:83.33%">Room</div><div class="sonar-ring-label-bottom" style="left:83.33%">3–5m</div>' +
+              '<div class="sonar-ring extended" style="left:100%"></div><div class="sonar-ring-label-top extended" style="left:100%">Extended</div><div class="sonar-ring-label-bottom extended" style="left:100%">5m+</div>' +
             '</div>' +
             '<div id="sonar-layer" class="sonar-layer"></div>' +
           '</div>' +
@@ -7080,11 +7081,11 @@ function initTrends() {
       '<div id="sonar-wrap" class="sonar-wrap">' +
         '<div id="sonar-cone" class="sonar-cone">' +
           '<div class="sonar-rings">' +
-            '<div class="sonar-ring" style="left:13.33%"></div><div class="sonar-ring-label" style="left:13.33%">Intimate 0–0.8m</div>' +
-            '<div class="sonar-ring" style="left:25%"></div><div class="sonar-ring-label" style="left:25%">Personal 0.8–1.5m</div>' +
-            '<div class="sonar-ring" style="left:50%"></div><div class="sonar-ring-label" style="left:50%">Interaction 1.5–3m</div>' +
-            '<div class="sonar-ring" style="left:83.33%"></div><div class="sonar-ring-label" style="left:83.33%">Room 3–5m</div>' +
-            '<div class="sonar-ring extended" style="left:100%"></div><div class="sonar-ring-label extended" style="left:100%">Extended 5m+</div>' +
+            '<div class="sonar-ring" style="left:13.33%"></div><div class="sonar-ring-label-top" style="left:13.33%">Intimate</div><div class="sonar-ring-label-bottom" style="left:13.33%">0–0.8m</div>' +
+            '<div class="sonar-ring" style="left:25%"></div><div class="sonar-ring-label-top" style="left:25%">Personal</div><div class="sonar-ring-label-bottom" style="left:25%">0.8–1.5m</div>' +
+            '<div class="sonar-ring" style="left:50%"></div><div class="sonar-ring-label-top" style="left:50%">Interaction</div><div class="sonar-ring-label-bottom" style="left:50%">1.5–3m</div>' +
+            '<div class="sonar-ring" style="left:83.33%"></div><div class="sonar-ring-label-top" style="left:83.33%">Room</div><div class="sonar-ring-label-bottom" style="left:83.33%">3–5m</div>' +
+            '<div class="sonar-ring extended" style="left:100%"></div><div class="sonar-ring-label-top extended" style="left:100%">Extended</div><div class="sonar-ring-label-bottom extended" style="left:100%">5m+</div>' +
           '</div>' +
           '<div id="sonar-layer" class="sonar-layer"></div>' +
         '</div>' +
