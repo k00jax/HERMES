@@ -3758,9 +3758,9 @@ HTML_PAGE = """
     .range-strip { position: relative; padding: 10px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; transition: opacity 150ms ease-in-out; }
     .range-strip.no-target { opacity: 0.48; }
     .sonar-wrap { position: relative; margin-top: 12px; margin-bottom: 14px; min-height: 170px; }
-    .sonar-cone { position: relative; width: calc(100% - 286px); min-width: 180px; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; }
+    .sonar-cone { position: relative; width: calc(100% - 286px); min-width: 180px; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; box-sizing: border-box; padding-right: 24px; }
     .sonar-cone::before { content: ''; position: absolute; inset: 10px; background: linear-gradient(90deg, rgba(121,192,255,0.22), rgba(121,192,255,0.08)); clip-path: polygon(0% 48%, 100% 10%, 100% 90%); border-radius: 8px; }
-    .sonar-rings { position: absolute; inset: 10px; pointer-events: none; z-index: 1; }
+    .sonar-rings { position: absolute; inset: 10px 56px 10px 10px; pointer-events: none; z-index: 1; }
     .sonar-ring { position: absolute; top: 8%; bottom: 8%; width: 1px; background: rgba(121,192,255,0.22); }
     .sonar-ring.extended { background: rgba(121,192,255,0.10); }
     .sonar-ring-label-top { position: absolute; top: 2px; transform: translateX(-50%); font-size: 10px; color: #8ea1b3; white-space: nowrap; }
