@@ -3985,15 +3985,15 @@ HTML_PAGE = """
     .chip-note { border-color: #4a5f80; color: #b9cbe3; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-actions { display: inline-flex; gap: 6px; }
     .event-actions button { padding: 4px 8px; font-size: 11px; }
-    .hp-card { min-width: 320px; }
+    .hp-card { min-width: 320px; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+    .hp-card .radar-now-wrap { flex: 1 1 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding-bottom: 8px; }
     .hp-head { align-items: center; }
     .hp-tabs { display: flex; gap: 8px; align-items: center; margin-left: auto; }
     .hp-tab { flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; white-space: nowrap; background: #111820; color: #9fb3c8; border: 1px solid #26313d; cursor: pointer; }
     .hp-tab.active { background: #1f5f99; color: #fff; border-color: #1f5f99; }
     .hp-badges { justify-content: flex-start; }
-    .radar-now-wrap { margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
+    .radar-now-wrap { margin-top: 4px; display: flex; flex-direction: column; gap: 8px; min-width: 0; overflow: hidden; }
     #radar-now-pane { padding-bottom: 8px; }
-    .hp-card .radar-now-wrap { padding-bottom: 8px; }
     .hp-card .radar-bodies-line { margin-top: 6px; margin-bottom: 8px; }
     .radar-bodies-line { font-size: 13px; font-weight: 600; color: #d6e4f3; }
     .radar-last-seen { margin-top: -3px; font-size: 11px; color: #8ea1b3; }
@@ -4001,10 +4001,10 @@ HTML_PAGE = """
     .hp-card .range-strip { margin-top: 12px; margin-bottom: 14px; }
     .range-strip { position: relative; padding: 10px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; transition: opacity 150ms ease-in-out; }
     .range-strip.no-target { opacity: 0.48; }
-    .sonar-wrap { position: relative; margin-top: 12px; margin-bottom: 14px; min-height: 170px; }
-    .hp-card .sonar-wrap { height: 140px; min-height: 140px; margin-top: 10px; margin-bottom: 10px; }
-    .sonar-cone { position: relative; width: calc(100% - 286px); min-width: 180px; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; box-sizing: border-box; padding-right: 24px; }
-    .hp-card .sonar-cone { height: 140px; width: calc(100% - 352px); }
+    .sonar-wrap { display: flex; align-items: stretch; gap: 0; position: relative; margin-top: 12px; margin-bottom: 14px; min-height: 170px; overflow: hidden; }
+    .hp-card .sonar-wrap { flex: 1 1 0; min-height: 0; margin-top: 8px; margin-bottom: 0; }
+    .sonar-cone { flex: 1 1 0; min-width: 0; position: relative; height: 170px; border-radius: 10px; border: 1px solid #26313d; background: #0f1620; overflow: hidden; box-sizing: border-box; padding-right: 24px; }
+    .hp-card .sonar-cone { height: 100%; }
     .sonar-cone::before { content: ''; position: absolute; inset: 10px; background: linear-gradient(90deg, rgba(121,192,255,0.22), rgba(121,192,255,0.08)); clip-path: polygon(0% 48%, 100% 10%, 100% 90%); border-radius: 8px; }
     .sonar-rings { position: absolute; inset: 10px 56px 10px 10px; pointer-events: none; z-index: 1; }
     .sonar-ring { position: absolute; top: 8%; bottom: 8%; width: 1px; background: rgba(121,192,255,0.22); }
@@ -4020,8 +4020,8 @@ HTML_PAGE = """
     .sonar-dot.is-active { box-shadow: 0 0 0 4px rgba(121,192,255,0.25), 0 0 18px rgba(121,192,255,0.30); }
     .sonar-dot.is-moving { animation: hermesPulse 1.1s ease-in-out infinite; }
     .sonar-dot.is-flicker { animation: sonarFlicker 0.45s steps(2, end) infinite; }
-    .sonar-callout { position: relative; width: 260px; flex-shrink: 0; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; z-index: 6; transition: opacity 120ms ease; display: flex; flex-direction: column; justify-content: center; }
-    .hp-card .sonar-callout { width: 320px; }
+    .sonar-callout { position: relative; width: 260px; min-width: 150px; max-width: 380px; flex-shrink: 0; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; z-index: 6; transition: opacity 120ms ease; display: flex; flex-direction: column; justify-content: center; box-sizing: border-box; }
+    .hp-card .sonar-callout { width: 260px; }
     .sonar-leaderline { position: absolute; height: 1px; background: rgba(121,192,255,0.45); transform-origin: 0 50%; z-index: 5; }
     .sonar-resize-handle { width: 8px; cursor: col-resize; background: transparent; position: relative; z-index: 10; display: flex; align-items: center; justify-content: center; }
     .sonar-resize-handle::after { content: ''; width: 2px; height: 24px; background: #26313d; border-radius: 2px; transition: background 150ms ease; }
@@ -4043,7 +4043,7 @@ HTML_PAGE = """
     .zone-marker.is-active { box-shadow: 0 0 0 4px rgba(121,192,255,0.25), 0 0 18px rgba(121,192,255,0.25); }
     .zone-marker-still { background: rgba(102, 167, 235, 0.95); box-shadow: 0 0 0 4px rgba(62, 112, 182, 0.22); }
     .zone-marker.hidden { display: none; }
-    .radar-target-float { position: absolute; transform: translateX(-50%); width: 260px; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; pointer-events: none; z-index: 5; box-shadow: 0 10px 24px rgba(0,0,0,0.35); transition: opacity 150ms ease; }
+    .radar-target-float { position: relative; width: 260px; background: #0f1620; border: 1px solid #26313d; border-radius: 12px; padding: 10px 12px; font-size: 12px; z-index: 5; transition: opacity 150ms ease; box-sizing: border-box; }
     .radar-target-float .target-top { display: grid; grid-template-columns: 1fr; gap: 2px; margin-bottom: 8px; }
     .target-distance { font-weight: 700; font-size: 13px; }
     .target-zone { opacity: 0.85; }
@@ -4087,7 +4087,7 @@ HTML_PAGE = """
     .radar-target-title { color: #d6e4f3; font-weight: 700; margin-bottom: 2px; }
     .radar-target-row { display: flex; justify-content: space-between; gap: 10px; }
     .radar-target-row .label { color: #8ea1b3; }
-    .hp-card .radar-readout { margin-top: 10px; padding-top: 0; }
+    .hp-card .radar-readout { margin-top: 0; margin-bottom: 6px; padding-top: 0; }
     .radar-readout { margin-top: 2px; font-size: 12px; color: #b8c7d8; line-height: 1.6; }
     .radar-line { display: flex; justify-content: space-between; gap: 10px; }
     .radar-label { color: #8ea1b3; }
@@ -4131,7 +4131,7 @@ HTML_PAGE = """
     .home2-metric .trend-badges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; align-content: start; min-height: 28px; }
     .home2-metric .trend-badges .badge,
     .home2-metric .trend-badges .pill { text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; padding: 3px 6px; }
-    .home2-presence { min-width: 0; }
+    .home2-presence { min-width: 0; overflow: hidden; }
     .home2-vision-card { min-width: 0; display: flex; flex-direction: column; }
     .home2-vision-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
     .home2-vision-kv { border: 1px solid #26313d; border-radius: 8px; background: #0f1620; padding: 8px; }
@@ -6495,13 +6495,15 @@ function renderSonarCallout(activeTrack, dotMeta, maxM) {
   if (!wrapEl || !coneEl || !floatEl || !lineEl) return;
 
   if (!activeTrack || !dotMeta) {
-    floatEl.classList.add('hidden');
+    floatEl.style.opacity = '0';
+    floatEl.style.pointerEvents = 'none';
     lineEl.classList.add('hidden');
     radarFloatXSmoothed = null;
     return;
   }
 
-  floatEl.classList.remove('hidden');
+  floatEl.style.opacity = '1';
+  floatEl.style.pointerEvents = '';
   lineEl.classList.remove('hidden');
 
   const distance = Number(activeTrack.distanceM || 0);
@@ -6530,21 +6532,20 @@ function renderSonarCallout(activeTrack, dotMeta, maxM) {
   if (mvBarEl) mvBarEl.style.width = moveEnergy + '%';
   if (stBarEl) stBarEl.style.width = stillEnergy + '%';
 
-  const coneWidth = coneEl.clientWidth || 1;
-  const targetX = coneWidth + 18;
-  if (radarFloatXSmoothed == null) radarFloatXSmoothed = targetX;
-  radarFloatXSmoothed = (radarFloatXSmoothed * 0.7) + (targetX * 0.3);
-  floatEl.style.left = radarFloatXSmoothed + 'px';
-
-  const calloutHeight = floatEl.offsetHeight || 92;
+  // Leaderline: draw from the dot (inside coneEl) to the left edge of the callout.
+  // All coordinates are relative to coneEl (which is position:relative).
+  const coneRect = coneEl.getBoundingClientRect();
+  const floatRect = floatEl.getBoundingClientRect();
   const coneHeight = coneEl.clientHeight || 150;
-  const top = clamp(dotMeta.y - (calloutHeight / 2), 4, Math.max(4, coneHeight - calloutHeight - 4));
-  floatEl.style.top = top + 'px';
+  const calloutHeight = floatRect.height || 92;
+
+  // x2: left edge of callout relative to coneEl
+  const x2 = floatRect.left - coneRect.left;
+  // y2: vertical center of callout relative to coneEl
+  const y2 = floatRect.top - coneRect.top + calloutHeight / 2;
 
   const x1 = dotMeta.x;
   const y1 = dotMeta.y;
-  const x2 = radarFloatXSmoothed;
-  const y2 = top + (calloutHeight / 2);
   const dx = x2 - x1;
   const dy = y2 - y1;
   const len = Math.max(2, Math.sqrt((dx * dx) + (dy * dy)));
@@ -6553,6 +6554,43 @@ function renderSonarCallout(activeTrack, dotMeta, maxM) {
   lineEl.style.top = y1 + 'px';
   lineEl.style.width = len + 'px';
   lineEl.style.transform = 'rotate(' + angle.toFixed(2) + 'deg)';
+}
+
+function initSonarResize() {
+  const handle = document.getElementById('sonar-resize-handle');
+  const callout = document.getElementById('radar-target-float');
+  const wrap = document.getElementById('sonar-wrap');
+  if (!handle || !callout || !wrap) return;
+
+  let isResizing = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  handle.addEventListener('mousedown', function(e) {
+    isResizing = true;
+    startX = e.clientX;
+    startWidth = callout.getBoundingClientRect().width;
+    handle.classList.add('is-resizing');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!isResizing) return;
+    var dx = startX - e.clientX;
+    var maxW = wrap.getBoundingClientRect().width - 180 - 8;
+    var newWidth = Math.max(150, Math.min(startWidth + dx, maxW));
+    callout.style.width = newWidth + 'px';
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!isResizing) return;
+    isResizing = false;
+    handle.classList.remove('is-resizing');
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+  });
 }
 
 function renderSonarReturns(list, maxM) {
@@ -7616,6 +7654,15 @@ function initTrends() {
       '<div id="radar-last-seen" class="radar-last-seen">Last seen: —</div>' +
       '<div id="radar-cycle-hint" class="radar-cycle-hint hidden">Click bar to cycle target</div>' +
       '<div id="radar-now-pane" class="radar-now-wrap">' +
+        '<div class="radar-readout">' +
+          '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
+          '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
+          '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">' +
+            '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
+            '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
+          '</div>' +
+          '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
+        '</div>' +
         '<div id="radar-cal-panel" class="cal-panel hidden">' +
           '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
           '<div class="cal-guidance">Grade thresholds: A &lt; 5 false, B &lt; 20 false, C ≥ 20 false.</div>' +
@@ -7648,6 +7695,7 @@ function initTrends() {
               '<div class="sonar-ring extended" style="left:100%"></div><div class="sonar-ring-label-top extended" style="left:100%">Extended</div><div class="sonar-ring-label-bottom extended" style="left:100%">5m+</div>' +
             '</div>' +
             '<div id="sonar-layer" class="sonar-layer"></div>' +
+            '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
           '</div>' +
           '<div id="sonar-resize-handle" class="sonar-resize-handle"></div>' +
           '<div id="radar-target-float" class="sonar-callout" style="opacity: 0;">' +
@@ -7657,16 +7705,6 @@ function initTrends() {
               '<div class="tbar"><div class="tbar-label">Still</div><div class="tbar-track"><div id="radar-float-still-bar" class="tbar-fill"></div></div><div id="radar-float-still-val" class="tbar-val">0</div></div>' +
             '</div>' +
           '</div>' +
-          '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
-        '</div>' +
-        '<div class="radar-readout">' +
-          '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
-          '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
-          '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">' +
-            '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
-            '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
-          '</div>' +
-          '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
         '</div>' +
       '</div>' +
       '<div id="radar-history-pane" class="hidden">' +
@@ -7682,6 +7720,7 @@ function initTrends() {
     initHome2LayoutControls();
     radarViewButtonsActive();
     initChartResizeObserver();
+    initSonarResize();
     return;
   }
 
@@ -7699,6 +7738,15 @@ function initTrends() {
     '<div id="radar-last-seen" class="radar-last-seen">Last seen: —</div>' +
     '<div id="radar-cycle-hint" class="radar-cycle-hint hidden">Click bar to cycle target</div>' +
     '<div id="radar-now-pane" class="radar-now-wrap">' +
+      '<div class="radar-readout">' +
+        '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
+        '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
+        '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">' +
+          '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
+          '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
+        '</div>' +
+        '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
+      '</div>' +
       '<div id="radar-cal-panel" class="cal-panel hidden">' +
         '<div id="radar-cal-instruction" class="cal-instruction">Clear area within 6m for 60 seconds.</div>' +
         '<div class="cal-guidance">Grade thresholds: A &lt; 5 false, B &lt; 20 false, C ≥ 20 false.</div>' +
@@ -7734,24 +7782,16 @@ function initTrends() {
             '<div class="sonar-ring extended" style="left:100%"></div><div class="sonar-ring-label-top extended" style="left:100%">Extended</div><div class="sonar-ring-label-bottom extended" style="left:100%">5m+</div>' +
           '</div>' +
           '<div id="sonar-layer" class="sonar-layer"></div>' +
+          '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
         '</div>' +
-        '<div id="radar-target-float" class="sonar-callout hidden">' +
+        '<div id="sonar-resize-handle" class="sonar-resize-handle"></div>' +
+        '<div id="radar-target-float" class="sonar-callout" style="opacity: 0;">' +
           '<div class="target-top"><div class="target-distance" id="radar-target-distance">—</div><div class="target-zone" id="radar-target-zone">Clear</div><div class="target-conf" id="radar-target-confidence">No target</div></div>' +
           '<div class="target-bars">' +
             '<div class="tbar"><div class="tbar-label">Motion</div><div class="tbar-track"><div id="radar-float-move-bar" class="tbar-fill"></div></div><div id="radar-float-move-val" class="tbar-val">0</div></div>' +
             '<div class="tbar"><div class="tbar-label">Still</div><div class="tbar-track"><div id="radar-float-still-bar" class="tbar-fill"></div></div><div id="radar-float-still-val" class="tbar-val">0</div></div>' +
           '</div>' +
         '</div>' +
-        '<div id="sonar-leaderline" class="sonar-leaderline hidden"></div>' +
-      '</div>' +
-      '<div class="radar-readout">' +
-        '<div id="radar-now-state-pill" class="status-pill state-offline">RADAR OFFLINE</div>' +
-        '<span id="radar-target-confidence-badge" class="status-pill conf-low" style="margin-left:8px">No Target</span>' +
-        '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">' +
-          '<label class="muted" style="display:flex;align-items:center;gap:6px"><input id="radar-use-derived" type="checkbox" /> Use derived presence</label>' +
-          '<span id="radar-now-self-note" class="muted" style="font-size:12px"></span>' +
-        '</div>' +
-        '<div class="radar-strip-foot"><div id="radar-strip-status" class="radar-strip-status">Clear</div><div id="radar-strip-badges" class="radar-strip-badges"></div></div>' +
       '</div>' +
     '</div>' +
     '<div id="radar-history-pane" class="hidden">' +
