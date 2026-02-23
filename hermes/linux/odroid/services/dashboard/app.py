@@ -2899,9 +2899,20 @@ def api_vision_snapshot_latest() -> FileResponse:
 
 
 @APP.post("/api/vision/capture")
-def api_vision_capture(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
-  reason = str(payload.get("reason") or "manual").strip()[:64] or "manual"
+def api_vision_capture(request: Request, payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+  reason = (str(payload.get("reason") or "manual").strip()[:64] or "manual").replace(",", "_")
+  host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "127.0.0.1:8080").strip()
+  proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").strip()
+  upload_url = str(payload.get("upload_url") or f"{proto}://{host}/api/vision/snapshot").strip()
+
   command = str(payload.get("command") or "CAM,CAPTURE").strip() or "CAM,CAPTURE"
+  command_lc = command.lower()
+  if command_lc.startswith("cam,capture"):
+    if "reason=" not in command_lc:
+      command = f"{command},reason={reason}"
+    if "url=" not in command.lower():
+      command = f"{command},url={upload_url}"
+
   cmd = run_cmd(["python3", str(CLIENT_PATH), "send", command], timeout_sec=2)
   raw = str(cmd.get("stdout") or cmd.get("stderr") or "")
   return {

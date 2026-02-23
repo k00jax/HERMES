@@ -29,6 +29,7 @@
 
 #if HAS_WIFI_SECRETS
 #include <WiFi.h>
+#include <HTTPClient.h>
 #include <time.h>
 #endif
 
@@ -323,6 +324,12 @@ static void ld2410EmitIfNeeded(uint32_t now) {
 
 static const uint32_t CAMERA_INTERVAL_MS = 2000;
 static const uint32_t CAMERA_REPORT_INTERVAL_MS = 2000;
+static const uint32_t SNAPSHOT_MIN_INTERVAL_MS = 1000;
+static const int SNAPSHOT_JPEG_QUALITY = 16;
+static const framesize_t SNAPSHOT_FRAME_SIZE = FRAMESIZE_QVGA;
+#ifndef SNAPSHOT_UPLOAD_URL
+#define SNAPSHOT_UPLOAD_URL "http://10.0.0.80:8000/api/vision/snapshot"
+#endif
 static const int SCENE_STRIDE = 4;
 static const int SCENE_SAMPLES = (160 / SCENE_STRIDE) * (120 / SCENE_STRIDE);
 
@@ -362,6 +369,11 @@ static float cameraScene = NAN;
 static uint32_t lastCameraMs = 0;
 static uint32_t lastCameraReportMs = 0;
 static uint32_t cameraReportSeq = 0;
+static uint32_t lastSnapshotMs = 0;
+static uint32_t snapshotSeq = 0;
+static bool snapshotRequested = false;
+static char snapshotReason[24] = "manual";
+static char snapshotUrlOverride[192] = "";
 static bool scenePrevValid = false;
 static int cameraFrameWidth = 0;
 static int cameraFrameHeight = 0;
@@ -380,7 +392,7 @@ static I2SClass micI2S;
 #endif
 
 
-static char cmdBuffer[64];
+static char cmdBuffer[256];
 static size_t cmdLen = 0;
 
 static void formatFloat(char *buffer, size_t size, float value, int precision) {
@@ -1036,6 +1048,102 @@ static void updateWifi(uint32_t now) {
 #endif
 }
 
+static void requestSnapshotCapture(const char *reason, const char *urlOverride) {
+  if (reason && reason[0] != '\0') {
+    snprintf(snapshotReason, sizeof(snapshotReason), "%s", reason);
+  } else {
+    snprintf(snapshotReason, sizeof(snapshotReason), "manual");
+  }
+  if (urlOverride && urlOverride[0] != '\0') {
+    snprintf(snapshotUrlOverride, sizeof(snapshotUrlOverride), "%s", urlOverride);
+  } else {
+    snapshotUrlOverride[0] = '\0';
+  }
+  snapshotRequested = true;
+}
+
+static void performSnapshotCapture(uint32_t now) {
+#if ENABLE_CAMERA && ENABLE_WIFI && HAS_WIFI_SECRETS
+  if (!snapshotRequested) {
+    return;
+  }
+  snapshotRequested = false;
+
+  if ((now - lastSnapshotMs) < SNAPSHOT_MIN_INTERVAL_MS) {
+    return;
+  }
+  lastSnapshotMs = now;
+
+  if (!cameraOk || wifiStatus != WL_CONNECTED) {
+    Serial.println("CAM capture skipped: camera or Wi-Fi unavailable");
+    return;
+  }
+
+  sensor_t *sensor = esp_camera_sensor_get();
+  if (!sensor) {
+    Serial.println("CAM capture skipped: sensor unavailable");
+    return;
+  }
+
+  const pixformat_t prevPixformat = static_cast<pixformat_t>(sensor->pixformat);
+  const framesize_t prevFrameSize = static_cast<framesize_t>(sensor->status.framesize);
+  const int prevQuality = sensor->status.quality;
+
+  sensor->set_framesize(sensor, SNAPSHOT_FRAME_SIZE);
+  sensor->set_pixformat(sensor, PIXFORMAT_JPEG);
+  sensor->set_quality(sensor, SNAPSHOT_JPEG_QUALITY);
+  delay(60);
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  int httpCode = -1;
+  size_t postedBytes = 0;
+  if (fb && fb->format == PIXFORMAT_JPEG && fb->len > 0) {
+    const char *baseUrl = snapshotUrlOverride[0] ? snapshotUrlOverride : SNAPSHOT_UPLOAD_URL;
+    const uint32_t seq = ++snapshotSeq;
+    const unsigned long tsValue = (ntpEpoch > 0) ? static_cast<unsigned long>(ntpEpoch) : static_cast<unsigned long>(now / 1000UL);
+    const char sep = (strchr(baseUrl, '?') != nullptr) ? '&' : '?';
+    char uploadUrl[320];
+    snprintf(
+        uploadUrl,
+        sizeof(uploadUrl),
+        "%s%cseq=%lu&reason=%s&ts=%lu",
+        baseUrl,
+        sep,
+        static_cast<unsigned long>(seq),
+        snapshotReason,
+        tsValue);
+
+    HTTPClient http;
+    http.setConnectTimeout(2500);
+    http.setTimeout(5000);
+    if (http.begin(uploadUrl)) {
+      http.addHeader("Content-Type", "image/jpeg");
+      httpCode = http.POST(fb->buf, fb->len);
+      postedBytes = fb->len;
+      http.end();
+    }
+  }
+
+  if (fb) {
+    esp_camera_fb_return(fb);
+  }
+
+  sensor->set_pixformat(sensor, prevPixformat);
+  sensor->set_framesize(sensor, prevFrameSize);
+  sensor->set_quality(sensor, prevQuality);
+  delay(25);
+
+  if (httpCode >= 200 && httpCode < 300) {
+    Serial.printf("CAM capture uploaded: code=%d bytes=%u\n", httpCode, static_cast<unsigned>(postedBytes));
+  } else {
+    Serial.printf("CAM capture upload failed: code=%d bytes=%u\n", httpCode, static_cast<unsigned>(postedBytes));
+  }
+#else
+  (void)now;
+  snapshotRequested = false;
+#endif
+}
+
 static void handleSerial1Commands() {
 #if ENABLE_ESP_CMD
   while (Serial1.available() > 0) {
@@ -1049,6 +1157,36 @@ static void handleSerial1Commands() {
         Serial.println("ESP CMD reboot");
         delay(20);
         ESP.restart();
+      } else if (strncmp(cmdBuffer, "CAM,CAPTURE", 11) == 0) {
+        char reason[24] = "manual";
+        char url[192] = "";
+        if (cmdLen > 11) {
+          char parseBuf[sizeof(cmdBuffer)];
+          snprintf(parseBuf, sizeof(parseBuf), "%s", cmdBuffer);
+          char *savePtr = nullptr;
+          char *token = strtok_r(parseBuf, ",", &savePtr);  // CAM
+          token = strtok_r(nullptr, ",", &savePtr);         // CAPTURE
+          while (true) {
+            token = strtok_r(nullptr, ",", &savePtr);
+            if (!token) {
+              break;
+            }
+            char *eq = strchr(token, '=');
+            if (!eq) {
+              continue;
+            }
+            *eq = '\0';
+            const char *key = token;
+            const char *value = eq + 1;
+            if (strcmp(key, "reason") == 0) {
+              snprintf(reason, sizeof(reason), "%s", value);
+            } else if (strcmp(key, "url") == 0) {
+              snprintf(url, sizeof(url), "%s", value);
+            }
+          }
+        }
+        requestSnapshotCapture(reason, url);
+        Serial.printf("ESP CMD CAM capture requested (reason=%s)\n", reason);
       }
       cmdLen = 0;
       continue;
@@ -1145,6 +1283,7 @@ void loop() {
   sampleCamera(now);
   sampleMic(now);
   updateWifi(now);
+  performSnapshotCapture(now);
   sendCameraTelemetryLine(now);
   if (now - lastSendMs >= 1000) {
     lastSendMs = now;

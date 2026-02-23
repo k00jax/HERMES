@@ -1024,6 +1024,13 @@ static void handleLine(char *line, uint32_t now) {
     return;
   }
 
+  if (strncmp(line, "CAM,CAPTURE", 11) == 0) {
+    Serial1.print(line);
+    Serial1.print("\n");
+    emitAckKind("CAM", "CAPTURE");
+    return;
+  }
+
   const bool isOled = (strncmp(line, "OLED,", 5) == 0);
   const bool isBuzzer = (strncmp(line, "BUZZER,", 7) == 0);
   if (!isOled && !isBuzzer) {
