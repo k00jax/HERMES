@@ -14,6 +14,7 @@ import statistics
 import datetime
 import threading
 import importlib.util
+import socket
 from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
@@ -1203,6 +1204,56 @@ def maybe_play_event_chime(rows: List[Dict[str, object]], settings: Dict[str, ob
   baseline = 0
   initialized_now = False
   bootstrap_payload: Optional[str] = None
+
+
+def resolve_snapshot_upload_url(request: Request, payload: Dict[str, object]) -> str:
+  explicit = str(payload.get("upload_url") or "").strip()
+  if explicit:
+    return explicit
+
+  env_url = str(os.environ.get("HERMES_VISION_UPLOAD_URL") or "").strip()
+  if env_url:
+    return env_url
+
+  host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "127.0.0.1:8080").strip()
+  proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").strip() or "http"
+  host_only = host.split(":", 1)[0].strip("[]").lower()
+  is_loopback_host = host_only in {"127.0.0.1", "localhost", "::1"}
+  if not is_loopback_host:
+    return f"{proto}://{host}/api/vision/snapshot"
+
+  fallback_port = request.url.port
+  if fallback_port is None:
+    if ":" in host and not host.startswith("["):
+      try:
+        fallback_port = int(host.rsplit(":", 1)[1])
+      except Exception:
+        fallback_port = 443 if proto == "https" else 8000
+    else:
+      fallback_port = 443 if proto == "https" else 8000
+
+  candidates: List[str] = []
+  try:
+    _, _, ips = socket.gethostbyname_ex(socket.gethostname())
+    for ip in ips:
+      ip_norm = str(ip or "").strip()
+      if ip_norm and not ip_norm.startswith("127.") and ip_norm not in candidates:
+        candidates.append(ip_norm)
+  except Exception:
+    pass
+
+  try:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+      s.connect(("8.8.8.8", 80))
+      ip_norm = str(s.getsockname()[0] or "").strip()
+      if ip_norm and not ip_norm.startswith("127.") and ip_norm not in candidates:
+        candidates.insert(0, ip_norm)
+  except Exception:
+    pass
+
+  if candidates:
+    return f"{proto}://{candidates[0]}:{int(fallback_port)}/api/vision/snapshot"
+  return ""
   with event_chime_lock:
     if not event_chime_initialized:
       event_chime_initialized = True
@@ -3006,20 +3057,15 @@ def api_vision_snapshot_latest() -> FileResponse:
 @APP.post("/api/vision/capture")
 def api_vision_capture(request: Request, payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
   reason = (str(payload.get("reason") or "manual").strip()[:64] or "manual").replace(",", "_")
-  host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "127.0.0.1:8080").strip()
-  proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").strip()
-  upload_url = str(payload.get("upload_url") or f"{proto}://{host}/api/vision/snapshot").strip()
+  upload_url = resolve_snapshot_upload_url(request, payload)
 
   command = str(payload.get("command") or "CAM,CAPTURE").strip() or "CAM,CAPTURE"
   command_lc = command.lower()
   if command_lc.startswith("cam,capture"):
     if "reason=" not in command_lc:
       command = f"{command},reason={reason}"
-    if "url=" not in command.lower():
-      host_only = host.split(":", 1)[0].strip("[]").lower()
-      is_loopback_host = host_only in {"127.0.0.1", "localhost", "::1"}
-      if not is_loopback_host:
-        command = f"{command},url={upload_url}"
+    if "url=" not in command.lower() and upload_url:
+      command = f"{command},url={upload_url}"
 
   direct = {"attempted": False, "ok": False, "port": "", "error": ""}
   cmd = {"ok": False, "stdout": "", "stderr": "", "code": 1}
