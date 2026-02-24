@@ -554,74 +554,15 @@ static void runCameraProbe() {
 
 static void scanCameraBus() {
 #if ENABLE_CAMERA
-  struct CameraBus {
-    int sda;
-    int scl;
-  };
-
-  const CameraBus buses[] = {
-      {40, 39},
-      {5, 6},
-      {7, 8},
-      {1, 2},
-      {2, 1},
-      {3, 4},
-      {4, 3},
-      {8, 9},
-      {9, 8},
-      {17, 18},
-      {18, 17},
-      {41, 42},
-      {42, 41}
-  };
-
-  cameraAddr = -1;
-  for (size_t i = 0; i < (sizeof(buses) / sizeof(buses[0])); i++) {
-    Wire.begin(buses[i].sda, buses[i].scl);
-    Wire.setClock(10000);
-    uint8_t found = 0;
-    Serial.print("Camera SCCB scan sda=");
-    Serial.print(buses[i].sda);
-    Serial.print(" scl=");
-    Serial.print(buses[i].scl);
-    Serial.print(":");
-    Serial1.print("CAMSCAN");
-    Serial1.print(",sda=");
-    Serial1.print(buses[i].sda);
-    Serial1.print(",scl=");
-    Serial1.print(buses[i].scl);
-
-    for (uint8_t addr = 1; addr < 127; addr++) {
-      Wire.beginTransmission(addr);
-      if (Wire.endTransmission() == 0) {
-        Serial.print(" 0x");
-        if (addr < 16) {
-          Serial.print('0');
-        }
-        Serial.print(addr, HEX);
-        Serial1.print(',');
-        Serial1.print(addr, HEX);
-        found++;
-        if (cameraAddr < 0) {
-          cameraAddr = addr;
-          cameraSda = buses[i].sda;
-          cameraScl = buses[i].scl;
-        }
-        delay(2);
-      }
-    }
-
-    if (found == 0) {
-      Serial.print(" none");
-      Serial1.print(",none");
-    }
-    Serial.println();
-    Serial1.println();
-
-    if (cameraAddr >= 0) {
-      return;
-    }
-  }
+  cameraSda = CAM_PIN_SIOD;
+  cameraScl = CAM_PIN_SIOC;
+  cameraAddr = CAM_SCCB_ADDR;
+  Serial.print("Camera SCCB fixed sda=");
+  Serial.print(cameraSda);
+  Serial.print(" scl=");
+  Serial.print(cameraScl);
+  Serial.print(" addr=0x");
+  Serial.println(cameraAddr, HEX);
 #endif
 }
 
@@ -630,58 +571,41 @@ static void initCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = 15;
-  config.pin_d1 = 17;
-  config.pin_d2 = 18;
-  config.pin_d3 = 16;
-  config.pin_d4 = 14;
-  config.pin_d5 = 12;
-  config.pin_d6 = 11;
-  config.pin_d7 = 48;
-  config.pin_xclk = 10;
-  config.pin_pclk = 13;
-  config.pin_vsync = 38;
-  config.pin_href = 47;
-  config.pin_sccb_sda = cameraSda;
-  config.pin_sccb_scl = cameraScl;
-  config.pin_pwdn = -1;
-  config.pin_reset = -1;
-  config.xclk_freq_hz = 20000000;
+  config.pin_d0 = CAM_PIN_D0;
+  config.pin_d1 = CAM_PIN_D1;
+  config.pin_d2 = CAM_PIN_D2;
+  config.pin_d3 = CAM_PIN_D3;
+  config.pin_d4 = CAM_PIN_D4;
+  config.pin_d5 = CAM_PIN_D5;
+  config.pin_d6 = CAM_PIN_D6;
+  config.pin_d7 = CAM_PIN_D7;
+  config.pin_xclk = CAM_PIN_XCLK;
+  config.pin_pclk = CAM_PIN_PCLK;
+  config.pin_vsync = CAM_PIN_VSYNC;
+  config.pin_href = CAM_PIN_HREF;
+  config.pin_sccb_sda = CAM_PIN_SIOD;
+  config.pin_sccb_scl = CAM_PIN_SIOC;
+  config.pin_pwdn = CAM_PIN_PWDN;
+  config.pin_reset = CAM_PIN_RESET;
+  config.xclk_freq_hz = 10000000;
   config.frame_size = FRAMESIZE_QVGA;
-  config.pixel_format = PIXFORMAT_GRAYSCALE;
+  config.pixel_format = PIXFORMAT_RGB565;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.grab_mode = CAMERA_GRAB_LATEST;
   config.jpeg_quality = 12;
-  config.fb_count = 1;
+  config.fb_count = 2;
 
-  const int pwdnCandidates[] = { -1, 1 };
-  esp_err_t err = ESP_FAIL;
   delay(200);
-  for (size_t i = 0; i < (sizeof(pwdnCandidates) / sizeof(pwdnCandidates[0])); i++) {
-    config.pin_pwdn = pwdnCandidates[i];
-    if (config.pin_pwdn >= 0) {
-      pinMode(config.pin_pwdn, OUTPUT);
-      digitalWrite(config.pin_pwdn, LOW);
-      delay(10);
-    }
-
-    err = esp_camera_init(&config);
-    if (err != ESP_OK) {
-      config.pixel_format = PIXFORMAT_RGB565;
-      err = esp_camera_init(&config);
-    }
-
-    if (err == ESP_OK) {
-      break;
-    }
-
-    delay(200);
-  }
+  const esp_err_t err = esp_camera_init(&config);
 
   cameraErr = static_cast<int>(err);
 
   if (err == ESP_OK) {
     cameraOk = true;
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (sensor) {
+      sensor->set_colorbar(sensor, 0);
+    }
     Serial.println("Camera init OK");
   } else {
     cameraOk = false;

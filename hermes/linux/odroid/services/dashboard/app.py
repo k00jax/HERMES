@@ -27,6 +27,16 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
+try:
+  from PIL import Image
+except Exception:
+  Image = None
+
+try:
+  import numpy as np
+except Exception:
+  np = None
+
 APP = FastAPI(title="HERMES Dashboard", version="0.1.0")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -153,6 +163,44 @@ STARTUP_CHIME_BOOTSTRAP_MAX_AGE_SECS = 180
 
 radar_calibration_lock = threading.Lock()
 radar_calibration_sessions: Dict[str, Dict[str, object]] = {}
+vision_snapshot_pattern_cache_lock = threading.Lock()
+vision_snapshot_pattern_cache: Dict[str, object] = {
+  "snap_ts_utc": None,
+  "result": {
+    "suspect": False,
+    "reason": "unavailable",
+  },
+}
+
+
+def analyze_snapshot_pattern(path: Path) -> Dict[str, object]:
+  if not path.exists() or Image is None or np is None:
+    return {"suspect": False, "reason": "unavailable"}
+
+  try:
+    img = Image.open(path).convert("L")
+    arr = np.asarray(img).astype(np.float32)
+    if arr.ndim != 2 or arr.shape[0] < 8 or arr.shape[1] < 8:
+      return {"suspect": False, "reason": "insufficient"}
+
+    row_mean = arr.mean(axis=1)
+    col_mean = arr.mean(axis=0)
+    row_var = float(np.var(row_mean))
+    col_var = float(np.var(col_mean))
+    drow = float(np.abs(np.diff(arr, axis=0)).mean())
+    dcol = float(np.abs(np.diff(arr, axis=1)).mean())
+
+    suspect = row_var < 0.01 and col_var > 50.0 and drow < 0.5 and dcol > 8.0
+    return {
+      "suspect": bool(suspect),
+      "reason": "vertical_pattern" if suspect else "ok",
+      "row_var": round(row_var, 6),
+      "col_var": round(col_var, 6),
+      "drow": round(drow, 6),
+      "dcol": round(dcol, 6),
+    }
+  except Exception:
+    return {"suspect": False, "reason": "analysis_error"}
 
 
 def run_cmd(args: List[str], timeout_sec: float) -> Dict[str, object]:
@@ -2806,6 +2854,8 @@ def api_vision_now() -> Dict[str, object]:
     "snap_ts_utc": None,
     "snap_reason": None,
     "snap_bytes": None,
+    "snap_pattern_suspect": False,
+    "snap_pattern_reason": None,
   }
   if not DB_PATH.exists():
     return default
@@ -2837,11 +2887,26 @@ def api_vision_now() -> Dict[str, object]:
           }
         )
       if snap_row:
+        analysis: Dict[str, object]
+        snap_ts_utc = snap_row["ts_utc"]
+        with vision_snapshot_pattern_cache_lock:
+          cached_ts = vision_snapshot_pattern_cache.get("snap_ts_utc")
+          cached_result = vision_snapshot_pattern_cache.get("result")
+        if cached_ts == snap_ts_utc and isinstance(cached_result, dict):
+          analysis = dict(cached_result)
+        else:
+          analysis = analyze_snapshot_pattern(VISION_SNAPSHOT_PATH)
+          with vision_snapshot_pattern_cache_lock:
+            vision_snapshot_pattern_cache["snap_ts_utc"] = snap_ts_utc
+            vision_snapshot_pattern_cache["result"] = dict(analysis)
+
         payload.update(
           {
-            "snap_ts_utc": snap_row["ts_utc"],
+            "snap_ts_utc": snap_ts_utc,
             "snap_reason": snap_row["reason"],
             "snap_bytes": snap_row["bytes"],
+            "snap_pattern_suspect": bool(analysis.get("suspect")),
+            "snap_pattern_reason": str(analysis.get("reason") or "unknown"),
           }
         )
       return payload
@@ -5664,6 +5729,8 @@ function renderVisionNow(data) {
   const ts = String((data && data.ts_utc) || '');
   const snapTs = String((data && data.snap_ts_utc) || '');
   const snapReason = String((data && data.snap_reason) || 'none');
+  const snapPatternSuspect = !!(data && data.snap_pattern_suspect);
+  const snapPatternReason = String((data && data.snap_pattern_reason) || '');
   const stale = tableIsStale('vision_cam') || !present;
 
   if (!present) {
@@ -5675,6 +5742,9 @@ function renderVisionNow(data) {
     seqEl.textContent = 'seq: n/a';
   } else {
     stateEl.textContent = (camok === 1 ? 'Camera OK' : 'Camera Fault') + (Number.isFinite(camerr) ? (' (err ' + String(camerr) + ')') : '');
+    if (snapPatternSuspect) {
+      stateEl.textContent += ' · Camera link suspect';
+    }
     lightEl.textContent = formatVisionRatio(data.light);
     sceneEl.textContent = formatVisionRatio(data.scene);
     if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
@@ -5696,6 +5766,15 @@ function renderVisionNow(data) {
   const card = stateEl.closest('.trend-card');
   if (card) {
     card.classList.toggle('stale-card', stale);
+    card.classList.toggle('dead-card', snapPatternSuspect);
+  }
+
+  if (snapPatternSuspect) {
+    stateEl.title = snapPatternReason ? ('Snapshot pattern warning: ' + snapPatternReason) : 'Snapshot pattern warning';
+    stateEl.classList.add('state-offline');
+  } else {
+    stateEl.title = '';
+    stateEl.classList.remove('state-offline');
   }
 }
 
