@@ -326,13 +326,13 @@ static void ld2410EmitIfNeeded(uint32_t now) {
 static const uint32_t CAMERA_INTERVAL_MS = 2000;
 static const uint32_t CAMERA_REPORT_INTERVAL_MS = 2000;
 static const uint32_t SNAPSHOT_MIN_INTERVAL_MS = 1000;
-static const int SNAPSHOT_JPEG_QUALITY = 16;
-static const framesize_t SNAPSHOT_FRAME_SIZE = FRAMESIZE_QVGA;
+static const int SNAPSHOT_JPEG_QUALITY = 12;
+static const framesize_t SNAPSHOT_FRAME_SIZE = FRAMESIZE_VGA;
 #ifndef SNAPSHOT_UPLOAD_URL
 #define SNAPSHOT_UPLOAD_URL "http://10.0.0.80:8000/api/vision/snapshot"
 #endif
 static const int SCENE_STRIDE = 4;
-static const int SCENE_SAMPLES = (160 / SCENE_STRIDE) * (120 / SCENE_STRIDE);
+static const int SCENE_SAMPLES = (320 / SCENE_STRIDE) * (240 / SCENE_STRIDE);
 
 static const uint32_t MIC_SAMPLE_RATE = 16000;
 static const size_t MIC_WINDOW_SAMPLES = 512;
@@ -647,7 +647,7 @@ static void initCamera() {
   config.pin_pwdn = -1;
   config.pin_reset = -1;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_QQVGA;
+  config.frame_size = FRAMESIZE_QVGA;
   config.pixel_format = PIXFORMAT_GRAYSCALE;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
