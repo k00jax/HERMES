@@ -4502,16 +4502,6 @@ HTML_PAGE = """
       <div style="height: 10px"></div>
       <div class="section-title">Telemetry Streams</div>
       <div id="freshness" class="stream-row"></div>
-      <div class="card" style="margin-top:10px;">
-        <div class="card-title">Camera</div>
-        <div class="muted small">Status: <span id="cameraStatus">Disconnected</span></div>
-        <div class="camera-controls">
-          <button id="cameraStartBtn" class="btn">Start Stream</button>
-          <button id="cameraStopBtn" class="btn">Stop Stream</button>
-          <a id="cameraSnapshotBtn" class="btn" href="/camera/snapshot" target="_blank" rel="noopener">Take Snapshot</a>
-        </div>
-        <img id="cameraStreamImg" class="camera-stream hidden" alt="USB Camera Stream" />
-      </div>
 
       {{HOME_TREND_WINDOW}}
     </div>
@@ -5879,28 +5869,28 @@ function updateCameraPanel(status) {
   if (normalized !== 'connected' && cameraStreamActive) {
     stopCameraStream(false);
   }
-  const statusIds = ['cameraStatus', 'home2CameraStatus'];
+  const statusIds = ['home2CameraStatus'];
   for (const statusId of statusIds) {
     const statusEl = document.getElementById(statusId);
     if (statusEl) {
       statusEl.textContent = normalized === 'connected' ? 'Connected' : 'Disconnected';
     }
   }
-  const startIds = ['cameraStartBtn', 'home2CameraStartBtn'];
+  const startIds = ['home2CameraStartBtn'];
   for (const startId of startIds) {
     const startBtn = document.getElementById(startId);
     if (startBtn) {
       startBtn.disabled = normalized !== 'connected' || cameraStreamActive;
     }
   }
-  const stopIds = ['cameraStopBtn', 'home2CameraStopBtn'];
+  const stopIds = ['home2CameraStopBtn'];
   for (const stopId of stopIds) {
     const stopBtn = document.getElementById(stopId);
     if (stopBtn) {
       stopBtn.disabled = !cameraStreamActive;
     }
   }
-  const snapshotIds = ['cameraSnapshotBtn', 'home2CameraSnapshotBtn'];
+  const snapshotIds = ['home2CameraSnapshotBtn'];
   for (const snapshotId of snapshotIds) {
     const snapshotBtn = document.getElementById(snapshotId);
     if (!snapshotBtn) continue;
@@ -5914,7 +5904,7 @@ function startCameraStream() {
   if (cameraState !== 'connected') {
     return;
   }
-  const imageIds = ['cameraStreamImg', 'home2CameraStreamImg'];
+  const imageIds = ['home2CameraStreamImg'];
   let hasTarget = false;
   cameraStreamActive = true;
   for (const imageId of imageIds) {
@@ -5932,7 +5922,7 @@ function startCameraStream() {
 }
 
 function stopCameraStream(updateUi = true) {
-  const imageIds = ['cameraStreamImg', 'home2CameraStreamImg'];
+  const imageIds = ['home2CameraStreamImg'];
   cameraStreamActive = false;
   for (const imageId of imageIds) {
     const imgEl = document.getElementById(imageId);
@@ -5947,7 +5937,6 @@ function stopCameraStream(updateUi = true) {
 
 function bindCameraControls() {
   const controlSets = [
-    ['cameraStartBtn', 'cameraStopBtn', 'cameraSnapshotBtn'],
     ['home2CameraStartBtn', 'home2CameraStopBtn', 'home2CameraSnapshotBtn'],
   ];
   for (const [startId, stopId, snapId] of controlSets) {
@@ -7413,11 +7402,18 @@ function renderFreshness(map) {
   const root = document.getElementById('freshness');
   root.innerHTML = '';
   for (const k of displayFresh) {
-    const v = (map && map[k]) ? map[k] : 'unknown';
+    let v = (map && map[k]) ? map[k] : 'unknown';
     const tableName = FRESHNESS_TABLE_BY_PREFIX[k] || '';
     const expectedKey = EXPECTED_KEY_BY_PREFIX[k] || '';
     const expectedInterval = Number(EXPECTED_INTERVALS[expectedKey] || 0);
     const ageSec = latestReady && latestReady.table_age_seconds ? Number(latestReady.table_age_seconds[tableName]) : NaN;
+
+    if (k === 'RADAR' && Number.isFinite(ageSec)) {
+      if (ageSec >= 20) v = 'dead';
+      else if (ageSec >= 6) v = 'stale';
+      else v = 'ok';
+    }
+
     const ratio = (Number.isFinite(ageSec) && expectedInterval > 0) ? (ageSec / expectedInterval) : NaN;
     let ageClass = 'bad';
     if (Number.isFinite(ratio)) {
@@ -7976,12 +7972,11 @@ function initTrends() {
       'air'
     ));
 
-    const visionCard = document.createElement('div');
-    visionCard.className = 'card trend-card chart home2-card home2-vision-card';
-    visionCard.dataset.cardId = 'vision-card';
-    visionCard.innerHTML =
+    const cameraCard = document.createElement('div');
+    cameraCard.className = 'card trend-card chart home2-card home2-vision-card';
+    cameraCard.dataset.cardId = 'camera-card';
+    cameraCard.innerHTML =
       '<div class="trend-top card-header"><div class="card-drag-handle"><b>USB Camera</b></div></div>' +
-      '<div id="vision-now-state" class="status-pill state-offline" style="width:max-content">No CAM data</div>' +
       '<div class="muted small" style="margin-top:8px;">Status: <span id="home2CameraStatus">Disconnected</span></div>' +
       '<div class="camera-controls">' +
         '<button id="home2CameraStartBtn" class="btn">Start Stream</button>' +
@@ -7989,16 +7984,8 @@ function initTrends() {
         '<a id="home2CameraSnapshotBtn" class="btn" href="/camera/snapshot" target="_blank" rel="noopener">Take Snapshot</a>' +
       '</div>' +
       '<img id="home2CameraStreamImg" class="camera-stream hidden" alt="USB Camera Stream" />' +
-      '<div class="vision-snap-meta"><span id="vision-snap-age">Last snapshot: n/a</span><span id="vision-snap-trigger">Trigger: none</span></div>' +
-      '<div class="home2-vision-grid">' +
-        '<div class="home2-vision-kv"><div class="k">Light</div><div id="vision-now-light" class="v">n/a</div></div>' +
-        '<div class="home2-vision-kv"><div class="k">Scene Delta</div><div id="vision-now-scene" class="v">n/a</div></div>' +
-        '<div class="home2-vision-kv"><div class="k">Resolution</div><div id="vision-now-res" class="v">n/a</div></div>' +
-        '<div class="home2-vision-kv"><div class="k">Frame Seq</div><div id="vision-now-seq" class="v">n/a</div></div>' +
-      '</div>' +
-      '<div class="home2-vision-foot"><span id="vision-now-age">Last seen: n/a</span></div>' +
       '<div class="card-resize-handle"></div>';
-    home2Grid.appendChild(visionCard);
+    home2Grid.appendChild(cameraCard);
     bindCameraControls();
 
     const radarCard = document.createElement('div');

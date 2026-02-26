@@ -44,6 +44,9 @@ ESP_NET_KV_RE = re.compile(r"(wifist|rssi|ntp|ip)=([^,\s]+)")
 MAX_LEN = int(os.environ.get("HERMES_INGEST_MAX_LEN", "240"))
 INTEGRITY_WINDOWS = (10, 60)
 INGEST_DIAG_INTERVAL_SECS = 10.0
+RADAR_EXPECTED_PERIOD_S = float(os.environ.get("HERMES_RADAR_EXPECTED_PERIOD_S", "0.1"))
+RADAR_STALE_S = float(os.environ.get("HERMES_RADAR_STALE_S", "6.0"))
+RADAR_DEAD_S = float(os.environ.get("HERMES_RADAR_DEAD_S", "20.0"))
 
 FRAME_MARKERS = (
     "RADAR,",
@@ -73,7 +76,7 @@ EXPECTED_PREFIXES = {
     "MIC": {"period_s": 1.0, "stale_s": 5.0, "dead_s": 30.0},
     "CAM": {"period_s": 2.0, "stale_s": 10.0, "dead_s": 30.0},
     "ESP,NET": {"period_s": 5.0, "stale_s": 20.0, "dead_s": 60.0},
-    "RADAR": {"period_s": 0.1, "stale_s": 2.0, "dead_s": 10.0},
+    "RADAR": {"period_s": RADAR_EXPECTED_PERIOD_S, "stale_s": RADAR_STALE_S, "dead_s": RADAR_DEAD_S},
 }
 
 WIFI_CONNECTED_STATES = {1, 3}
