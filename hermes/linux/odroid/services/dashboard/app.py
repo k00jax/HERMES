@@ -15,6 +15,7 @@ import datetime
 import threading
 import tempfile
 import logging
+import select
 import importlib.util
 import socket
 from pathlib import Path
@@ -64,9 +65,15 @@ VISION_DIR = Path("/home/odroid/hermes-data/vision")
 VISION_SNAPSHOT_PATH = VISION_DIR / "latest.jpg"
 REPORTS_DIR = Path(os.environ.get("HERMES_REPORTS_DIR", "/home/odroid/hermes-data/reports"))
 CAMERA_DEVICE_PATH = "/dev/video0"
+CAMERA_VIDEO_SIZE = str(os.environ.get("HERMES_CAMERA_VIDEO_SIZE", "1280x720")).strip() or "1280x720"
 CAMERA_STREAM_FPS = str(max(1, min(30, int(os.environ.get("HERMES_CAMERA_STREAM_FPS", "10")))))
 CAMERA_STREAM_CHUNK_BYTES = 4096
+CAMERA_STREAM_STALL_SECS = float(os.environ.get("HERMES_CAMERA_STREAM_STALL_SECS", "5.0"))
 CAMERA_FFMPEG_TIMEOUT_SECS = float(os.environ.get("HERMES_CAMERA_FFMPEG_TIMEOUT_SECS", "6.0"))
+CAMERA_SNAPSHOT_TIMEOUT_SECS = float(os.environ.get("HERMES_CAMERA_SNAPSHOT_TIMEOUT_SECS", "3.0"))
+SNAP_DIR = "/var/lib/hermes/camera"
+SNAP_LATEST = f"{SNAP_DIR}/latest.jpg"
+META_LATEST = f"{SNAP_DIR}/latest.json"
 DB_TIMEOUT_SECS = float(os.environ.get("HERMES_DB_TIMEOUT_SECS", "2.0"))
 MAX_CACHE_KEYS = int(os.environ.get("HERMES_CHART_CACHE_KEYS", "64"))
 MAX_RANGE_DAYS = 31
@@ -181,6 +188,14 @@ vision_snapshot_pattern_cache: Dict[str, object] = {
   },
 }
 
+camera_stream_state_lock = threading.Lock()
+camera_stream_clients = 0
+
+try:
+  os.makedirs(SNAP_DIR, exist_ok=True)
+except Exception:
+  pass
+
 
 def analyze_snapshot_pattern(path: Path) -> Dict[str, object]:
   if not path.exists() or Image is None or np is None:
@@ -232,13 +247,23 @@ def run_cmd(args: List[str], timeout_sec: float) -> Dict[str, object]:
 
 
 def detect_camera() -> bool:
-    return os.path.exists(CAMERA_DEVICE_PATH)
+    return bool(resolve_camera_device())
+
+
+def resolve_camera_device() -> str:
+  preferred = CAMERA_DEVICE_PATH
+  if os.path.exists(preferred) and os.access(preferred, os.R_OK):
+    return preferred
+  for candidate in sorted(glob.glob("/dev/video*")):
+    if os.path.exists(candidate) and os.access(candidate, os.R_OK):
+      return candidate
+  return ""
 
 
 def camera_status() -> str:
-    if not detect_camera():
+    if not resolve_camera_device():
       return "disconnected"
-    return "connected" if os.access(CAMERA_DEVICE_PATH, os.R_OK) else "disconnected"
+    return "connected"
 
 
 def remove_file_quietly(path: str) -> None:
@@ -248,11 +273,109 @@ def remove_file_quietly(path: str) -> None:
     pass
 
 
+def read_latest_camera_meta() -> Dict[str, object]:
+  try:
+    text = Path(META_LATEST).read_text(encoding="utf-8")
+    payload = json.loads(text)
+  except Exception:
+    return {}
+  return payload if isinstance(payload, dict) else {}
+
+
+def camera_health_payload() -> Dict[str, object]:
+  payload: Dict[str, object] = {
+    "connected": bool(os.path.exists(CAMERA_DEVICE_PATH)),
+  }
+  latest = read_latest_camera_meta()
+  ts = latest.get("ts")
+  if isinstance(ts, str) and ts.strip():
+    payload["latest_ts"] = ts.strip()
+  return payload
+
+
+def capture_snapshot(reason: str, extra: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+  if not os.path.exists(CAMERA_DEVICE_PATH):
+    return {"ok": False, "error": "camera_disconnected"}
+
+  try:
+    os.makedirs(SNAP_DIR, exist_ok=True)
+  except Exception as exc:
+    return {"ok": False, "error": "snapshot_dir_unavailable", "detail": str(exc)}
+
+  command = [
+    "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-f",
+    "v4l2",
+    "-input_format",
+    "mjpeg",
+    "-video_size",
+    CAMERA_VIDEO_SIZE,
+    "-i",
+    CAMERA_DEVICE_PATH,
+    "-frames:v",
+    "1",
+    "-q:v",
+    "4",
+    SNAP_LATEST,
+  ]
+  try:
+    proc = subprocess.run(
+      command,
+      timeout=5,
+      capture_output=True,
+      check=False,
+      text=True,
+    )
+  except subprocess.TimeoutExpired:
+    return {"ok": False, "error": "capture_timeout"}
+  except Exception as exc:
+    return {"ok": False, "error": "capture_failed", "detail": str(exc)}
+
+  if proc.returncode != 0:
+    return {
+      "ok": False,
+      "error": "capture_failed",
+      "code": int(proc.returncode),
+      "stderr": str(proc.stderr or "").strip(),
+    }
+
+  snap_path = Path(SNAP_LATEST)
+  if not snap_path.exists() or snap_path.stat().st_size <= 0:
+    return {"ok": False, "error": "capture_failed"}
+
+  extra_payload: Dict[str, object] = {}
+  if isinstance(extra, dict):
+    extra_payload = {str(k): v for k, v in extra.items()}
+
+  result: Dict[str, object] = {
+    "ok": True,
+    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "reason": str(reason or "manual"),
+    "path": SNAP_LATEST,
+    "extra": extra_payload,
+  }
+  try:
+    Path(META_LATEST).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+  except Exception as exc:
+    result["meta_write_error"] = str(exc)
+  return result
+
+
 def generate_camera_stream() -> Iterator[bytes]:
   # Camera is optional Tier 2 peripheral.
   # System must function without it.
   process: Optional[subprocess.Popen] = None
-  buffer = bytearray()
+  device_path = resolve_camera_device()
+  if not device_path:
+    LOGGER.warning("camera stream requested but no readable /dev/video* device found")
+    return
+  global camera_stream_clients
+  with camera_stream_state_lock:
+    camera_stream_clients += 1
   try:
     process = subprocess.Popen(
       [
@@ -264,53 +387,59 @@ def generate_camera_stream() -> Iterator[bytes]:
         "v4l2",
         "-input_format",
         "mjpeg",
+        "-video_size",
+        CAMERA_VIDEO_SIZE,
         "-framerate",
         CAMERA_STREAM_FPS,
         "-i",
-        CAMERA_DEVICE_PATH,
+        device_path,
         "-f",
-        "mjpeg",
+        "mpjpeg",
+        "-boundary_tag",
+        "frame",
         "-",
       ],
       stdout=subprocess.PIPE,
       stderr=subprocess.PIPE,
       bufsize=0,
     )
+    if process.stdout is not None:
+      try:
+        os.set_blocking(process.stdout.fileno(), False)
+      except Exception:
+        pass
+    last_frame_ts = time.monotonic()
     while True:
-      if camera_status() != "connected":
+      if not resolve_camera_device():
         LOGGER.warning("camera disconnected while streaming; stopping stream")
         break
       if process.poll() is not None:
         break
       if process.stdout is None:
         break
-      chunk = process.stdout.read(CAMERA_STREAM_CHUNK_BYTES)
+      try:
+        ready, _, _ = select.select([process.stdout], [], [], 0.25)
+      except Exception:
+        ready = []
+      if not ready:
+        if (time.monotonic() - last_frame_ts) >= CAMERA_STREAM_STALL_SECS:
+          LOGGER.warning("camera stream stalled for %.1fs; stopping stream", CAMERA_STREAM_STALL_SECS)
+          break
+        continue
+      try:
+        chunk = os.read(process.stdout.fileno(), CAMERA_STREAM_CHUNK_BYTES)
+      except BlockingIOError:
+        chunk = b""
       if not chunk:
         time.sleep(0.02)
         continue
-      buffer.extend(chunk)
-      while True:
-        soi = buffer.find(b"\xff\xd8")
-        if soi < 0:
-          if len(buffer) > 1024 * 1024:
-            del buffer[:-2]
-          break
-        if soi > 0:
-          del buffer[:soi]
-        eoi = buffer.find(b"\xff\xd9", 2)
-        if eoi < 0:
-          break
-        frame = bytes(buffer[: eoi + 2])
-        del buffer[: eoi + 2]
-        header = (
-          b"--frame\r\n"
-          b"Content-Type: image/jpeg\r\n"
-          b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
-        )
-        yield header + frame + b"\r\n"
+      last_frame_ts = time.monotonic()
+      yield chunk
   except Exception as exc:
     LOGGER.warning("camera stream ended with error: %s", exc)
   finally:
+    with camera_stream_state_lock:
+      camera_stream_clients = max(0, camera_stream_clients - 1)
     if process is not None:
       try:
         if process.poll() is None:
@@ -2280,7 +2409,7 @@ def api_health() -> Dict[str, object]:
         "code": cmd["code"],
         "raw": raw,
         "freshness": freshness,
-        "camera": camera_status(),
+      "camera": camera_health_payload(),
     }
 
 
@@ -2295,43 +2424,35 @@ def camera_stream() -> StreamingResponse:
   )
 
 
+@APP.post("/camera/trigger")
+def camera_trigger(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
+  reason = str(payload.get("reason") or "manual").strip().lower()
+  allowed = {"manual", "radar_presence", "audio_spike", "button", "debug"}
+  if reason not in allowed:
+    raise HTTPException(status_code=400, detail="invalid reason")
+  extra = payload.get("extra")
+  return capture_snapshot(reason=reason, extra=extra if isinstance(extra, dict) else None)
+
+
+@APP.get("/camera/latest/meta")
+def camera_latest_meta() -> Dict[str, object]:
+  if not Path(META_LATEST).exists():
+    return {"ok": False, "error": "no_snapshot"}
+  payload = read_latest_camera_meta()
+  if not payload:
+    return {"ok": False, "error": "no_snapshot"}
+  return payload
+
+
 @APP.get("/camera/snapshot")
-def camera_snapshot() -> FileResponse:
-  if camera_status() != "connected":
-    raise HTTPException(status_code=503, detail="camera disconnected")
-
-  temp_file = tempfile.NamedTemporaryFile(prefix="hermes-camera-", suffix=".jpg", delete=False)
-  snapshot_path = Path(temp_file.name)
-  temp_file.close()
-  cmd = run_cmd(
-    [
-      "ffmpeg",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-y",
-      "-f",
-      "v4l2",
-      "-input_format",
-      "mjpeg",
-      "-i",
-      CAMERA_DEVICE_PATH,
-      "-frames:v",
-      "1",
-      str(snapshot_path),
-    ],
-    timeout_sec=CAMERA_FFMPEG_TIMEOUT_SECS,
-  )
-  if not cmd.get("ok") or not snapshot_path.exists() or snapshot_path.stat().st_size <= 0:
-    remove_file_quietly(str(snapshot_path))
-    LOGGER.warning("camera snapshot failed: %s", cmd.get("stderr") or cmd.get("stdout") or "unknown error")
-    raise HTTPException(status_code=503, detail="camera snapshot failed")
-
+def camera_snapshot() -> Response:
+  result = capture_snapshot(reason="manual")
+  if not result.get("ok"):
+    return JSONResponse(content=result, status_code=503)
   return FileResponse(
-    str(snapshot_path),
+    SNAP_LATEST,
     media_type="image/jpeg",
-    filename="snapshot.jpg",
-    background=BackgroundTask(remove_file_quietly, str(snapshot_path)),
+    filename="latest.jpg",
   )
 
 
@@ -4393,6 +4514,7 @@ HTML_PAGE = """
     .home2-metric .trend-badges .pill { text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; padding: 3px 6px; }
     .home2-presence { min-width: 0; }
     .home2-vision-card { min-width: 0; display: flex; flex-direction: column; }
+    .home2-vision-card .camera-stream { flex: 1 1 auto; width: 100%; aspect-ratio: 16 / 9; height: auto; max-height: none; min-height: 320px; }
     .home2-vision-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
     .home2-vision-kv { border: 1px solid #26313d; border-radius: 8px; background: #0f1620; padding: 8px; }
     .home2-vision-kv .k { color: #9fb3c8; font-size: 11px; }
@@ -4460,7 +4582,7 @@ HTML_PAGE = """
     .cal-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .cal-history { margin-top: 8px; color: #9fb3c8; font-size: 11px; max-height: 100px; overflow: auto; }
     .camera-controls { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
-    .camera-stream { margin-top: 10px; width: 100%; max-height: 260px; object-fit: contain; background: #0b1118; border: 1px solid #26313d; border-radius: 8px; }
+    .camera-stream { margin-top: 10px; width: 100%; object-fit: contain; background: #0b1118; border: 1px solid #26313d; border-radius: 8px; }
   </style>
 </head>
 <body>
@@ -5864,7 +5986,13 @@ function bindPresenceToggleUi() {
 }
 
 function updateCameraPanel(status) {
-  const normalized = (String(status || '').toLowerCase() === 'connected') ? 'connected' : 'disconnected';
+  let connected = false;
+  if (status && typeof status === 'object') {
+    connected = !!status.connected;
+  } else {
+    connected = String(status || '').toLowerCase() === 'connected';
+  }
+  const normalized = connected ? 'connected' : 'disconnected';
   cameraState = normalized;
   if (normalized !== 'connected' && cameraStreamActive) {
     stopCameraStream(false);
@@ -5900,10 +6028,34 @@ function updateCameraPanel(status) {
   }
 }
 
-function startCameraStream() {
-  if (cameraState !== 'connected') {
+function renderCameraMeta(meta) {
+  const metaEl = document.getElementById('home2CameraMeta');
+  if (!metaEl) return;
+  if (!meta || !meta.ok) {
+    metaEl.textContent = 'Latest: n/a';
     return;
   }
+  const ts = String(meta.ts || '');
+  const reason = String(meta.reason || 'unknown');
+  const tsText = ts ? relativeAge(ts) : 'n/a';
+  metaEl.textContent = 'Latest: ' + tsText + ' · reason: ' + reason;
+}
+
+async function refreshCameraLatestMeta() {
+  try {
+    const resp = await fetch('/camera/latest/meta', { cache: 'no-store' });
+    if (!resp.ok) {
+      renderCameraMeta(null);
+      return;
+    }
+    const data = await resp.json();
+    renderCameraMeta(data);
+  } catch (_err) {
+    renderCameraMeta(null);
+  }
+}
+
+function startCameraStream() {
   const imageIds = ['home2CameraStreamImg'];
   let hasTarget = false;
   cameraStreamActive = true;
@@ -5968,7 +6120,43 @@ function bindCameraControls() {
       });
     }
   }
+
+  const triggerBtn = document.getElementById('home2CameraTriggerBtn');
+  if (triggerBtn && triggerBtn.dataset.bound !== '1') {
+    triggerBtn.dataset.bound = '1';
+    triggerBtn.addEventListener('click', async (event) => {
+      event.preventDefault();
+      triggerBtn.disabled = true;
+      try {
+        const result = await postJson('/camera/trigger', { reason: 'manual' });
+        renderCameraMeta(result || null);
+      } catch (_err) {
+      } finally {
+        triggerBtn.disabled = false;
+      }
+    });
+  }
+
+  const imageIds = ['home2CameraStreamImg'];
+  for (const imageId of imageIds) {
+    const imgEl = document.getElementById(imageId);
+    if (!imgEl || imgEl.dataset.bound === '1') continue;
+    imgEl.dataset.bound = '1';
+    imgEl.addEventListener('load', () => {
+      imgEl.classList.remove('hidden');
+      cameraStreamActive = true;
+      updateCameraPanel(cameraState);
+    });
+    imgEl.addEventListener('error', () => {
+      cameraStreamActive = false;
+      imgEl.classList.add('hidden');
+      imgEl.src = '';
+      updateCameraPanel('disconnected');
+    });
+  }
+
   updateCameraPanel('disconnected');
+  refreshCameraLatestMeta();
 }
 
 function formatVisionRatio(value) {
@@ -6291,7 +6479,8 @@ function applyHome2Layout(layout) {
   if (!Array.isArray(layout) || !layout.length) return;
   for (const item of layout) {
     if (!item || !item.id) continue;
-    const el = document.querySelector('.home2-card[data-card-id="' + String(item.id) + '"]');
+    const normalizedId = String(item.id) === 'vision-card' ? 'camera-card' : String(item.id);
+    const el = document.querySelector('.home2-card[data-card-id="' + normalizedId + '"]');
     if (!el) continue;
     const w = Math.max(1, Math.min(HOME2_GRID_COLS, Number.parseInt(item.w, 10) || 6));
     const x = Math.max(0, Math.min(HOME2_GRID_COLS - w, Number.parseInt(item.x, 10) || 0));
@@ -6330,7 +6519,7 @@ function defaultHome2Layout() {
   return [
     { id: 'combo-env', x: 0, y: 0, w: 6, h: 8 },
     { id: 'combo-air', x: 0, y: 8, w: 6, h: 8 },
-    { id: 'vision-card', x: 0, y: 16, w: 6, h: 8 },
+    { id: 'camera-card', x: 0, y: 16, w: 6, h: 8 },
     { id: 'hp-card', x: 6, y: 0, w: 6, h: 24 },
   ];
 }
@@ -7979,10 +8168,12 @@ function initTrends() {
       '<div class="trend-top card-header"><div class="card-drag-handle"><b>USB Camera</b></div></div>' +
       '<div class="muted small" style="margin-top:8px;">Status: <span id="home2CameraStatus">Disconnected</span></div>' +
       '<div class="camera-controls">' +
-        '<button id="home2CameraStartBtn" class="btn">Start Stream</button>' +
-        '<button id="home2CameraStopBtn" class="btn">Stop Stream</button>' +
+        '<button id="home2CameraStartBtn" class="btn" onclick="startCameraStream()">Start Stream</button>' +
+        '<button id="home2CameraStopBtn" class="btn" onclick="stopCameraStream()">Stop Stream</button>' +
         '<a id="home2CameraSnapshotBtn" class="btn" href="/camera/snapshot" target="_blank" rel="noopener">Take Snapshot</a>' +
+        '<button id="home2CameraTriggerBtn" class="btn">Trigger Snapshot</button>' +
       '</div>' +
+      '<div id="home2CameraMeta" class="muted small">Latest: n/a</div>' +
       '<img id="home2CameraStreamImg" class="camera-stream hidden" alt="USB Camera Stream" />' +
       '<div class="card-resize-handle"></div>';
     home2Grid.appendChild(cameraCard);
@@ -8661,7 +8852,7 @@ async function pollStatus() {
     renderFreshness(health.freshness || {});
     const rawHealthEl = document.getElementById('rawHealth');
     if (rawHealthEl) rawHealthEl.innerText = health.raw || '';
-    updateCameraPanel(health.camera || 'disconnected');
+    updateCameraPanel(health.camera || { connected: false });
     setLastUpdatedNow();
   } catch (err) {
     if (!(err instanceof DOMException && err.name === 'AbortError')) {
@@ -9062,8 +9253,8 @@ def healthz() -> Dict[str, str]:
 
 
 @APP.get("/health")
-def health() -> Dict[str, str]:
-  return {"status": "ok", "camera": camera_status()}
+def health() -> Dict[str, object]:
+  return {"status": "ok", "camera": camera_health_payload()}
 
 
 @APP.get("/readyz")
