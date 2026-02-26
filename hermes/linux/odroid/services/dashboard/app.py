@@ -5879,20 +5879,31 @@ function updateCameraPanel(status) {
   if (normalized !== 'connected' && cameraStreamActive) {
     stopCameraStream(false);
   }
-  const statusEl = document.getElementById('cameraStatus');
-  if (statusEl) {
-    statusEl.textContent = normalized === 'connected' ? 'Connected' : 'Disconnected';
+  const statusIds = ['cameraStatus', 'home2CameraStatus'];
+  for (const statusId of statusIds) {
+    const statusEl = document.getElementById(statusId);
+    if (statusEl) {
+      statusEl.textContent = normalized === 'connected' ? 'Connected' : 'Disconnected';
+    }
   }
-  const startBtn = document.getElementById('cameraStartBtn');
-  if (startBtn) {
-    startBtn.disabled = normalized !== 'connected' || cameraStreamActive;
+  const startIds = ['cameraStartBtn', 'home2CameraStartBtn'];
+  for (const startId of startIds) {
+    const startBtn = document.getElementById(startId);
+    if (startBtn) {
+      startBtn.disabled = normalized !== 'connected' || cameraStreamActive;
+    }
   }
-  const stopBtn = document.getElementById('cameraStopBtn');
-  if (stopBtn) {
-    stopBtn.disabled = !cameraStreamActive;
+  const stopIds = ['cameraStopBtn', 'home2CameraStopBtn'];
+  for (const stopId of stopIds) {
+    const stopBtn = document.getElementById(stopId);
+    if (stopBtn) {
+      stopBtn.disabled = !cameraStreamActive;
+    }
   }
-  const snapshotBtn = document.getElementById('cameraSnapshotBtn');
-  if (snapshotBtn) {
+  const snapshotIds = ['cameraSnapshotBtn', 'home2CameraSnapshotBtn'];
+  for (const snapshotId of snapshotIds) {
+    const snapshotBtn = document.getElementById(snapshotId);
+    if (!snapshotBtn) continue;
     snapshotBtn.classList.toggle('disabled', normalized !== 'connected');
     snapshotBtn.setAttribute('aria-disabled', normalized !== 'connected' ? 'true' : 'false');
     snapshotBtn.tabIndex = normalized !== 'connected' ? -1 : 0;
@@ -5903,20 +5914,29 @@ function startCameraStream() {
   if (cameraState !== 'connected') {
     return;
   }
-  const imgEl = document.getElementById('cameraStreamImg');
-  if (!imgEl) {
+  const imageIds = ['cameraStreamImg', 'home2CameraStreamImg'];
+  let hasTarget = false;
+  cameraStreamActive = true;
+  for (const imageId of imageIds) {
+    const imgEl = document.getElementById(imageId);
+    if (!imgEl) continue;
+    hasTarget = true;
+    imgEl.src = '/camera/stream?ts=' + String(Date.now());
+    imgEl.classList.remove('hidden');
+  }
+  if (!hasTarget) {
+    cameraStreamActive = false;
     return;
   }
-  cameraStreamActive = true;
-  imgEl.src = '/camera/stream?ts=' + String(Date.now());
-  imgEl.classList.remove('hidden');
   updateCameraPanel(cameraState);
 }
 
 function stopCameraStream(updateUi = true) {
-  const imgEl = document.getElementById('cameraStreamImg');
+  const imageIds = ['cameraStreamImg', 'home2CameraStreamImg'];
   cameraStreamActive = false;
-  if (imgEl) {
+  for (const imageId of imageIds) {
+    const imgEl = document.getElementById(imageId);
+    if (!imgEl) continue;
     imgEl.src = '';
     imgEl.classList.add('hidden');
   }
@@ -5926,29 +5946,38 @@ function stopCameraStream(updateUi = true) {
 }
 
 function bindCameraControls() {
-  const startBtn = document.getElementById('cameraStartBtn');
-  if (startBtn) {
-    startBtn.addEventListener('click', (event) => {
-      event.preventDefault();
-      startCameraStream();
-    });
-  }
-  const stopBtn = document.getElementById('cameraStopBtn');
-  if (stopBtn) {
-    stopBtn.addEventListener('click', (event) => {
-      event.preventDefault();
-      stopCameraStream();
-    });
-  }
-  const snapshotBtn = document.getElementById('cameraSnapshotBtn');
-  if (snapshotBtn) {
-    snapshotBtn.addEventListener('click', (event) => {
-      if (cameraState !== 'connected') {
+  const controlSets = [
+    ['cameraStartBtn', 'cameraStopBtn', 'cameraSnapshotBtn'],
+    ['home2CameraStartBtn', 'home2CameraStopBtn', 'home2CameraSnapshotBtn'],
+  ];
+  for (const [startId, stopId, snapId] of controlSets) {
+    const startBtn = document.getElementById(startId);
+    if (startBtn && startBtn.dataset.bound !== '1') {
+      startBtn.dataset.bound = '1';
+      startBtn.addEventListener('click', (event) => {
         event.preventDefault();
-        return;
-      }
-      snapshotBtn.href = '/camera/snapshot?ts=' + String(Date.now());
-    });
+        startCameraStream();
+      });
+    }
+    const stopBtn = document.getElementById(stopId);
+    if (stopBtn && stopBtn.dataset.bound !== '1') {
+      stopBtn.dataset.bound = '1';
+      stopBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        stopCameraStream();
+      });
+    }
+    const snapshotBtn = document.getElementById(snapId);
+    if (snapshotBtn && snapshotBtn.dataset.bound !== '1') {
+      snapshotBtn.dataset.bound = '1';
+      snapshotBtn.addEventListener('click', (event) => {
+        if (cameraState !== 'connected') {
+          event.preventDefault();
+          return;
+        }
+        snapshotBtn.href = '/camera/snapshot?ts=' + String(Date.now());
+      });
+    }
   }
   updateCameraPanel('disconnected');
 }
@@ -7951,10 +7980,15 @@ function initTrends() {
     visionCard.className = 'card trend-card chart home2-card home2-vision-card';
     visionCard.dataset.cardId = 'vision-card';
     visionCard.innerHTML =
-      '<div class="trend-top card-header"><div class="card-drag-handle"><b>Vision Data</b></div></div>' +
+      '<div class="trend-top card-header"><div class="card-drag-handle"><b>USB Camera</b></div></div>' +
       '<div id="vision-now-state" class="status-pill state-offline" style="width:max-content">No CAM data</div>' +
-      '<div class="vision-snap-wrap"><img id="vision-snap-img" class="vision-snap" alt="Vision snapshot" src="/api/vision/snapshot/latest.jpg?ts=0" /></div>' +
-      '<div class="vision-actions"><button id="vision-snap-capture" class="btn">Capture</button></div>' +
+      '<div class="muted small" style="margin-top:8px;">Status: <span id="home2CameraStatus">Disconnected</span></div>' +
+      '<div class="camera-controls">' +
+        '<button id="home2CameraStartBtn" class="btn">Start Stream</button>' +
+        '<button id="home2CameraStopBtn" class="btn">Stop Stream</button>' +
+        '<a id="home2CameraSnapshotBtn" class="btn" href="/camera/snapshot" target="_blank" rel="noopener">Take Snapshot</a>' +
+      '</div>' +
+      '<img id="home2CameraStreamImg" class="camera-stream hidden" alt="USB Camera Stream" />' +
       '<div class="vision-snap-meta"><span id="vision-snap-age">Last snapshot: n/a</span><span id="vision-snap-trigger">Trigger: none</span></div>' +
       '<div class="home2-vision-grid">' +
         '<div class="home2-vision-kv"><div class="k">Light</div><div id="vision-now-light" class="v">n/a</div></div>' +
@@ -7963,10 +7997,9 @@ function initTrends() {
         '<div class="home2-vision-kv"><div class="k">Frame Seq</div><div id="vision-now-seq" class="v">n/a</div></div>' +
       '</div>' +
       '<div class="home2-vision-foot"><span id="vision-now-age">Last seen: n/a</span></div>' +
-      '<div id="vision-snap-modal" class="vision-modal hidden"><div class="vision-modal-content"><button id="vision-snap-modal-close" class="btn vision-modal-close">Close</button><img id="vision-snap-modal-img" alt="Vision snapshot large" src="" /></div></div>' +
       '<div class="card-resize-handle"></div>';
     home2Grid.appendChild(visionCard);
-    bindVisionSnapshotUi();
+    bindCameraControls();
 
     const radarCard = document.createElement('div');
     radarCard.className = 'card trend-card chart hp-card home2-card';
