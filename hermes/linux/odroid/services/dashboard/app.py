@@ -62,6 +62,8 @@ from matplotlib import pyplot as plt
 
 try:
   from telnet_portal import HermesTelnetPortal
+  import telnet_portal
+  LOGGER.info("telnet_portal imported from %s", telnet_portal.__file__)
 except Exception:
   HermesTelnetPortal = None  # type: ignore
 
