@@ -1,3 +1,6 @@
+@APP.get("/healthz")
+def healthz() -> dict:
+  return {"status": "ok"}
 def strip_telnet_iac(buf: bytes) -> bytes:
   # Remove Telnet IAC negotiation sequences
   out = bytearray()
@@ -9730,12 +9733,20 @@ def _env_flag(name: str, default: str = "false") -> bool:
 @APP.on_event("startup")
 async def dashboard_startup() -> None:
   global telnet_portal_server
-  # Force-enable telnet portal for testing
-  if HermesTelnetPortal is None:
-    LOGGER.warning("telnet_portal module failed to import")
+  LOGGER.warning("TELNET_STARTUP: entered")
+  try:
+    import telnet_portal as _tp
+    portal_cls = getattr(_tp, "HermesTelnetPortal", None)
+    LOGGER.warning("TELNET_STARTUP: telnet_portal imported from %s", getattr(_tp, "__file__", "<unknown>"))
+    LOGGER.warning("TELNET_STARTUP: portal_cls=%r", portal_cls)
+  except Exception:
+    LOGGER.exception("TELNET_STARTUP: telnet_portal import failed")
     return
 
-  # Bind telnet portal to all interfaces for compatibility
+  if portal_cls is None:
+    LOGGER.error("TELNET_STARTUP: HermesTelnetPortal not found in telnet_portal.py")
+    return
+
   host = "0.0.0.0"
   try:
     port = int(str(os.environ.get("TELNET_PORT", "8023")).strip() or "8023")
@@ -9749,7 +9760,8 @@ async def dashboard_startup() -> None:
     cols = 30
 
   try:
-    telnet_portal_server = HermesTelnetPortal(
+    global telnet_portal_server
+    telnet_portal_server = portal_cls(
       status_provider=build_flip_status,
       report_provider=build_telnet_report_lines,
       snapshot_action=lambda: capture_snapshot(reason="telnet", extra={"source": "telnet_portal"}),
@@ -9760,10 +9772,17 @@ async def dashboard_startup() -> None:
       cols=cols,
     )
     await telnet_portal_server.start()
-    LOGGER.info("telnet portal started host=%s port=%d bind_lan=%s token_required=%s", host, port, bind_lan, bool(token))
-  except Exception as exc:
+    LOGGER.warning("TELNET_STARTUP: portal_cls.start() called host=%s port=%d", host, port)
+    # Evidence: Try to connect to 127.0.0.1:port
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
+    result = sock.connect_ex(("127.0.0.1", port))
+    sock.close()
+    LOGGER.warning("TELNET_STARTUP: connect_ex(127.0.0.1:%d) result=%s", port, result)
+  except Exception:
     telnet_portal_server = None
-    LOGGER.warning("failed to start telnet portal: %s", exc)
+    LOGGER.exception("TELNET_STARTUP: failed to start telnet portal")
 
 
 @APP.on_event("shutdown")
@@ -9773,8 +9792,10 @@ async def dashboard_shutdown() -> None:
     return
   try:
     await telnet_portal_server.stop()
+  except asyncio.CancelledError:
+    LOGGER.info("TELNET_SHUTDOWN: CancelledError (normal during shutdown)")
   except Exception as exc:
-    LOGGER.warning("failed to stop telnet portal cleanly: %s", exc)
+    LOGGER.warning("TELNET_SHUTDOWN: failed to stop telnet portal cleanly: %s", exc)
   finally:
     telnet_portal_server = None
 
