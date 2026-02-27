@@ -9599,12 +9599,8 @@ async def dashboard_startup() -> None:
     LOGGER.warning("telnet_portal module failed to import")
     return
 
-  bind_lan = _env_flag("TELNET_BIND_LAN", "false")
-  env_host = str(os.environ.get("TELNET_HOST", "127.0.0.1")).strip() or "127.0.0.1"
-  if bind_lan:
-    host = "0.0.0.0" if env_host in {"127.0.0.1", "localhost"} else env_host
-  else:
-    host = "127.0.0.1"
+  # Force telnet portal to bind to 10.0.0.80
+  host = "10.0.0.80"
   try:
     port = int(str(os.environ.get("TELNET_PORT", "8023")).strip() or "8023")
   except Exception:
