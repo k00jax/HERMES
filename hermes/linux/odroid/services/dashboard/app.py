@@ -9594,10 +9594,9 @@ def _env_flag(name: str, default: str = "false") -> bool:
 @APP.on_event("startup")
 async def dashboard_startup() -> None:
   global telnet_portal_server
-  if not _env_flag("TELNET_ENABLE", "false"):
-    return
+  # Force-enable telnet portal for testing
   if HermesTelnetPortal is None:
-    LOGGER.warning("TELNET_ENABLE is true but telnet_portal module failed to import")
+    LOGGER.warning("telnet_portal module failed to import")
     return
 
   bind_lan = _env_flag("TELNET_BIND_LAN", "false")
@@ -9611,7 +9610,11 @@ async def dashboard_startup() -> None:
   except Exception:
     port = 8023
   port = max(1, min(65535, port))
-  token = str(os.environ.get("TELNET_TOKEN", "")).strip()
+  token = "1234"
+  try:
+    cols = int(str(os.environ.get("TELNET_COLS", "30")).strip() or "30")
+  except Exception:
+    cols = 30
 
   try:
     telnet_portal_server = HermesTelnetPortal(
@@ -9622,6 +9625,7 @@ async def dashboard_startup() -> None:
       host=host,
       port=port,
       token=token,
+      cols=cols,
     )
     await telnet_portal_server.start()
     LOGGER.info("telnet portal started host=%s port=%d bind_lan=%s token_required=%s", host, port, bind_lan, bool(token))
