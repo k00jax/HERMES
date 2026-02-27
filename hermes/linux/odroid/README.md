@@ -77,6 +77,23 @@ curl -sS http://100.93.105.81:8000/healthz
 Readiness checks (`/readyz`) include DB readability, logger status, and per-table ingest freshness.
 The watchdog should target localhost readiness (`http://127.0.0.1:8000/readyz`) so local restart logic is independent of Tailnet state.
 
+### Telnet HERMES Portal (optional)
+
+Local text portal for VT100-ish clients (for example KaiOS Mocha Telnet).
+
+Quick local test:
+
+```bash
+cd ~/hermes-src/hermes/linux/odroid/services/dashboard
+TELNET_ENABLE=true TELNET_TOKEN=hermes TELNET_BIND_LAN=true python3 app.py
+telnet <odroid_ip> 8023
+```
+
+Defaults and safety:
+- Disabled by default (`TELNET_ENABLE=false`).
+- Binds localhost by default (`127.0.0.1:8023`).
+- LAN binding requires explicit `TELNET_BIND_LAN=true`.
+
 ## Events/Anomaly Emitter (systemd timer)
 
 Builds high-signal `events` rows (`stale_detected`, `stale_recovered`, `reboot_detected`) from recent telemetry every 10 seconds.

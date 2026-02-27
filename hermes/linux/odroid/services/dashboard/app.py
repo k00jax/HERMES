@@ -3,6 +3,7 @@ import base64
 import glob
 import re
 import html
+import asyncio
 import sqlite3
 import subprocess
 import os
@@ -32,6 +33,11 @@ from starlette.background import BackgroundTask
 import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
+
+try:
+  from telnet_portal import HermesTelnetPortal
+except Exception:
+  HermesTelnetPortal = None  # type: ignore
 
 try:
   from PIL import Image
@@ -197,6 +203,7 @@ vision_snapshot_pattern_cache: Dict[str, object] = {
 
 camera_stream_state_lock = threading.Lock()
 camera_stream_clients = 0
+telnet_portal_server = None
 
 try:
   os.makedirs(SNAP_DIR, exist_ok=True)
@@ -2587,6 +2594,69 @@ def build_flip_status() -> Dict[str, object]:
   return payload
 
 
+def build_telnet_report_lines(limit: int = 5) -> List[str]:
+  if not DB_PATH.exists():
+    return []
+  lines: List[str] = []
+  try:
+    with open_db() as conn:
+      conn.row_factory = sqlite3.Row
+      try:
+        rows = conn.execute(
+          "SELECT ts_utc, severity, kind, message FROM events ORDER BY id DESC LIMIT ?",
+          (max(1, min(int(limit), 20)),),
+        ).fetchall()
+      except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+          return []
+        raise
+      for row in rows:
+        ts_utc = str(row["ts_utc"] or "n/a")
+        severity = str(row["severity"] or "n/a")
+        kind = str(row["kind"] or "n/a")
+        message = str(row["message"] or "").strip()
+        if len(message) > 96:
+          message = message[:96].rstrip() + "…"
+        lines.append(f"{ts_utc} | {severity} | {kind} | {message or 'n/a'}")
+  except Exception:
+    return []
+  return lines
+
+
+def trigger_visual_confirm(reason: str = "manual", command: str = "CAM,CAPTURE", upload_url: str = "") -> Dict[str, object]:
+  cleaned_reason = (str(reason or "manual").strip()[:64] or "manual").replace(",", "_")
+  command = str(command or "CAM,CAPTURE").strip() or "CAM,CAPTURE"
+  command_lc = command.lower()
+
+  upload = str(upload_url or "").strip()
+  if not upload:
+    upload = str(os.environ.get("HERMES_VISION_UPLOAD_URL") or "").strip()
+
+  if command_lc.startswith("cam,capture"):
+    if "reason=" not in command_lc:
+      command = f"{command},reason={cleaned_reason}"
+    if "url=" not in command.lower() and upload:
+      command = f"{command},url={upload}"
+
+  direct = {"attempted": False, "ok": False, "port": "", "error": ""}
+  cmd = {"ok": False, "stdout": "", "stderr": "", "code": 1}
+  if command_lc.startswith("cam,capture"):
+    direct = send_esp_direct_command(command)
+  if not direct.get("ok"):
+    cmd = run_cmd(["python3", str(CLIENT_PATH), "send", command], timeout_sec=2)
+
+  raw = "OK" if direct.get("ok") else str(cmd.get("stdout") or cmd.get("stderr") or "")
+  return {
+    "ok": bool(direct.get("ok") or cmd.get("ok")),
+    "reason": cleaned_reason,
+    "command": command,
+    "accepted": bool(direct.get("ok") or cmd.get("ok")),
+    "stub": not bool(direct.get("ok") or cmd.get("ok")),
+    "raw": raw,
+    "direct": direct,
+  }
+
+
 def render_flip_page(status: Dict[str, object]) -> str:
   def as_text(value: object, *, digits: int = None, suffix: str = "") -> str:
     if value is None:
@@ -3625,32 +3695,8 @@ def api_vision_snapshot_latest() -> FileResponse:
 def api_vision_capture(request: Request, payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
   reason = (str(payload.get("reason") or "manual").strip()[:64] or "manual").replace(",", "_")
   upload_url = resolve_snapshot_upload_url(request, payload)
-
   command = str(payload.get("command") or "CAM,CAPTURE").strip() or "CAM,CAPTURE"
-  command_lc = command.lower()
-  if command_lc.startswith("cam,capture"):
-    if "reason=" not in command_lc:
-      command = f"{command},reason={reason}"
-    if "url=" not in command.lower() and upload_url:
-      command = f"{command},url={upload_url}"
-
-  direct = {"attempted": False, "ok": False, "port": "", "error": ""}
-  cmd = {"ok": False, "stdout": "", "stderr": "", "code": 1}
-  if command_lc.startswith("cam,capture"):
-    direct = send_esp_direct_command(command)
-  if not direct.get("ok"):
-    cmd = run_cmd(["python3", str(CLIENT_PATH), "send", command], timeout_sec=2)
-
-  raw = "OK" if direct.get("ok") else str(cmd.get("stdout") or cmd.get("stderr") or "")
-  return {
-    "ok": bool(direct.get("ok") or cmd.get("ok")),
-    "reason": reason,
-    "command": command,
-    "accepted": bool(direct.get("ok") or cmd.get("ok")),
-    "stub": not bool(direct.get("ok") or cmd.get("ok")),
-    "raw": raw,
-    "direct": direct,
-  }
+  return trigger_visual_confirm(reason=reason, command=command, upload_url=upload_url)
 
 
 @APP.post("/api/radar/calibrate")
@@ -9539,6 +9585,62 @@ def settings_page() -> HTMLResponse:
 @APP.get("/field", response_class=HTMLResponse)
 def field_page() -> HTMLResponse:
   return HTMLResponse(render_field_page())
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+  return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+@APP.on_event("startup")
+async def dashboard_startup() -> None:
+  global telnet_portal_server
+  if not _env_flag("TELNET_ENABLE", "false"):
+    return
+  if HermesTelnetPortal is None:
+    LOGGER.warning("TELNET_ENABLE is true but telnet_portal module failed to import")
+    return
+
+  bind_lan = _env_flag("TELNET_BIND_LAN", "false")
+  env_host = str(os.environ.get("TELNET_HOST", "127.0.0.1")).strip() or "127.0.0.1"
+  if bind_lan:
+    host = "0.0.0.0" if env_host in {"127.0.0.1", "localhost"} else env_host
+  else:
+    host = "127.0.0.1"
+  try:
+    port = int(str(os.environ.get("TELNET_PORT", "8023")).strip() or "8023")
+  except Exception:
+    port = 8023
+  port = max(1, min(65535, port))
+  token = str(os.environ.get("TELNET_TOKEN", "")).strip()
+
+  try:
+    telnet_portal_server = HermesTelnetPortal(
+      status_provider=build_flip_status,
+      report_provider=build_telnet_report_lines,
+      snapshot_action=lambda: capture_snapshot(reason="telnet", extra={"source": "telnet_portal"}),
+      confirm_action=lambda: trigger_visual_confirm(reason="telnet"),
+      host=host,
+      port=port,
+      token=token,
+    )
+    await telnet_portal_server.start()
+    LOGGER.info("telnet portal started host=%s port=%d bind_lan=%s token_required=%s", host, port, bind_lan, bool(token))
+  except Exception as exc:
+    telnet_portal_server = None
+    LOGGER.warning("failed to start telnet portal: %s", exc)
+
+
+@APP.on_event("shutdown")
+async def dashboard_shutdown() -> None:
+  global telnet_portal_server
+  if telnet_portal_server is None:
+    return
+  try:
+    await telnet_portal_server.stop()
+  except Exception as exc:
+    LOGGER.warning("failed to stop telnet portal cleanly: %s", exc)
+  finally:
+    telnet_portal_server = None
 
 
 @APP.get("/healthz")
