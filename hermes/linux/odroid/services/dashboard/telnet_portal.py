@@ -172,9 +172,9 @@ class HermesTelnetPortal:
       await self._send(writer, "type: help\n")
       await self._prompt(writer)
 
-        # Show menu if already authenticated (tokenless mode)
-        if state.authenticated:
-          await self._send(writer, self.MENU_TEXT)
+      # Show menu if already authenticated (tokenless mode)
+      if state.authenticated:
+        await self._send(writer, self.MENU_TEXT)
 
       input_buffer = ""
       while not reader.at_eof():
