@@ -4,12 +4,71 @@ import logging
 import socket
 import textwrap
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 StatusProvider = Callable[[], Dict[str, object]]
 ReportProvider = Callable[[int], List[str]]
 ActionProvider = Callable[[], Dict[str, object]]
+
+IAC = 255
+DONT = 254
+DO = 253
+WONT = 252
+WILL = 251
+SB = 250
+SE = 240
+
+
+def telnet_process_iac(data: bytes) -> Tuple[bytes, bytes, bytes]:
+  clean = bytearray()
+  reply = bytearray()
+  i = 0
+  n = len(data)
+  while i < n:
+    b = data[i]
+    if b != IAC:
+      clean.append(b)
+      i += 1
+      continue
+
+    if i + 1 >= n:
+      break
+    cmd = data[i + 1]
+
+    if cmd == IAC:
+      clean.append(IAC)
+      i += 2
+      continue
+
+    if cmd in (DO, DONT, WILL, WONT):
+      if i + 2 >= n:
+        break
+      opt = data[i + 2]
+      if cmd == DO:
+        reply.extend((IAC, WONT, opt))
+      elif cmd == WILL:
+        reply.extend((IAC, DONT, opt))
+      i += 3
+      continue
+
+    if cmd == SB:
+      j = i + 2
+      found = False
+      while j + 1 < n:
+        if data[j] == IAC and data[j + 1] == SE:
+          found = True
+          j += 2
+          break
+        j += 1
+      if not found:
+        break
+      i = j
+      continue
+
+    i += 2
+
+  return bytes(clean), bytes(reply), data[i:]
 
 
 MENU_TEXT = (
@@ -29,7 +88,7 @@ MENU_TEXT = (
 class SessionState:
   authenticated: bool = False
   current_screen: str = "1"
-  show_menu: bool = True
+  token_buf: str = ""
 
 
 class HermesTelnetPortal:
@@ -90,26 +149,6 @@ class HermesTelnetPortal:
     self._server = None
     self._logger.info("TELNET_SHUTDOWN: server closed")
 
-  def _scrub(self, data: bytes) -> str:
-    out = bytearray()
-    i = 0
-    while i < len(data):
-      b = data[i]
-      if b == 255:
-        i += 1
-        if i < len(data):
-          cmd = data[i]
-          i += 1
-          if cmd in (251, 252, 253, 254):
-            i += 1
-        continue
-      if b in (0,):
-        i += 1
-        continue
-      out.append(b)
-      i += 1
-    return out.decode("utf-8", errors="ignore")
-
   def _wrap_lines(self, lines: List[str], limit: int = 10) -> List[str]:
     out: List[str] = []
     for raw in lines[:limit]:
@@ -128,7 +167,8 @@ class HermesTelnetPortal:
 
   async def _send_block(self, writer: asyncio.StreamWriter, lines: List[str], limit: int = 10) -> None:
     payload = "\r\n".join(self._wrap_lines(lines, limit=limit)) + "\r\n"
-    writer.write(payload.encode("utf-8", errors="ignore"))
+    out = payload.encode("utf-8", errors="ignore")[:800]
+    writer.write(out)
     await writer.drain()
 
   def _fmt_num(self, value: object, unit: str = "", decimals: int = 1) -> str:
@@ -238,7 +278,9 @@ class HermesTelnetPortal:
 
   async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     self._client_count += 1
-    state = SessionState(authenticated=not bool(self._token), current_screen="1", show_menu=True)
+    state = SessionState(authenticated=not bool(self._token), current_screen="1", token_buf="")
+    recv_buf = b""
+    cmd_buf = bytearray()
     try:
       now_local = datetime.datetime.now().astimezone().strftime("%H:%M:%S")
       host = socket.gethostname()
@@ -249,45 +291,77 @@ class HermesTelnetPortal:
         await self._show_menu(writer)
 
       while not reader.at_eof():
-        raw = await reader.read(1)
+        raw = await reader.read(256)
         if not raw:
           break
-        text = self._scrub(raw)
-        if not text:
-          continue
-        ch = text.strip()
-        if not ch:
-          continue
 
-        if self._token and not state.authenticated:
-          if ch in ("\r", "\n"):
+        recv_buf += raw
+        clean, reply, remaining = telnet_process_iac(recv_buf)
+        recv_buf = remaining
+        if reply:
+          writer.write(reply)
+          await writer.drain()
+        if clean:
+          cmd_buf.extend(clean)
+
+        if not cmd_buf:
+          continue
+        if len(cmd_buf) > 128:
+          del cmd_buf[:-128]
+
+        process_bytes = bytes(cmd_buf)
+        cmd_buf.clear()
+        for b in process_bytes:
+          if b == 0:
             continue
-          token_buf = getattr(state, "token_buf", "") + ch
-          setattr(state, "token_buf", token_buf)
-          if token_buf == self._token:
-            state.authenticated = True
-            await self._send_block(writer, ["AUTH OK"], limit=2)
+
+          if self._token and not state.authenticated:
+            if b in (10, 13):
+              if state.token_buf:
+                if state.token_buf == self._token:
+                  state.authenticated = True
+                  await self._send_block(writer, ["AUTH OK"], limit=2)
+                  await self._show_menu(writer)
+                else:
+                  await self._send_block(writer, ["AUTH FAIL", "TRY AGAIN"], limit=4)
+                state.token_buf = ""
+              continue
+
+            ch = chr(b)
+            state.token_buf += ch
+            if state.token_buf == self._token:
+              state.authenticated = True
+              await self._send_block(writer, ["AUTH OK"], limit=2)
+              await self._show_menu(writer)
+              state.token_buf = ""
+              continue
+            if len(state.token_buf) >= max(len(self._token), 16):
+              await self._send_block(writer, ["AUTH FAIL", "TRY AGAIN"], limit=4)
+              state.token_buf = ""
+            continue
+
+          if b in (10, 13, 9, 32):
+            continue
+          ch = chr(b)
+          if ch not in {"0", "1", "2", "3", "4", "5", "9", "*"}:
+            await self._send_block(writer, ["INVALID", "* MENU", "0 EXIT"], limit=4)
+            continue
+
+          if ch == "0":
+            await self._send_block(writer, ["BYE"], limit=2)
+            return
+          if ch == "*":
             await self._show_menu(writer)
-            setattr(state, "token_buf", "")
-          elif len(token_buf) >= max(len(self._token), 12):
-            await self._send_block(writer, ["AUTH FAIL", "TRY AGAIN"], limit=4)
-            setattr(state, "token_buf", "")
-          continue
+            continue
+          if ch in {"1", "2", "3", "4", "5"}:
+            state.current_screen = ch
+          screen_lines = self._render_screen(state.current_screen)
+          await self._send_block(writer, screen_lines, limit=10)
 
-        if ch not in {"0", "1", "2", "3", "4", "5", "9", "*"}:
-          await self._send_block(writer, ["INVALID", "* MENU", "0 EXIT"], limit=4)
+        if reader.at_eof():
           continue
-
-        if ch == "0":
-          await self._send_block(writer, ["BYE"], limit=2)
-          break
-        if ch == "*":
-          await self._show_menu(writer)
-          continue
-        if ch in {"1", "2", "3", "4", "5"}:
-          state.current_screen = ch
-        screen_lines = self._render_screen(state.current_screen)
-        await self._send_block(writer, screen_lines, limit=10)
+    except (ConnectionResetError, BrokenPipeError):
+      pass
     except Exception as exc:
       self._last_error = str(exc)
       self._logger.exception("TELNET_CLIENT: handler error")
