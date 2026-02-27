@@ -55,17 +55,50 @@ TELNET_HOST = "0.0.0.0"
 TELNET_PORT = 8023
 TELNET_MENU = (
   "\r\nMENU:\r\n"
-  " 1 System Status\r\n"
-  " 2 Environment\r\n"
+  " 1 System\r\n"
+  " 2 Env\r\n"
   " 3 Radar\r\n"
   " 4 Camera\r\n"
   " 5 Events\r\n"
-  " 6 Calibration\r\n"
+  " 6 Calib\r\n"
   " 7 Settings\r\n"
-  " 9 Refresh current screen\r\n"
+  " 8 Live ON/OFF\r\n"
+  " 9 Refresh\r\n"
   " 0 Exit\r\n"
 )
 TELNET_BANNER = "HERMES TELNET UI\r\n" + TELNET_MENU
+TELNET_COLS = 36
+
+def clip(s):
+  s = str(s)
+  return (s[:TELNET_COLS-3] + "...") if len(s) > TELNET_COLS else s
+
+def line(label, value):
+  l = f"{label}: {value}"
+  return clip(l)
+
+def bar(value, vmin, vmax, width=16):
+  try:
+    value = float(value)
+    vmin = float(vmin)
+    vmax = float(vmax)
+    frac = (value-vmin)/(vmax-vmin) if vmax>vmin else 0
+    n = int(frac*width)
+    return "[" + "#"*n + "-"*(width-n) + "]"
+  except:
+    return "[" + "-"*width + "]"
+
+def spark(values, width=16):
+  chars = " .:-=+*#%@"
+  if not values:
+    return " "*width
+  vmin, vmax = min(values), max(values)
+  rng = vmax-vmin if vmax>vmin else 1
+  out = ""
+  for v in values[-width:]:
+    idx = int((v-vmin)/rng*(len(chars)-1)) if rng else 0
+    out += chars[idx]
+  return out
 LOGGER = logging.getLogger("hermes.dashboard")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -9678,56 +9711,75 @@ def telnet_invalid_footer():
 
 # --- Screen renderers ---
 async def telnet_screen_1():
-  # System Status
+  # System
   try:
     status = build_flip_status()
-    lines = ["SYSTEM STATUS"]
-    for k, v in status.items():
-      lines.append(f"{k}: {v}")
-    return "\r\n".join(lines[:10]) + "\r\n" + telnet_menu_footer()
+    lines = [ansi_clear()+clip("SYSTEM")]
+    ts = status.get("ts", "n/a")
+    lines.append(line("Time", ts))
+    pres = status.get("presence", {})
+    lines.append(line("Pres", pres.get("summary", "n/a")))
+    lines.append(line("Target", pres.get("target", "n/a")))
+    lines.append(line("Dist", pres.get("detect_cm", "n/a")))
+    lines.append(line("Visual", "YES" if status.get("visual_confirm", {}).get("yes") else "NO"))
+    lines.append(line("EnvT", status.get("env", {}).get("temp_c", "n/a")))
+    lines.append(line("AirCO2", status.get("air", {}).get("eco2_ppm", "n/a")))
+    lines.append(line("Cam", "YES" if status.get("camera", {}).get("connected") else "NO"))
+    return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
   except Exception as exc:
-    return f"Error: {exc}\r\n" + telnet_menu_footer()
+    return ansi_clear()+clip(f"Error: {exc}") + "\r\n" + telnet_menu_footer()
 
 async def telnet_screen_2():
-  # Environment
+  # Env
   try:
     status = build_flip_status()
     env = status.get("env", {})
-    lines = ["ENVIRONMENT"]
-    for k in ("temp_c", "hum_pct", "eco2_ppm", "tvoc_ppb"):
-      lines.append(f"{k}: {env.get(k, 'n/a')}")
+    lines = [ansi_clear()+clip("ENV")]
+    t = env.get("temp_c", 0)
+    h = env.get("hum_pct", 0)
+    eco2 = env.get("eco2_ppm", 0)
+    tvoc = env.get("tvoc_ppb", 0)
+    lines.append(line("T", f"{t}C {bar(t,0,50)}"))
+    lines.append(line("H", f"{h}% {bar(h,0,100)}"))
+    lines.append(line("eCO2", f"{eco2} {bar(eco2,400,2000)}"))
+    lines.append(line("tVOC", f"{tvoc} {bar(tvoc,0,600)}"))
+    lines.append(line("Age", "2s"))
     return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
   except Exception as exc:
-    return f"Error: {exc}\r\n" + telnet_menu_footer()
+    return ansi_clear()+clip(f"Error: {exc}") + "\r\n" + telnet_menu_footer()
 
 async def telnet_screen_3():
   # Radar
   try:
     status = build_flip_status()
     radar = status.get("radar", {})
-    lines = ["RADAR"]
-    for k, v in radar.items():
-      lines.append(f"{k}: {v}")
-    return "\r\n".join(lines[:10]) + "\r\n" + telnet_menu_footer()
+    lines = [ansi_clear()+clip("RADAR")]
+    lines.append(line("Presence", "YES" if radar.get("presence", False) else "NO"))
+    lines.append(line("Dist", f"{radar.get('dist_m','n/a')}m"))
+    lines.append(line("MoveE", radar.get("move_energy", "n/a")))
+    lines.append(line("StillE", radar.get("still_energy", "n/a")))
+    lines.append(line("Age", radar.get("age_s", "n/a")))
+    return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
   except Exception as exc:
-    return f"Error: {exc}\r\n" + telnet_menu_footer()
+    return ansi_clear()+clip(f"Error: {exc}") + "\r\n" + telnet_menu_footer()
 
 async def telnet_screen_4():
   # Camera
   try:
     status = build_flip_status()
     camera = status.get("camera", {})
-    lines = ["CAMERA"]
-    for k, v in camera.items():
-      lines.append(f"{k}: {v}")
-    return "\r\n".join(lines[:10]) + "\r\n" + telnet_menu_footer()
+    lines = [ansi_clear()+clip("CAMERA")]
+    lines.append(line("Conn", "YES" if camera.get("connected") else "NO"))
+    ts = camera.get("last_snapshot_ts", "n/a")
+    lines.append(line("Last", clip(ts)))
+    lines.append(line("Snap", clip(camera.get("id", "n/a"))))
+    return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
   except Exception as exc:
-    return f"Error: {exc}\r\n" + telnet_menu_footer()
+    return ansi_clear()+clip(f"Error: {exc}") + "\r\n" + telnet_menu_footer()
 
 async def telnet_screen_5():
   # Events (last 5)
   try:
-    # Use the same DB path as elsewhere
     import sqlite3
     DB_PATH = "/home/odroid/hermes-data/db/hermes.sqlite3"
     conn = sqlite3.connect(DB_PATH)
@@ -9735,15 +9787,15 @@ async def telnet_screen_5():
     cur.execute("SELECT ts, event, detail FROM events ORDER BY ts DESC LIMIT 5")
     rows = cur.fetchall()
     conn.close()
-    lines = ["EVENTS (last 5)"]
-    for row in rows:
-      lines.append(f"{row[0]}: {row[1]} {row[2]}")
+    lines = [ansi_clear()+clip("EVENTS (last 5)")]
+    for i, row in enumerate(rows):
+      lines.append(clip(f"{i+1}) {row[1]} {row[2]}"))
     return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
   except Exception as exc:
-    return f"Error: {exc}\r\n" + telnet_menu_footer()
+    return ansi_clear()+clip(f"Error: {exc}") + "\r\n" + telnet_menu_footer()
 
 async def telnet_screen_6():
-  # Calibration (last 1)
+  # Calib (last 1)
   try:
     import sqlite3
     DB_PATH = "/home/odroid/hermes-data/db/hermes.sqlite3"
@@ -9752,19 +9804,18 @@ async def telnet_screen_6():
     cur.execute("SELECT ts, detail FROM calibration ORDER BY ts DESC LIMIT 1")
     row = cur.fetchone()
     conn.close()
-    lines = ["CALIBRATION"]
+    lines = [ansi_clear()+clip("CALIB")]
     if row:
-      lines.append(f"{row[0]}: {row[1]}")
+      lines.append(clip(f"{row[0]}: {row[1]}"))
     else:
       lines.append("No calibration data.")
     return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
   except Exception as exc:
-    return f"Error: {exc}\r\n" + telnet_menu_footer()
+    return ansi_clear()+clip(f"Error: {exc}") + "\r\n" + telnet_menu_footer()
 
 async def telnet_screen_7():
   # Settings
   try:
-    # Use settings from existing helper or fallback
     from pathlib import Path
     import json
     settings_path = Path("/home/odroid/hermes-data/db/settings.json")
@@ -9772,12 +9823,12 @@ async def telnet_screen_7():
       settings = json.loads(settings_path.read_text())
     else:
       settings = {}
-    lines = ["SETTINGS"]
+    lines = [ansi_clear()+clip("SETTINGS")]
     for k, v in list(settings.items())[:10]:
-      lines.append(f"{k}: {v}")
+      lines.append(clip(f"{k}: {v}"))
     return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
   except Exception as exc:
-    return f"Error: {exc}\r\n" + telnet_menu_footer()
+    return ansi_clear()+clip(f"Error: {exc}") + "\r\n" + telnet_menu_footer()
 
 # Dispatcher
 TELNET_SCREEN_DISPATCH = {
@@ -9801,12 +9852,19 @@ async def telnet_handler(reader, writer):
     writer.write(TELNET_BANNER.encode())
     await writer.drain()
     while True:
-      data = await reader.readline()
+      try:
+        data = await asyncio.wait_for(reader.readline(), timeout=2 if getattr(state, 'live_mode', False) else None)
+      except asyncio.TimeoutError:
+        if getattr(state, 'live_mode', False):
+          func = TELNET_SCREEN_DISPATCH.get(state.current_screen)
+          out = await func() if func else telnet_menu_footer()
+          writer.write(out.encode())
+          await writer.drain()
+        continue
       if not data:
         break
       inp = data.decode(errors="ignore").strip()
       if len(inp) != 1 or not inp.isdigit():
-        # Only accept single digits
         writer.write(telnet_invalid_footer().encode())
         await writer.drain()
         continue
@@ -9814,17 +9872,18 @@ async def telnet_handler(reader, writer):
         writer.write(b"Goodbye!\r\n")
         await writer.drain()
         break
+      if inp == "8":
+        state.live_mode = not getattr(state, 'live_mode', False)
+        writer.write(clip(f"LIVE {'ON' if state.live_mode else 'OFF'}").encode()+b"\r\n")
+        await writer.drain()
+        continue
       if inp in TELNET_SCREEN_DISPATCH:
         if inp == "9":
-          # Refresh current screen
           pass
         else:
           state.current_screen = inp
         func = TELNET_SCREEN_DISPATCH.get(state.current_screen)
-        if func:
-          out = await func()
-        else:
-          out = telnet_menu_footer()
+        out = await func() if func else telnet_menu_footer()
         writer.write(out.encode())
         await writer.drain()
       else:
