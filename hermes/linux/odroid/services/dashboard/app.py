@@ -1,6 +1,3 @@
-@APP.get("/healthz")
-def healthz() -> dict:
-  return {"status": "ok"}
 def strip_telnet_iac(buf: bytes) -> bytes:
   # Remove Telnet IAC negotiation sequences
   out = bytearray()
@@ -47,8 +44,10 @@ import tempfile
 import logging
 import traceback
 import select
+import importlib
 import importlib.util
 import socket
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 from dataclasses import dataclass, field
@@ -62,13 +61,6 @@ from starlette.background import BackgroundTask
 import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
-
-try:
-  from telnet_portal import HermesTelnetPortal
-  import telnet_portal
-  LOGGER.info("telnet_portal imported from %s", telnet_portal.__file__)
-except Exception:
-  HermesTelnetPortal = None  # type: ignore
 
 try:
   from PIL import Image
@@ -283,6 +275,13 @@ vision_snapshot_pattern_cache: Dict[str, object] = {
 camera_stream_state_lock = threading.Lock()
 camera_stream_clients = 0
 telnet_portal_server = None
+telnet_portal_task: Optional[asyncio.Task] = None
+telnet_last_error: Optional[str] = None
+telnet_started_epoch: Optional[float] = None
+telnet_host_value = "127.0.0.1"
+telnet_port_value = 8023
+telnet_bind_lan_value = False
+telnet_token_required_value = True
 
 try:
   os.makedirs(SNAP_DIR, exist_ok=True)
@@ -2506,18 +2505,20 @@ def render_overlay_sparkline_png(
 
 @APP.get("/api/status")
 def api_status() -> Dict[str, object]:
-    cmd = run_cmd(["python3", str(CLIENT_PATH), "status"], timeout_sec=2)
-    raw = cmd["stdout"] or cmd["stderr"]
-    parsed = parse_ok_kv(raw) if isinstance(raw, str) else {}
-    return {
-        "ok": cmd["ok"],
-        "code": cmd["code"],
-        "raw": raw,
-        "daemon_running": bool(cmd["ok"]),
-        "port": parsed.get("port", "unknown"),
-        "lines_in": parsed.get("lines_in", "unknown"),
-        "last_error": parsed.get("last_error", "unknown"),
-    }
+  cmd = run_cmd(["python3", str(CLIENT_PATH), "status"], timeout_sec=2)
+  raw = cmd["stdout"] or cmd["stderr"]
+  parsed = parse_ok_kv(raw) if isinstance(raw, str) else {}
+  telnet = get_telnet_health()
+  return {
+    "ok": cmd["ok"],
+    "code": cmd["code"],
+    "raw": raw,
+    "daemon_running": bool(cmd["ok"]),
+    "port": parsed.get("port", "unknown"),
+    "lines_in": parsed.get("lines_in", "unknown"),
+    "last_error": parsed.get("last_error", "unknown"),
+    "TELNET": telnet,
+  }
 
 
 def build_flip_status() -> Dict[str, object]:
@@ -5059,6 +5060,11 @@ HTML_PAGE = """
           <div class="card-title">Daemon</div>
           <div class="card-value" id="daemon">loading...</div>
         </div>
+        <div id="telnetCard" class="card status card-compact">
+          <div class="card-title">TELNET</div>
+          <div class="card-value" id="telnet-status">loading...</div>
+          <div class="card-sub small muted" id="telnet-sub">8023/tcp</div>
+        </div>
         <div class="card status card-compact">
           <div class="card-title">Port</div>
           <div class="card-value" id="port">-</div>
@@ -5213,21 +5219,8 @@ def render_dashboard_page(active_path: str) -> str:
   show_home_charts = active_path in ("/", "/home2")
   is_home2 = active_path == "/home2"
   show_events_data = active_path == "/events"
-  # Insert a telemetry stream card for the telnet server in the System Health section
-  telnet_card = '''
-        <div class="card status card-compact telnet-card">
-          <div class="card-title">Telnet</div>
-          <div class="card-value" id="telnet-status">loading...</div>
-          <div class="card-sub small muted">8023/tcp</div>
-        </div>
-  '''
-  # Insert the telnet card after the Daemon card in HTML_PAGE
-  html_with_telnet = HTML_PAGE.replace(
-    '<div class="card status card-compact">\n          <div class="card-title">Daemon</div>',
-    '<div class="card status card-compact">\n          <div class="card-title">Daemon</div>' + telnet_card
-  )
   page = (
-    html_with_telnet
+    HTML_PAGE
     .replace("{{TOP_NAV}}", render_top_nav(active_path))
     .replace("{{HOME_TREND_WINDOW}}", (home2_trend_window if is_home2 else home_trend_window) if show_home_charts else "")
     .replace("{{HOME_CHARTS_SECTION}}", (home2_charts_section if is_home2 else home_charts_section) if show_home_charts else "")
@@ -9328,6 +9321,27 @@ async function pollStatus() {
     const errorEl = document.getElementById('error');
     if (errorEl) errorEl.innerText = status.last_error || 'unknown';
 
+    const telnet = (status && status.TELNET && typeof status.TELNET === 'object') ? status.TELNET : null;
+    const telnetCardEl = document.getElementById('telnetCard');
+    const telnetStatusEl = document.getElementById('telnet-status');
+    const telnetSubEl = document.getElementById('telnet-sub');
+    if (telnetCardEl) {
+      telnetCardEl.classList.remove('ok', 'stale', 'dead', 'unknown');
+    }
+    if (telnetStatusEl) {
+      const telnetState = telnet ? String(telnet.status || 'unknown') : 'unknown';
+      telnetStatusEl.innerText = telnetState;
+      if (telnetCardEl) {
+        const cssClass = telnetState === 'ok' ? 'ok' : (telnetState === 'warn' ? 'stale' : (telnetState === 'dead' ? 'dead' : 'unknown'));
+        telnetCardEl.classList.add(cssClass);
+      }
+    }
+    if (telnetSubEl && telnet) {
+      const portText = String(telnet.port || 8023) + '/tcp';
+      const scopeText = telnet.bind_lan ? 'LAN' : 'LOCAL';
+      telnetSubEl.innerText = portText + ' · ' + scopeText;
+    }
+
     renderFreshness(health.freshness || {});
     const rawHealthEl = document.getElementById('rawHealth');
     if (rawHealthEl) rawHealthEl.innerText = health.raw || '';
@@ -9730,37 +9744,111 @@ def _env_flag(name: str, default: str = "false") -> bool:
   return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
-@APP.on_event("startup")
-async def dashboard_startup() -> None:
-  global telnet_portal_server
-  LOGGER.warning("TELNET_STARTUP: entered")
+def _telnet_is_listening(port: int) -> bool:
+  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   try:
-    import telnet_portal as _tp
-    portal_cls = getattr(_tp, "HermesTelnetPortal", None)
-    LOGGER.warning("TELNET_STARTUP: telnet_portal imported from %s", getattr(_tp, "__file__", "<unknown>"))
-    LOGGER.warning("TELNET_STARTUP: portal_cls=%r", portal_cls)
+    sock.settimeout(0.4)
+    return sock.connect_ex(("127.0.0.1", int(port))) == 0
   except Exception:
-    LOGGER.exception("TELNET_STARTUP: telnet_portal import failed")
-    return
+    return False
+  finally:
+    try:
+      sock.close()
+    except Exception:
+      pass
 
-  if portal_cls is None:
-    LOGGER.error("TELNET_STARTUP: HermesTelnetPortal not found in telnet_portal.py")
-    return
 
-  host = "0.0.0.0"
+async def _telnet_probe(port: int) -> None:
+  await asyncio.sleep(0.2)
+  result = 1
+  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  try:
+    sock.settimeout(1.0)
+    result = sock.connect_ex(("127.0.0.1", int(port)))
+  except Exception as exc:
+    LOGGER.warning("TELNET_STARTUP: readiness probe error=%s", exc)
+  finally:
+    try:
+      sock.close()
+    except Exception:
+      pass
+  LOGGER.warning("TELNET_STARTUP: connect_ex(127.0.0.1:%d) result=%s", int(port), result)
+
+
+def get_telnet_health() -> Dict[str, object]:
+  enabled = _env_flag("TELNET_ENABLE", "true")
+  host = telnet_host_value
+  port = int(telnet_port_value)
+  bind_lan = bool(telnet_bind_lan_value)
+  token_required = bool(telnet_token_required_value)
+  listening = _telnet_is_listening(port)
+  status = "dead" if enabled else "warn"
+  if listening:
+    status = "ok"
+  if not enabled:
+    status = "warn"
+  age_s = int(max(0, time.time() - float(telnet_started_epoch))) if telnet_started_epoch else None
+  payload: Dict[str, object] = {
+    "status": status,
+    "host": host,
+    "port": port,
+    "bind_lan": bind_lan,
+    "token_required": token_required,
+    "last_error": telnet_last_error,
+    "age_s": age_s,
+  }
+  if telnet_portal_server is not None and hasattr(telnet_portal_server, "client_count"):
+    try:
+      payload["clients"] = int(getattr(telnet_portal_server, "client_count"))
+    except Exception:
+      pass
+  return payload
+
+
+async def _telnet_startup() -> None:
+  global telnet_portal_server, telnet_portal_task, telnet_last_error, telnet_started_epoch
+  global telnet_host_value, telnet_port_value, telnet_bind_lan_value, telnet_token_required_value
+  if telnet_portal_server is not None:
+    LOGGER.warning("TELNET_STARTUP: already initialized")
+    return
+  enabled = _env_flag("TELNET_ENABLE", "true")
+  if not enabled:
+    LOGGER.warning("TELNET_STARTUP: TELNET_ENABLE=false, skipping")
+    return
+  bind_lan = _env_flag("TELNET_BIND_LAN", "true")
+  host = "0.0.0.0" if bind_lan else "127.0.0.1"
   try:
     port = int(str(os.environ.get("TELNET_PORT", "8023")).strip() or "8023")
   except Exception:
     port = 8023
   port = max(1, min(65535, port))
-  token = "1234"
+  token = str(os.environ.get("TELNET_TOKEN", "")).strip()
   try:
     cols = int(str(os.environ.get("TELNET_COLS", "30")).strip() or "30")
   except Exception:
     cols = 30
 
+  telnet_host_value = host
+  telnet_port_value = port
+  telnet_bind_lan_value = bind_lan
+  telnet_token_required_value = bool(token)
+  telnet_last_error = None
+
   try:
-    global telnet_portal_server
+    _tp = importlib.import_module("telnet_portal")
+    portal_cls = getattr(_tp, "HermesTelnetPortal", None)
+    LOGGER.warning("TELNET_STARTUP: telnet_portal imported from %s", getattr(_tp, "__file__", "<unknown>"))
+    LOGGER.warning("TELNET_STARTUP: portal_cls=%r", portal_cls)
+  except Exception:
+    telnet_last_error = "import_failed"
+    LOGGER.exception("TELNET_STARTUP: telnet_portal import failed")
+    return
+  if portal_cls is None:
+    telnet_last_error = "class_missing"
+    LOGGER.error("TELNET_STARTUP: HermesTelnetPortal not found in telnet_portal.py")
+    return
+
+  try:
     telnet_portal_server = portal_cls(
       status_provider=build_flip_status,
       report_provider=build_telnet_report_lines,
@@ -9771,33 +9859,73 @@ async def dashboard_startup() -> None:
       token=token,
       cols=cols,
     )
-    await telnet_portal_server.start()
-    LOGGER.warning("TELNET_STARTUP: portal_cls.start() called host=%s port=%d", host, port)
-    # Evidence: Try to connect to 127.0.0.1:port
-    import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1.0)
-    result = sock.connect_ex(("127.0.0.1", port))
-    sock.close()
-    LOGGER.warning("TELNET_STARTUP: connect_ex(127.0.0.1:%d) result=%s", port, result)
+    telnet_portal_task = asyncio.create_task(telnet_portal_server.start())
+    asyncio.create_task(_telnet_probe(port))
+    telnet_started_epoch = time.time()
+    LOGGER.warning(
+      "TELNET_STARTUP: start scheduled host=%s port=%d bind_lan=%s token_required=%s",
+      host,
+      port,
+      bind_lan,
+      bool(token),
+    )
   except Exception:
     telnet_portal_server = None
+    telnet_portal_task = None
+    telnet_last_error = "startup_failed"
     LOGGER.exception("TELNET_STARTUP: failed to start telnet portal")
+
+
+async def _telnet_shutdown() -> None:
+  global telnet_portal_server, telnet_portal_task
+  if telnet_portal_task is not None:
+    telnet_portal_task.cancel()
+    try:
+      await telnet_portal_task
+    except asyncio.CancelledError:
+      LOGGER.info("TELNET_SHUTDOWN: startup task cancelled")
+    except Exception as exc:
+      LOGGER.warning("TELNET_SHUTDOWN: startup task error: %s", exc)
+    finally:
+      telnet_portal_task = None
+  if telnet_portal_server is not None:
+    try:
+      await telnet_portal_server.stop()
+    except asyncio.CancelledError:
+      LOGGER.info("TELNET_SHUTDOWN: CancelledError (normal during shutdown)")
+    except Exception as exc:
+      LOGGER.warning("TELNET_SHUTDOWN: failed to stop telnet portal cleanly: %s", exc)
+    finally:
+      telnet_portal_server = None
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+  try:
+    await _telnet_startup()
+  except Exception:
+    LOGGER.exception("TELNET_STARTUP: lifespan startup failure")
+  try:
+    yield
+  finally:
+    try:
+      await _telnet_shutdown()
+    except Exception:
+      LOGGER.exception("TELNET_SHUTDOWN: lifespan shutdown failure")
+
+
+APP.router.lifespan_context = _lifespan
+
+
+@APP.on_event("startup")
+async def dashboard_startup() -> None:
+  LOGGER.warning("TELNET_STARTUP: startup hook invoked")
+  await _telnet_startup()
 
 
 @APP.on_event("shutdown")
 async def dashboard_shutdown() -> None:
-  global telnet_portal_server
-  if telnet_portal_server is None:
-    return
-  try:
-    await telnet_portal_server.stop()
-  except asyncio.CancelledError:
-    LOGGER.info("TELNET_SHUTDOWN: CancelledError (normal during shutdown)")
-  except Exception as exc:
-    LOGGER.warning("TELNET_SHUTDOWN: failed to stop telnet portal cleanly: %s", exc)
-  finally:
-    telnet_portal_server = None
+  await _telnet_shutdown()
 
 
 @APP.get("/healthz")
