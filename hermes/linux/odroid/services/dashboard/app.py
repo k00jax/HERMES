@@ -17,6 +17,7 @@ import datetime
 import threading
 import tempfile
 import logging
+import traceback
 import select
 import importlib.util
 import socket
@@ -50,6 +51,21 @@ except Exception:
   np = None
 
 APP = FastAPI(title="HERMES Dashboard", version="0.1.0")
+TELNET_HOST = "0.0.0.0"
+TELNET_PORT = 8023
+TELNET_MENU = (
+  "\r\nMENU:\r\n"
+  " 1 System Status\r\n"
+  " 2 Environment\r\n"
+  " 3 Radar\r\n"
+  " 4 Camera\r\n"
+  " 5 Events\r\n"
+  " 6 Calibration\r\n"
+  " 7 Settings\r\n"
+  " 9 Refresh current screen\r\n"
+  " 0 Exit\r\n"
+)
+TELNET_BANNER = "HERMES TELNET UI\r\n" + TELNET_MENU
 LOGGER = logging.getLogger("hermes.dashboard")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -9599,8 +9615,8 @@ async def dashboard_startup() -> None:
     LOGGER.warning("telnet_portal module failed to import")
     return
 
-  # Force telnet portal to bind to 10.0.0.80
-  host = "10.0.0.80"
+  # Bind telnet portal to all interfaces for compatibility
+  host = "0.0.0.0"
   try:
     port = int(str(os.environ.get("TELNET_PORT", "8023")).strip() or "8023")
   except Exception:
@@ -9645,7 +9661,218 @@ async def dashboard_shutdown() -> None:
 
 @APP.get("/healthz")
 def healthz() -> Dict[str, str]:
+
     return {"status": "ok"}
+
+# Minimal async telnet handler (top-level, 4-space indentation)
+class TelnetSessionState:
+  def __init__(self):
+    self.current_screen = "1"
+    self.invalid = False
+
+def telnet_menu_footer():
+  return TELNET_MENU
+
+def telnet_invalid_footer():
+  return "INVALID\r\n" + TELNET_MENU
+
+# --- Screen renderers ---
+async def telnet_screen_1():
+  # System Status
+  try:
+    status = build_flip_status()
+    lines = ["SYSTEM STATUS"]
+    for k, v in status.items():
+      lines.append(f"{k}: {v}")
+    return "\r\n".join(lines[:10]) + "\r\n" + telnet_menu_footer()
+  except Exception as exc:
+    return f"Error: {exc}\r\n" + telnet_menu_footer()
+
+async def telnet_screen_2():
+  # Environment
+  try:
+    status = build_flip_status()
+    env = status.get("env", {})
+    lines = ["ENVIRONMENT"]
+    for k in ("temp_c", "hum_pct", "eco2_ppm", "tvoc_ppb"):
+      lines.append(f"{k}: {env.get(k, 'n/a')}")
+    return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
+  except Exception as exc:
+    return f"Error: {exc}\r\n" + telnet_menu_footer()
+
+async def telnet_screen_3():
+  # Radar
+  try:
+    status = build_flip_status()
+    radar = status.get("radar", {})
+    lines = ["RADAR"]
+    for k, v in radar.items():
+      lines.append(f"{k}: {v}")
+    return "\r\n".join(lines[:10]) + "\r\n" + telnet_menu_footer()
+  except Exception as exc:
+    return f"Error: {exc}\r\n" + telnet_menu_footer()
+
+async def telnet_screen_4():
+  # Camera
+  try:
+    status = build_flip_status()
+    camera = status.get("camera", {})
+    lines = ["CAMERA"]
+    for k, v in camera.items():
+      lines.append(f"{k}: {v}")
+    return "\r\n".join(lines[:10]) + "\r\n" + telnet_menu_footer()
+  except Exception as exc:
+    return f"Error: {exc}\r\n" + telnet_menu_footer()
+
+async def telnet_screen_5():
+  # Events (last 5)
+  try:
+    # Use the same DB path as elsewhere
+    import sqlite3
+    DB_PATH = "/home/odroid/hermes-data/db/hermes.sqlite3"
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT ts, event, detail FROM events ORDER BY ts DESC LIMIT 5")
+    rows = cur.fetchall()
+    conn.close()
+    lines = ["EVENTS (last 5)"]
+    for row in rows:
+      lines.append(f"{row[0]}: {row[1]} {row[2]}")
+    return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
+  except Exception as exc:
+    return f"Error: {exc}\r\n" + telnet_menu_footer()
+
+async def telnet_screen_6():
+  # Calibration (last 1)
+  try:
+    import sqlite3
+    DB_PATH = "/home/odroid/hermes-data/db/hermes.sqlite3"
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT ts, detail FROM calibration ORDER BY ts DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    lines = ["CALIBRATION"]
+    if row:
+      lines.append(f"{row[0]}: {row[1]}")
+    else:
+      lines.append("No calibration data.")
+    return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
+  except Exception as exc:
+    return f"Error: {exc}\r\n" + telnet_menu_footer()
+
+async def telnet_screen_7():
+  # Settings
+  try:
+    # Use settings from existing helper or fallback
+    from pathlib import Path
+    import json
+    settings_path = Path("/home/odroid/hermes-data/db/settings.json")
+    if settings_path.exists():
+      settings = json.loads(settings_path.read_text())
+    else:
+      settings = {}
+    lines = ["SETTINGS"]
+    for k, v in list(settings.items())[:10]:
+      lines.append(f"{k}: {v}")
+    return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
+  except Exception as exc:
+    return f"Error: {exc}\r\n" + telnet_menu_footer()
+
+# Dispatcher
+TELNET_SCREEN_DISPATCH = {
+  "1": telnet_screen_1,
+  "2": telnet_screen_2,
+  "3": telnet_screen_3,
+  "4": telnet_screen_4,
+  "5": telnet_screen_5,
+  "6": telnet_screen_6,
+  "7": telnet_screen_7,
+  "9": None,  # rerender current
+  "0": None,  # exit
+}
+
+async def telnet_handler(reader, writer):
+  logger = logging.getLogger("hermes.telnet")
+  peer = writer.get_extra_info("peername")
+  state = TelnetSessionState()
+  try:
+    logger.info(f"Telnet connection from {peer}")
+    writer.write(TELNET_BANNER.encode())
+    await writer.drain()
+    while True:
+      data = await reader.readline()
+      if not data:
+        break
+      inp = data.decode(errors="ignore").strip()
+      if len(inp) != 1 or not inp.isdigit():
+        # Only accept single digits
+        writer.write(telnet_invalid_footer().encode())
+        await writer.drain()
+        continue
+      if inp == "0":
+        writer.write(b"Goodbye!\r\n")
+        await writer.drain()
+        break
+      if inp in TELNET_SCREEN_DISPATCH:
+        if inp == "9":
+          # Refresh current screen
+          pass
+        else:
+          state.current_screen = inp
+        func = TELNET_SCREEN_DISPATCH.get(state.current_screen)
+        if func:
+          out = await func()
+        else:
+          out = telnet_menu_footer()
+        writer.write(out.encode())
+        await writer.drain()
+      else:
+        writer.write(telnet_invalid_footer().encode())
+        await writer.drain()
+  except Exception as exc:
+    logger.exception(f"Telnet handler error: {exc}\n{traceback.format_exc()}")
+  finally:
+    try:
+      writer.close()
+      await writer.wait_closed()
+    except Exception:
+      pass
+
+
+@APP.on_event("startup")
+async def start_telnet_server():
+    logger = logging.getLogger("hermes.telnet")
+    loop = asyncio.get_running_loop()
+    try:
+        server = await asyncio.start_server(telnet_handler, TELNET_HOST, TELNET_PORT)
+        task = asyncio.create_task(server.serve_forever())
+        APP.state.telnet_server = server
+        APP.state.telnet_task = task
+        logger.info(f"Telnet listening on {TELNET_HOST}:{TELNET_PORT}")
+        logger.info(f"Startup loop: {loop}")
+    except Exception as exc:
+        logger.exception(f"Failed to start telnet server: {exc}\n{traceback.format_exc()}")
+
+
+@APP.on_event("shutdown")
+async def stop_telnet_server():
+    logger = logging.getLogger("hermes.telnet")
+    server = getattr(APP.state, "telnet_server", None)
+    task = getattr(APP.state, "telnet_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except Exception:
+            pass
+    if server:
+        server.close()
+        try:
+            await server.wait_closed()
+        except Exception:
+            pass
+        logger.info("Telnet server stopped")
 
 
 @APP.get("/health")

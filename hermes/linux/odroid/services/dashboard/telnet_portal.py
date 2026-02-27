@@ -197,8 +197,9 @@ class HermesTelnetPortal:
 
         # Numeric menu mode for authenticated users
         if state.authenticated:
-          # Accept only single digit commands (ignore whitespace)
+          # Accept both single digit and line-based input
           cmd = input_buffer.strip()
+          # Accept if buffer is a valid menu digit (even if followed by newline/whitespace)
           if cmd in {"1", "2", "3", "4", "5", "9"}:
             logger.info(f"[TELNET DEBUG] Numeric menu command: {cmd}")
             input_buffer = ""
@@ -254,13 +255,70 @@ class HermesTelnetPortal:
             if cmd == "9":
               await self._send(writer, "bye\n")
               break
-          # Ignore non-menu numbers, just re-prompt
+          # Accept if buffer is a valid menu digit followed by newline/whitespace
           if len(cmd) == 1 and cmd.isdigit():
             input_buffer = ""
             await self._send(writer, self.MENU_TEXT)
             await self._prompt(writer)
             continue
-          # Otherwise, wait for more input (shouldn't happen with Mocha Telnet)
+          # Accept if buffer is a valid menu digit with trailing newline/whitespace
+          if cmd and cmd[0] in {"1", "2", "3", "4", "5", "9"} and cmd[1:].strip() == "":
+            logger.info(f"[TELNET DEBUG] Numeric menu command (line): {cmd[0]}")
+            input_buffer = ""
+            # Repeat menu logic for cmd[0]
+            if cmd[0] == "1":
+              try:
+                status = self._status_provider()
+                await self._send(writer, "\n".join(self._format_status_lines(status)) + "\n")
+              except Exception as exc:
+                await self._send(writer, f"status error: {exc}\n")
+              await self._send(writer, self.MENU_TEXT)
+              await self._prompt(writer)
+              continue
+            if cmd[0] == "2":
+              try:
+                lines = self._report_provider(5)
+                if not lines:
+                  await self._send(writer, "not implemented\n")
+                else:
+                  await self._send(writer, "\n".join(lines) + "\n")
+              except Exception as exc:
+                await self._send(writer, f"report error: {exc}\n")
+              await self._send(writer, self.MENU_TEXT)
+              await self._prompt(writer)
+              continue
+            if cmd[0] == "3":
+              try:
+                result = self._snapshot_action()
+                ok = bool(result.get("ok"))
+                ts = str(result.get("ts") or "n/a")
+                detail = str(result.get("error") or "ok")
+                await self._send(writer, f"snapshot {'ok' if ok else 'fail'} ts={ts} detail={detail}\n")
+              except Exception as exc:
+                await self._send(writer, f"snapshot error: {exc}\n")
+              await self._send(writer, self.MENU_TEXT)
+              await self._prompt(writer)
+              continue
+            if cmd[0] == "4":
+              try:
+                result = self._confirm_action()
+                ok = bool(result.get("ok"))
+                raw = str(result.get("raw") or result.get("error") or "")
+                await self._send(writer, f"confirm {'ok' if ok else 'fail'} {raw}\n")
+              except Exception as exc:
+                await self._send(writer, f"confirm error: {exc}\n")
+              await self._send(writer, self.MENU_TEXT)
+              await self._prompt(writer)
+              continue
+            if cmd[0] == "5":
+              await self._send(writer, "Commands:\n 1: Status\n 2: Report\n 3: Snapshot\n 4: Confirm\n 5: Help\n 9: Quit\n")
+              await self._send(writer, self.MENU_TEXT)
+              await self._prompt(writer)
+              continue
+            if cmd[0] == "9":
+              await self._send(writer, "bye\n")
+              break
+          # Otherwise, wait for more input
           continue
 
         # If not authenticated, fall back to original line-based command mode
