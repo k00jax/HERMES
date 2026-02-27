@@ -10026,42 +10026,6 @@ async def telnet_handler(reader, writer):
         await writer.drain()
       except (ConnectionResetError, BrokenPipeError):
         return
-  except Exception as exc:
-    logger.exception(f"Telnet handler error: {exc}\n{traceback.format_exc()}")
-  finally:
-    try:
-      writer.close()
-      await writer.wait_closed()
-    except Exception:
-      pass
-
-
-@APP.on_event("startup")
-async def start_telnet_server():
-    logger = logging.getLogger("hermes.telnet")
-    loop = asyncio.get_running_loop()
-    try:
-        server = await asyncio.start_server(telnet_handler, TELNET_HOST, TELNET_PORT)
-        task = asyncio.create_task(server.serve_forever())
-        APP.state.telnet_server = server
-        APP.state.telnet_task = task
-        logger.info(f"Telnet listening on {TELNET_HOST}:{TELNET_PORT}")
-        logger.info(f"Startup loop: {loop}")
-    except Exception as exc:
-        logger.exception(f"Failed to start telnet server: {exc}\n{traceback.format_exc()}")
-
-
-@APP.on_event("shutdown")
-async def stop_telnet_server():
-    logger = logging.getLogger("hermes.telnet")
-    server = getattr(APP.state, "telnet_server", None)
-    task = getattr(APP.state, "telnet_task", None)
-    if task:
-        task.cancel()
-        try:
-            await task
-        except Exception:
-            pass
     if server:
         server.close()
         try:
