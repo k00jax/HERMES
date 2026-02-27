@@ -1,3 +1,28 @@
+def strip_telnet_iac(buf: bytes) -> bytes:
+  # Remove Telnet IAC negotiation sequences
+  out = bytearray()
+  i = 0
+  while i < len(buf):
+    if buf[i] == 0xFF:  # IAC
+      if i + 2 < len(buf) and buf[i+1] in (251,252,253,254):
+        # IAC WILL/WONT/DO/DONT <opt>
+        i += 3
+        continue
+      elif i + 1 < len(buf) and buf[i+1] == 250:  # IAC SB ... IAC SE
+        i += 2
+        while i + 1 < len(buf):
+          if buf[i] == 0xFF and buf[i+1] == 240:  # IAC SE
+            i += 2
+            break
+          i += 1
+        continue
+      else:
+        i += 2
+        continue
+    else:
+      out.append(buf[i])
+      i += 1
+  return bytes(out)
 import json
 import base64
 import glob
@@ -2808,7 +2833,11 @@ def api_health() -> Dict[str, object]:
     except Exception:
       pass
     # TELNET freshness: check if process is running and port is open
-    import socket, psutil, time
+    import socket, time
+    try:
+      import psutil
+    except Exception:
+      psutil = None
     telnet_status = "dead"
     telnet_age = None
     try:
@@ -2818,11 +2847,19 @@ def api_health() -> Dict[str, object]:
       result = sock.connect_ex(("127.0.0.1", 8023))
       if result == 0:
         telnet_status = "ok"
-        # Optionally, get process start time for "age"
-        for proc in psutil.process_iter(attrs=["name", "cmdline", "create_time"]):
-          if "python" in proc.info["name"] and proc.info["cmdline"] and any("dashboard" in s for s in proc.info["cmdline"]):
-            telnet_age = int(time.time() - proc.info["create_time"])
-            break
+        if psutil:
+          # Optionally, get process start time for "age"
+          for proc in psutil.process_iter(attrs=["name", "cmdline", "create_time"]):
+            if "python" in proc.info["name"] and proc.info["cmdline"] and any("dashboard" in s for s in proc.info["cmdline"]):
+              telnet_age = int(time.time() - proc.info["create_time"])
+              break
+        else:
+          # Try to get uptime from /proc/uptime
+          try:
+            with open("/proc/uptime") as f:
+              telnet_age = int(float(f.read().split()[0]))
+          except Exception:
+            telnet_age = None
       else:
         telnet_status = "dead"
       sock.close()
@@ -2830,12 +2867,13 @@ def api_health() -> Dict[str, object]:
       telnet_status = "unknown"
     freshness["TELNET"] = telnet_status
     return {
-        "ok": cmd["ok"],
-        "code": cmd["code"],
-        "raw": raw,
-        "freshness": freshness,
-        "telnet_age": telnet_age,
-        "camera": camera_health_payload(),
+      "ok": cmd["ok"],
+      "code": cmd["code"],
+      "raw": raw,
+      "freshness": freshness,
+      "telnet_age": telnet_age,
+      "psutil": bool(psutil),
+      "camera": camera_health_payload(),
     }
 
 
@@ -9760,6 +9798,20 @@ def telnet_invalid_footer():
 async def telnet_screen_1():
   # System
   try:
+    import socket, time
+    try:
+      import psutil
+    except Exception:
+      psutil = None
+    # Get uptime from /proc/uptime if psutil missing
+    def get_uptime():
+      try:
+        if psutil:
+          return int(time.time() - psutil.boot_time())
+        with open("/proc/uptime") as f:
+          return int(float(f.read().split()[0]))
+      except Exception:
+        return None
     status = build_flip_status()
     lines = [ansi_clear()+clip("SYSTEM")]
     ts = status.get("ts", "n/a")
@@ -9772,6 +9824,10 @@ async def telnet_screen_1():
     lines.append(line("EnvT", status.get("env", {}).get("temp_c", "n/a")))
     lines.append(line("AirCO2", status.get("air", {}).get("eco2_ppm", "n/a")))
     lines.append(line("Cam", "YES" if status.get("camera", {}).get("connected") else "NO"))
+    # Show psutil and uptime status
+    lines.append(line("PSUTIL", "OK" if psutil else "MISSING"))
+    uptime = get_uptime()
+    lines.append(line("UPTIME", f"{uptime}s" if uptime is not None else "n/a"))
     return "\r\n".join(lines) + "\r\n" + telnet_menu_footer()
   except Exception as exc:
     return ansi_clear()+clip(f"Error: {exc}") + "\r\n" + telnet_menu_footer()
@@ -9894,48 +9950,82 @@ async def telnet_handler(reader, writer):
   logger = logging.getLogger("hermes.telnet")
   peer = writer.get_extra_info("peername")
   state = TelnetSessionState()
+  logger.info(f"Telnet connection from {peer}")
   try:
-    logger.info(f"Telnet connection from {peer}")
     writer.write(TELNET_BANNER.encode())
     await writer.drain()
-    while True:
-      try:
-        data = await asyncio.wait_for(reader.readline(), timeout=2 if getattr(state, 'live_mode', False) else None)
-      except asyncio.TimeoutError:
-        if getattr(state, 'live_mode', False):
+  except (ConnectionResetError, BrokenPipeError):
+    return
+  while True:
+    try:
+      data = await asyncio.wait_for(reader.readline(), timeout=2 if getattr(state, 'live_mode', False) else None)
+    except asyncio.TimeoutError:
+      if getattr(state, 'live_mode', False):
+        try:
           func = TELNET_SCREEN_DISPATCH.get(state.current_screen)
           out = await func() if func else telnet_menu_footer()
-          writer.write(out.encode())
-          await writer.drain()
-        continue
-      if not data:
-        break
-      inp = data.decode(errors="ignore").strip()
-      if len(inp) != 1 or not inp.isdigit():
-        writer.write(telnet_invalid_footer().encode())
+          out_bytes = out.encode()[:800]
+          try:
+            writer.write(out_bytes)
+            await writer.drain()
+          except (ConnectionResetError, BrokenPipeError):
+            return
+        except Exception:
+          try:
+            writer.write(b"ERR\r\n" + telnet_menu_footer().encode())
+            await writer.drain()
+          except (ConnectionResetError, BrokenPipeError):
+            return
+      continue
+    if not data:
+      break
+    # Filter Telnet IAC negotiation bytes
+    data = strip_telnet_iac(data)
+    inp = data.decode(errors="ignore").strip()
+    if not inp:
+      continue
+    cmd = inp
+    if not (cmd.isdigit() or cmd == "*"):
+      try:
+        writer.write(telnet_invalid_footer().encode()[:800])
         await writer.drain()
-        continue
-      if inp == "0":
+      except (ConnectionResetError, BrokenPipeError):
+        return
+      continue
+    try:
+      if cmd == "0":
         writer.write(b"Goodbye!\r\n")
         await writer.drain()
         break
-      if inp == "8":
+      if cmd == "8":
         state.live_mode = not getattr(state, 'live_mode', False)
-        writer.write(clip(f"LIVE {'ON' if state.live_mode else 'OFF'}").encode()+b"\r\n")
+        writer.write(clip(f"LIVE {'ON' if state.live_mode else 'OFF'}").encode()[:800]+b"\r\n")
         await writer.drain()
         continue
-      if inp in TELNET_SCREEN_DISPATCH:
-        if inp == "9":
+      if cmd == "*":
+        out = telnet_menu_footer()
+      elif cmd in TELNET_SCREEN_DISPATCH:
+        if cmd == "9":
           pass
         else:
-          state.current_screen = inp
+          state.current_screen = cmd
         func = TELNET_SCREEN_DISPATCH.get(state.current_screen)
         out = await func() if func else telnet_menu_footer()
-        writer.write(out.encode())
-        await writer.drain()
       else:
-        writer.write(telnet_invalid_footer().encode())
+        out = telnet_invalid_footer()
+      # Cap output size and wrap lines
+      out_bytes = out.encode()[:800]
+      try:
+        writer.write(out_bytes)
         await writer.drain()
+      except (ConnectionResetError, BrokenPipeError):
+        return
+    except Exception:
+      try:
+        writer.write(b"ERR\r\n" + telnet_menu_footer().encode()[:800])
+        await writer.drain()
+      except (ConnectionResetError, BrokenPipeError):
+        return
   except Exception as exc:
     logger.exception(f"Telnet handler error: {exc}\n{traceback.format_exc()}")
   finally:
