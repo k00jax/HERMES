@@ -5147,8 +5147,21 @@ def render_dashboard_page(active_path: str) -> str:
   show_home_charts = active_path in ("/", "/home2")
   is_home2 = active_path == "/home2"
   show_events_data = active_path == "/events"
+  # Insert a telemetry stream card for the telnet server in the System Health section
+  telnet_card = '''
+        <div class="card status card-compact telnet-card">
+          <div class="card-title">Telnet</div>
+          <div class="card-value" id="telnet-status">loading...</div>
+          <div class="card-sub small muted">8023/tcp</div>
+        </div>
+  '''
+  # Insert the telnet card after the Daemon card in HTML_PAGE
+  html_with_telnet = HTML_PAGE.replace(
+    '<div class="card status card-compact">\n          <div class="card-title">Daemon</div>',
+    '<div class="card status card-compact">\n          <div class="card-title">Daemon</div>' + telnet_card
+  )
   page = (
-    HTML_PAGE
+    html_with_telnet
     .replace("{{TOP_NAV}}", render_top_nav(active_path))
     .replace("{{HOME_TREND_WINDOW}}", (home2_trend_window if is_home2 else home_trend_window) if show_home_charts else "")
     .replace("{{HOME_CHARTS_SECTION}}", (home2_charts_section if is_home2 else home_charts_section) if show_home_charts else "")
