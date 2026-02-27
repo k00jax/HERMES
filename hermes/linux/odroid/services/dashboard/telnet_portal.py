@@ -171,6 +171,16 @@ class HermesTelnetPortal:
         char = self._strip_telnet_controls(raw)
         if not char:
           continue
+        input_buffer += char
+        # Auto-authenticate if input buffer matches token and not already authenticated
+        if self._token and not state.authenticated and input_buffer.strip() == self._token:
+          logger.info(f"[TELNET DEBUG] Auto token match: {repr(input_buffer.strip())} == {repr(self._token)}")
+          state.authenticated = True
+          await self._send(writer, "auth ok\n")
+          await self._prompt(writer)
+          input_buffer = ""
+          continue
+        # If line ending, process as before
         if char in ("\r", "\n"):
           line = input_buffer.strip()
           input_buffer = ""
@@ -180,14 +190,6 @@ class HermesTelnetPortal:
             continue
           parts = line.split()
           command = parts[0].lower()
-
-          # Allow just the token as a command for authentication
-          if self._token and not state.authenticated and line.strip() == self._token:
-            logger.info(f"[TELNET DEBUG] Token match: {repr(line)} == {repr(self._token)}")
-            state.authenticated = True
-            await self._send(writer, "auth ok\n")
-            await self._prompt(writer)
-            continue
 
           if command == "clear":
             await self._send(writer, "\x1b[2J\x1b[H")
@@ -278,9 +280,6 @@ class HermesTelnetPortal:
 
           await self._send(writer, "unknown command (type help)\n")
           await self._prompt(writer)
-        else:
-          # Not a line ending, accumulate
-          input_buffer += char
     except Exception as exc:
       logger.error(f"[TELNET DEBUG] Exception: {exc}")
     finally:
