@@ -64,13 +64,18 @@ DB_PATH = Path("/home/odroid/hermes-data/db/hermes.sqlite3")
 VISION_DIR = Path("/home/odroid/hermes-data/vision")
 VISION_SNAPSHOT_PATH = VISION_DIR / "latest.jpg"
 REPORTS_DIR = Path(os.environ.get("HERMES_REPORTS_DIR", "/home/odroid/hermes-data/reports"))
-CAMERA_DEVICE_PATH = "/dev/video0"
+CAMERA_DEVICE_PATH = str(os.environ.get("HERMES_CAMERA_DEVICE_PATH", "/dev/video0")).strip() or "/dev/video0"
 CAMERA_VIDEO_SIZE = str(os.environ.get("HERMES_CAMERA_VIDEO_SIZE", "1280x720")).strip() or "1280x720"
-CAMERA_STREAM_FPS = str(max(1, min(30, int(os.environ.get("HERMES_CAMERA_STREAM_FPS", "10")))))
+CAMERA_INPUT_FORMAT = str(os.environ.get("HERMES_CAMERA_INPUT_FORMAT", "mjpeg")).strip() or "mjpeg"
+CAMERA_STREAM_FPS = str(max(1, min(30, int(os.environ.get("HERMES_CAMERA_STREAM_FPS", "20")))))
 CAMERA_STREAM_CHUNK_BYTES = 4096
 CAMERA_STREAM_STALL_SECS = float(os.environ.get("HERMES_CAMERA_STREAM_STALL_SECS", "5.0"))
 CAMERA_FFMPEG_TIMEOUT_SECS = float(os.environ.get("HERMES_CAMERA_FFMPEG_TIMEOUT_SECS", "6.0"))
 CAMERA_SNAPSHOT_TIMEOUT_SECS = float(os.environ.get("HERMES_CAMERA_SNAPSHOT_TIMEOUT_SECS", "3.0"))
+CAMERA_APPLY_V4L2_CTRLS = str(os.environ.get("HERMES_CAMERA_APPLY_V4L2_CTRLS", "1")).strip().lower() in {"1", "true", "yes", "on"}
+CAMERA_ZOOM_ABSOLUTE = int(os.environ.get("HERMES_CAMERA_ZOOM_ABSOLUTE", "100"))
+CAMERA_FOCUS_AUTO = int(os.environ.get("HERMES_CAMERA_FOCUS_AUTO", "0"))
+CAMERA_FOCUS_ABSOLUTE_RAW = str(os.environ.get("HERMES_CAMERA_FOCUS_ABSOLUTE", "")).strip()
 SNAP_DIR = "/var/lib/hermes/camera"
 SNAP_LATEST = f"{SNAP_DIR}/latest.jpg"
 META_LATEST = f"{SNAP_DIR}/latest.json"
@@ -254,6 +259,10 @@ def resolve_camera_device() -> str:
   preferred = CAMERA_DEVICE_PATH
   if os.path.exists(preferred) and os.access(preferred, os.R_OK):
     return preferred
+  for candidate in sorted(glob.glob("/dev/v4l/by-id/*-video-index0")):
+    real = os.path.realpath(candidate)
+    if os.path.exists(real) and os.access(real, os.R_OK):
+      return real
   for candidate in sorted(glob.glob("/dev/video*")):
     if os.path.exists(candidate) and os.access(candidate, os.R_OK):
       return candidate
@@ -264,6 +273,24 @@ def camera_status() -> str:
     if not resolve_camera_device():
       return "disconnected"
     return "connected"
+
+
+def maybe_apply_camera_controls(device_path: str) -> None:
+  if not CAMERA_APPLY_V4L2_CTRLS or not device_path:
+    return
+  ctrl_parts = [
+    f"zoom_absolute={max(100, min(400, CAMERA_ZOOM_ABSOLUTE))}",
+    f"focus_auto={1 if CAMERA_FOCUS_AUTO else 0}",
+  ]
+  if CAMERA_FOCUS_ABSOLUTE_RAW:
+    try:
+      focus_abs = int(CAMERA_FOCUS_ABSOLUTE_RAW)
+      ctrl_parts.append(f"focus_absolute={max(0, min(255, focus_abs))}")
+    except Exception:
+      pass
+  result = run_cmd(["v4l2-ctl", "-d", device_path, f"--set-ctrl={','.join(ctrl_parts)}"], timeout_sec=1.0)
+  if not result.get("ok"):
+    LOGGER.warning("unable to apply v4l2 controls on %s: %s", device_path, result.get("stderr") or result.get("stdout") or "unknown")
 
 
 def remove_file_quietly(path: str) -> None:
@@ -283,9 +310,12 @@ def read_latest_camera_meta() -> Dict[str, object]:
 
 
 def camera_health_payload() -> Dict[str, object]:
+  device_path = resolve_camera_device()
   payload: Dict[str, object] = {
-    "connected": bool(os.path.exists(CAMERA_DEVICE_PATH)),
+    "connected": bool(device_path),
   }
+  if device_path:
+    payload["device"] = device_path
   latest = read_latest_camera_meta()
   ts = latest.get("ts")
   if isinstance(ts, str) and ts.strip():
@@ -294,8 +324,11 @@ def camera_health_payload() -> Dict[str, object]:
 
 
 def capture_snapshot(reason: str, extra: Optional[Dict[str, object]] = None) -> Dict[str, object]:
-  if not os.path.exists(CAMERA_DEVICE_PATH):
+  device_path = resolve_camera_device()
+  if not device_path:
     return {"ok": False, "error": "camera_disconnected"}
+
+  maybe_apply_camera_controls(device_path)
 
   try:
     os.makedirs(SNAP_DIR, exist_ok=True)
@@ -308,14 +341,16 @@ def capture_snapshot(reason: str, extra: Optional[Dict[str, object]] = None) -> 
     "-loglevel",
     "error",
     "-y",
+    "-fflags",
+    "nobuffer",
     "-f",
     "v4l2",
     "-input_format",
-    "mjpeg",
+    CAMERA_INPUT_FORMAT,
     "-video_size",
     CAMERA_VIDEO_SIZE,
     "-i",
-    CAMERA_DEVICE_PATH,
+    device_path,
     "-frames:v",
     "1",
     "-q:v",
@@ -325,7 +360,7 @@ def capture_snapshot(reason: str, extra: Optional[Dict[str, object]] = None) -> 
   try:
     proc = subprocess.run(
       command,
-      timeout=5,
+      timeout=CAMERA_SNAPSHOT_TIMEOUT_SECS,
       capture_output=True,
       check=False,
       text=True,
@@ -373,6 +408,7 @@ def generate_camera_stream() -> Iterator[bytes]:
   if not device_path:
     LOGGER.warning("camera stream requested but no readable /dev/video* device found")
     return
+  maybe_apply_camera_controls(device_path)
   global camera_stream_clients
   with camera_stream_state_lock:
     camera_stream_clients += 1
@@ -383,10 +419,16 @@ def generate_camera_stream() -> Iterator[bytes]:
         "-hide_banner",
         "-loglevel",
         "error",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-thread_queue_size",
+        "64",
         "-f",
         "v4l2",
         "-input_format",
-        "mjpeg",
+        CAMERA_INPUT_FORMAT,
         "-video_size",
         CAMERA_VIDEO_SIZE,
         "-framerate",
@@ -734,7 +776,7 @@ def get_settings_payload(conn: sqlite3.Connection) -> Dict[str, object]:
     expire_ms = int(result.get("radar_track_expire_ms"))
   except Exception:
     expire_ms = 2000
-  result["radar_track_expire_ms"] = max(500, min(10000, expire_ms))
+  result["radar_track_expire_ms"] = max(5040, min(10000, expire_ms))
   try:
     confirm_hits = int(result.get("radar_track_confirm_hits"))
   except Exception:
