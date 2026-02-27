@@ -141,7 +141,7 @@ MAX_RANGE_DAYS = 31
 
 TABLES = ("hb", "env", "air", "light", "mic_noise", "vision_cam", "esp_net", "radar")
 READY_TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
-FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "CAM", "ESP,NET", "RADAR")
+FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "CAM", "ESP,NET", "RADAR", "TELNET")
 NAV_LINKS = (
   ("Home", "/"),
   ("Flip", "/flip"),
@@ -2807,12 +2807,35 @@ def api_health() -> Dict[str, object]:
         freshness["ESP,NET"] = "dead"
     except Exception:
       pass
+    # TELNET freshness: check if process is running and port is open
+    import socket, psutil, time
+    telnet_status = "dead"
+    telnet_age = None
+    try:
+      # Check if port 8023 is open (listening)
+      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      sock.settimeout(0.5)
+      result = sock.connect_ex(("127.0.0.1", 8023))
+      if result == 0:
+        telnet_status = "ok"
+        # Optionally, get process start time for "age"
+        for proc in psutil.process_iter(attrs=["name", "cmdline", "create_time"]):
+          if "python" in proc.info["name"] and proc.info["cmdline"] and any("dashboard" in s for s in proc.info["cmdline"]):
+            telnet_age = int(time.time() - proc.info["create_time"])
+            break
+      else:
+        telnet_status = "dead"
+      sock.close()
+    except Exception:
+      telnet_status = "unknown"
+    freshness["TELNET"] = telnet_status
     return {
         "ok": cmd["ok"],
         "code": cmd["code"],
         "raw": raw,
         "freshness": freshness,
-      "camera": camera_health_payload(),
+        "telnet_age": telnet_age,
+        "camera": camera_health_payload(),
     }
 
 
@@ -6133,7 +6156,18 @@ const tableLabels = {
   esp_net: 'Wi-Fi',
   radar: 'Human Presence',
 };
-const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','CAM','ESP,NET','RADAR'];
+const displayFresh = ['HB','ENV','AIR','LIGHT','MIC','CAM','ESP,NET','RADAR','TELNET'];
+const FRESHNESS_TABLE_BY_PREFIX = {
+  'HB': 'hb',
+  'ENV': 'env',
+  'AIR': 'air',
+  'LIGHT': 'light',
+  'MIC': 'mic_noise',
+  'CAM': 'vision_cam',
+  'ESP,NET': 'esp_net',
+  'RADAR': 'radar',
+  'TELNET': 'telnet',
+};
 const EXPECTED_INTERVALS = {
   radar: 1,
   env: 5,
