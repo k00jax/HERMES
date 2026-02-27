@@ -2,6 +2,7 @@ import json
 import base64
 import glob
 import re
+import html
 import sqlite3
 import subprocess
 import os
@@ -88,6 +89,7 @@ READY_TABLES = ("hb", "env", "air", "light", "mic_noise", "esp_net")
 FRESHNESS_KEYS = ("HB", "ENV", "AIR", "LIGHT", "MIC", "CAM", "ESP,NET", "RADAR")
 NAV_LINKS = (
   ("Home", "/"),
+  ("Flip", "/flip"),
   ("Home 2", "/home2"),
   ("History", "/history"),
   ("Events", "/events"),
@@ -2432,6 +2434,246 @@ def api_status() -> Dict[str, object]:
     }
 
 
+def build_flip_status() -> Dict[str, object]:
+  payload: Dict[str, object] = {
+    "ts": now_utc_iso(),
+    "presence": {
+      "summary": "n/a",
+      "target": None,
+      "detect_cm": None,
+      "ts_utc": None,
+    },
+    "visual_confirm": {
+      "yes": None,
+      "motion_score": None,
+      "ts_utc": None,
+    },
+    "env": {
+      "temp_c": None,
+      "hum_pct": None,
+      "ts_utc": None,
+    },
+    "air": {
+      "eco2_ppm": None,
+      "tvoc_ppb": None,
+      "ts_utc": None,
+    },
+    "camera": {
+      "connected": False,
+      "status": "disconnected",
+      "last_snapshot_ts": None,
+    },
+  }
+
+  camera = camera_health_payload()
+  cam_connected = bool(camera.get("connected"))
+  payload["camera"] = {
+    "connected": cam_connected,
+    "status": "connected" if cam_connected else "disconnected",
+    "last_snapshot_ts": camera.get("latest_ts"),
+  }
+
+  if not DB_PATH.exists():
+    return payload
+
+  try:
+    with open_db() as conn:
+      conn.row_factory = sqlite3.Row
+      try:
+        settings_payload = get_settings_payload(conn)
+      except Exception:
+        settings_payload = dict(SETTINGS_DEFAULTS)
+
+      radar_row = conn.execute(
+        "SELECT alive, target, detect_cm, move_cm, stat_cm, move_en, stat_en, ts_utc "
+        "FROM radar ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      if radar_row:
+        radar_payload = {
+          "alive": int(radar_row["alive"] or 0),
+          "target": int(radar_row["target"] or 0),
+          "detect_cm": int(radar_row["detect_cm"] or 0),
+          "move_cm": int(radar_row["move_cm"] or 0),
+          "stat_cm": int(radar_row["stat_cm"] or 0),
+          "move_en": int(radar_row["move_en"] or 0),
+          "stat_en": int(radar_row["stat_en"] or 0),
+          "ts_utc": radar_row["ts_utc"],
+        }
+        derived = compute_presence_derived(radar_payload, settings_payload, [])
+        near_cm = max(20, min(200, int(settings_payload.get("radar_self_suppress_near_cm") or 80)))
+        detect_cm = int(radar_payload.get("detect_cm") or 0)
+        target = int(radar_payload.get("target") or 0)
+        present = bool(derived.get("present_derived"))
+        if not present:
+          summary = "none"
+        elif detect_cm > 0 and detect_cm <= near_cm:
+          summary = "near"
+        elif target != 0:
+          summary = "far"
+        else:
+          summary = "n/a"
+        payload["presence"] = {
+          "summary": summary,
+          "target": target,
+          "detect_cm": detect_cm if detect_cm > 0 else None,
+          "ts_utc": radar_payload.get("ts_utc"),
+        }
+
+      vision_row = conn.execute(
+        "SELECT ts_utc, camok, scene FROM vision_cam ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      if vision_row:
+        camok_val = int(vision_row["camok"] or 0)
+        scene_raw = vision_row["scene"]
+        motion_score = None
+        visual_yes = None
+        try:
+          scene = float(scene_raw)
+          motion_score = max(0.0, min(100.0, scene * 100.0))
+          visual_yes = scene > 0.0
+        except Exception:
+          scene = None
+        if camok_val != 1:
+          visual_yes = False
+        payload["visual_confirm"] = {
+          "yes": visual_yes,
+          "motion_score": round(float(motion_score), 1) if motion_score is not None else None,
+          "ts_utc": vision_row["ts_utc"],
+        }
+
+      env_row = conn.execute(
+        "SELECT ts_utc, temp_c, hum_pct FROM env ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      if env_row:
+        payload["env"] = {
+          "temp_c": env_row["temp_c"],
+          "hum_pct": env_row["hum_pct"],
+          "ts_utc": env_row["ts_utc"],
+        }
+
+      air_row = conn.execute(
+        "SELECT ts_utc, eco2_ppm, tvoc_ppb FROM air ORDER BY id DESC LIMIT 1"
+      ).fetchone()
+      if air_row:
+        payload["air"] = {
+          "eco2_ppm": air_row["eco2_ppm"],
+          "tvoc_ppb": air_row["tvoc_ppb"],
+          "ts_utc": air_row["ts_utc"],
+        }
+
+      try:
+        event_row = conn.execute(
+          "SELECT ts_utc, kind, severity, message FROM events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+      except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+          event_row = None
+        else:
+          raise
+      if event_row:
+        payload["last_event"] = {
+          "ts_utc": event_row["ts_utc"],
+          "kind": event_row["kind"],
+          "severity": event_row["severity"],
+          "message": event_row["message"],
+        }
+  except sqlite3.OperationalError as exc:
+    if "no such table" in str(exc).lower() or "locked" in str(exc).lower():
+      return payload
+    raise
+  except Exception:
+    return payload
+
+  return payload
+
+
+def render_flip_page(status: Dict[str, object]) -> str:
+  def as_text(value: object, *, digits: int = None, suffix: str = "") -> str:
+    if value is None:
+      return "n/a"
+    if isinstance(value, str):
+      text = value.strip()
+      return text if text else "n/a"
+    if isinstance(value, (int, float)):
+      if digits is None:
+        text = f"{value}"
+      else:
+        text = f"{float(value):.{digits}f}"
+      return f"{text}{suffix}"
+    return str(value)
+
+  presence = status.get("presence") if isinstance(status.get("presence"), dict) else {}
+  visual = status.get("visual_confirm") if isinstance(status.get("visual_confirm"), dict) else {}
+  env = status.get("env") if isinstance(status.get("env"), dict) else {}
+  air = status.get("air") if isinstance(status.get("air"), dict) else {}
+  camera = status.get("camera") if isinstance(status.get("camera"), dict) else {}
+  last_event = status.get("last_event") if isinstance(status.get("last_event"), dict) else None
+
+  presence_summary = as_text(presence.get("summary")).lower()
+  visual_yes = visual.get("yes")
+  visual_label = "YES" if visual_yes is True else "NO" if visual_yes is False else "n/a"
+  motion_score = as_text(visual.get("motion_score"), digits=1, suffix="%")
+  temp_text = as_text(env.get("temp_c"), digits=1, suffix=" °C")
+  hum_text = as_text(env.get("hum_pct"), digits=1, suffix=" %")
+  eco2_text = as_text(air.get("eco2_ppm"), digits=0, suffix=" ppm")
+  tvoc_text = as_text(air.get("tvoc_ppb"), digits=0, suffix=" ppb")
+  cam_state = as_text(camera.get("status")).lower()
+  snap_ts = as_text(camera.get("last_snapshot_ts"))
+
+  event_line = ""
+  if last_event:
+    event_ts = as_text(last_event.get("ts_utc"))
+    event_kind = as_text(last_event.get("kind"))
+    event_msg = as_text(last_event.get("message"))
+    event_line = (
+      '<div class="row"><span class="k">Last Event</span>'
+      f'<span class="v">{html.escape(event_kind)} · {html.escape(event_msg)} · {html.escape(event_ts)}</span></div>'
+    )
+
+  return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HERMES Flip Portal</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    html, body {{ margin: 0; padding: 0; background: #0b1118; color: #e9f0f7; font-family: Arial, sans-serif; }}
+    .wrap {{ max-width: 360px; margin: 0 auto; padding: 10px; }}
+    h1 {{ font-size: 20px; margin: 0 0 10px 0; }}
+    .actions {{ display: flex; gap: 8px; margin-bottom: 10px; }}
+    .btn {{ flex: 1 1 0; text-align: center; text-decoration: none; color: #e9f0f7; border: 1px solid #2e3d4d; background: #15202b; border-radius: 8px; padding: 8px 6px; font-size: 16px; font-weight: 700; }}
+    .panel {{ border: 1px solid #26313d; border-radius: 10px; background: #101822; padding: 8px; }}
+    .row {{ display: block; padding: 6px 0; border-bottom: 1px solid #1f2b36; }}
+    .row:last-child {{ border-bottom: 0; }}
+    .k {{ display: block; color: #9fb3c8; font-size: 12px; }}
+    .v {{ display: block; margin-top: 2px; font-size: 18px; line-height: 1.2; font-weight: 700; word-break: break-word; }}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>HERMES Flip Portal</h1>
+    <div class="actions">
+      <a class="btn" href="/flip">Refresh</a>
+      <a class="btn" href="/">Open Main Dashboard</a>
+    </div>
+    <section class="panel">
+      <div class="row"><span class="k">Last Updated</span><span class="v">{html.escape(as_text(status.get("ts")))}</span></div>
+      <div class="row"><span class="k">HPD / Presence</span><span class="v">{html.escape(presence_summary)}</span></div>
+      <div class="row"><span class="k">Visual Confirm</span><span class="v">{html.escape(visual_label)} · motion {html.escape(motion_score)}</span></div>
+      <div class="row"><span class="k">Temp</span><span class="v">{html.escape(temp_text)}</span></div>
+      <div class="row"><span class="k">Humidity</span><span class="v">{html.escape(hum_text)}</span></div>
+      <div class="row"><span class="k">Air</span><span class="v">eCO2 {html.escape(eco2_text)} · TVOC {html.escape(tvoc_text)}</span></div>
+      <div class="row"><span class="k">Camera</span><span class="v">{html.escape(cam_state)}</span></div>
+      <div class="row"><span class="k">Last Snapshot</span><span class="v">{html.escape(snap_ts)}</span></div>
+      {event_line}
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
 @APP.get("/api/health")
 def api_health() -> Dict[str, object]:
     cmd = run_cmd(["python3", str(CLIENT_PATH), "health"], timeout_sec=2)
@@ -2453,6 +2695,16 @@ def api_health() -> Dict[str, object]:
         "freshness": freshness,
       "camera": camera_health_payload(),
     }
+
+
+@APP.get("/api/flip/status")
+def api_flip_status() -> Dict[str, object]:
+  return build_flip_status()
+
+
+@APP.get("/flip", response_class=HTMLResponse)
+def flip_page() -> HTMLResponse:
+  return HTMLResponse(render_flip_page(build_flip_status()))
 
 
 @APP.get("/camera/stream")
