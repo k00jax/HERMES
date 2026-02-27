@@ -1,4 +1,4 @@
-  MENU_TEXT = (
+MENU_TEXT = (
     "\nMENU:\n"
     "  1: Status\n"
     "  2: Report\n"
@@ -6,7 +6,7 @@
     "  4: Confirm\n"
     "  5: Help\n"
     "  9: Quit\n"
-  )
+)
 import asyncio
 import datetime
 import os
