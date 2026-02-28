@@ -364,10 +364,12 @@ class HermesTelnetPortal:
             if b in (10, 13):
               if state.token_buf:
                 if state.token_buf == self._token:
+                  self._logger.warning("TELNET_CLIENT: %s auth success", peer)
                   state.authenticated = True
                   await self._send_block(writer, ["AUTH OK"], limit=2)
                   await self._show_menu(writer)
                 else:
+                  self._logger.warning("TELNET_CLIENT: %s auth fail (len=%d)", peer, len(state.token_buf))
                   await self._send_block(writer, ["AUTH FAIL", "TRY AGAIN"], limit=4)
                 state.token_buf = ""
               continue
@@ -375,12 +377,14 @@ class HermesTelnetPortal:
             ch = chr(b)
             state.token_buf += ch
             if state.token_buf == self._token:
+              self._logger.warning("TELNET_CLIENT: %s auth success", peer)
               state.authenticated = True
               await self._send_block(writer, ["AUTH OK"], limit=2)
               await self._show_menu(writer)
               state.token_buf = ""
               continue
             if len(state.token_buf) >= max(len(self._token), 16):
+              self._logger.warning("TELNET_CLIENT: %s auth fail (max-length reached len=%d)", peer, len(state.token_buf))
               await self._send_block(writer, ["AUTH FAIL", "TRY AGAIN"], limit=4)
               state.token_buf = ""
             continue
