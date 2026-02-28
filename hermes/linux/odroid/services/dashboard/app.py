@@ -2838,47 +2838,15 @@ def api_health() -> Dict[str, object]:
         freshness["ESP,NET"] = "dead"
     except Exception:
       pass
-    # TELNET freshness: check if process is running and port is open
-    import socket, time
-    try:
-      import psutil
-    except Exception:
-      psutil = None
-    telnet_status = "dead"
-    telnet_age = None
-    try:
-      # Check if port 8023 is open (listening)
-      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      sock.settimeout(0.5)
-      result = sock.connect_ex(("127.0.0.1", 8023))
-      if result == 0:
-        telnet_status = "ok"
-        if psutil:
-          # Optionally, get process start time for "age"
-          for proc in psutil.process_iter(attrs=["name", "cmdline", "create_time"]):
-            if "python" in proc.info["name"] and proc.info["cmdline"] and any("dashboard" in s for s in proc.info["cmdline"]):
-              telnet_age = int(time.time() - proc.info["create_time"])
-              break
-        else:
-          # Try to get uptime from /proc/uptime
-          try:
-            with open("/proc/uptime") as f:
-              telnet_age = int(float(f.read().split()[0]))
-          except Exception:
-            telnet_age = None
-      else:
-        telnet_status = "dead"
-      sock.close()
-    except Exception:
-      telnet_status = "unknown"
-    freshness["TELNET"] = telnet_status
+    # TELNET freshness: use get_telnet_health() for consistent status
+    telnet_health = get_telnet_health()
+    freshness["TELNET"] = telnet_health.get("status", "dead")
     return {
       "ok": cmd["ok"],
       "code": cmd["code"],
       "raw": raw,
       "freshness": freshness,
-      "telnet_age": telnet_age,
-      "psutil": bool(psutil),
+      "telnet": telnet_health,
       "camera": camera_health_payload(),
     }
 
@@ -5102,6 +5070,11 @@ HTML_PAGE = """
 
   {{EVENTS_DATA_SECTION}}
 
+  <div id="tables" class="tables-grid"></div>
+
+  <h3 class="muted small" style="margin-top:18px">Raw health</h3>
+  <pre id="rawHealth" class="muted small">loading...</pre>
+
 <script src="/app.js"></script>
 </body>
 </html>
@@ -5210,10 +5183,6 @@ def render_dashboard_page(active_path: str) -> str:
     </div>
   </div>
 
-  <div id=\"tables\" class=\"tables-grid\"></div>
-
-  <h3>Raw health</h3>
-  <pre id=\"rawHealth\">loading...</pre>
   """
 
   show_home_charts = active_path in ("/", "/home2")
@@ -6216,16 +6185,6 @@ const EXPECTED_INTERVALS = {
   esp_net: 5,
   hb: 1,
 };
-const FRESHNESS_TABLE_BY_PREFIX = {
-  'HB': 'hb',
-  'ENV': 'env',
-  'AIR': 'air',
-  'LIGHT': 'light',
-  'MIC': 'mic_noise',
-  'CAM': 'vision_cam',
-  'ESP,NET': 'esp_net',
-  'RADAR': 'radar',
-};
 const EXPECTED_KEY_BY_PREFIX = {
   'HB': 'hb',
   'ENV': 'env',
@@ -6316,6 +6275,7 @@ const eventsState = {
   },
 };
 let latestReady = null;
+let latestTelnet = null;
 let statusController = null;
 let tableController = null;
 let trendController = null;
@@ -8075,6 +8035,21 @@ function renderFreshness(map) {
       else v = 'ok';
     }
 
+    // TELNET: use telnet health data instead of DB age
+    if (k === 'TELNET' && latestTelnet) {
+      v = String(latestTelnet.status || v);
+      const upS = Number(latestTelnet.age_s);
+      const cli = Number(latestTelnet.clients || 0);
+      const tot = Number(latestTelnet.total_connections || 0);
+      const upText = Number.isFinite(upS) ? formatAgeShort(upS) : 'n/a';
+      const ageClass = v === 'ok' ? 'good' : (v === 'warn' ? 'warn' : 'bad');
+      const d = document.createElement('div');
+      d.className = 'card tile ' + clsFor(v);
+      d.innerHTML = '<div><b>' + k + '</b></div><div>' + v + '</div><div class="fresh-age ' + ageClass + '">Up: ' + upText + ' · ' + cli + '/' + tot + ' conn</div>';
+      root.appendChild(d);
+      continue;
+    }
+
     const ratio = (Number.isFinite(ageSec) && expectedInterval > 0) ? (ageSec / expectedInterval) : NaN;
     let ageClass = 'bad';
     if (Number.isFinite(ratio)) {
@@ -8145,6 +8120,25 @@ function renderIntegrity(data) {
     '<table class="integrity-table"><thead><tr><th>Prefix</th><th>10s</th><th>60s</th></tr></thead><tbody>' +
     rows.map(([prefix, ten, sixty]) => '<tr><td>' + escapeHtml(prefix) + '</td><td>' + escapeHtml(String(ten)) + '</td><td>' + escapeHtml(String(sixty)) + '</td></tr>').join('') +
     '</tbody></table>';
+
+  // Append TELNET connection summary to integrity panel
+  if (latestTelnet) {
+    const tSt = String(latestTelnet.status || 'unknown');
+    const tUp = Number.isFinite(Number(latestTelnet.age_s)) ? formatAgeShort(latestTelnet.age_s) : 'n/a';
+    const tCli = Number(latestTelnet.clients || 0);
+    const tTot = Number(latestTelnet.total_connections || 0);
+    const tPort = String(latestTelnet.port || 8023);
+    const tScope = latestTelnet.bind_lan ? 'LAN' : 'LOCAL';
+    const tErr = latestTelnet.last_error ? (' err: ' + String(latestTelnet.last_error).slice(0, 40)) : '';
+    const tColor = tSt === 'ok' ? '#2ecc71' : (tSt === 'warn' ? '#f0ad4e' : '#e74c3c');
+    fpsEl.innerHTML += '<div style="margin-top:8px;padding:6px 8px;border:1px solid #26313d;border-radius:8px;font-size:12px;">'
+      + '<b style="color:' + tColor + '">TELNET</b> '
+      + tSt.toUpperCase() + ' \u00b7 :' + escapeHtml(tPort) + ' ' + tScope
+      + ' \u00b7 up ' + escapeHtml(tUp)
+      + ' \u00b7 clients ' + tCli + '/' + tTot
+      + escapeHtml(tErr)
+      + '</div>';
+  }
 }
 
 function summarizeTickerTransition(row) {
@@ -9322,6 +9316,7 @@ async function pollStatus() {
     if (errorEl) errorEl.innerText = status.last_error || 'unknown';
 
     const telnet = (status && status.TELNET && typeof status.TELNET === 'object') ? status.TELNET : null;
+    latestTelnet = telnet;
     const telnetCardEl = document.getElementById('telnetCard');
     const telnetStatusEl = document.getElementById('telnet-status');
     const telnetSubEl = document.getElementById('telnet-sub');
@@ -9782,11 +9777,34 @@ def get_telnet_health() -> Dict[str, object]:
   bind_lan = bool(telnet_bind_lan_value)
   token_required = bool(telnet_token_required_value)
   listening = _telnet_is_listening(port)
-  status = "dead" if enabled else "warn"
-  if listening:
-    status = "ok"
+
+  total_conn = 0
+  cur_clients = 0
+  if telnet_portal_server is not None:
+    if hasattr(telnet_portal_server, "total_connections"):
+      try:
+        total_conn = int(getattr(telnet_portal_server, "total_connections"))
+      except Exception:
+        pass
+    if hasattr(telnet_portal_server, "client_count"):
+      try:
+        cur_clients = int(getattr(telnet_portal_server, "client_count"))
+      except Exception:
+        pass
+
+  # Status logic:
+  #   dead  = enabled but port not listening
+  #   warn  = listening but zero total connections (unverified) OR disabled
+  #   ok    = listening AND at least one client has connected
   if not enabled:
     status = "warn"
+  elif not listening:
+    status = "dead"
+  elif total_conn < 1:
+    status = "warn"
+  else:
+    status = "ok"
+
   age_s = int(max(0, time.time() - float(telnet_started_epoch))) if telnet_started_epoch else None
   payload: Dict[str, object] = {
     "status": status,
@@ -9796,12 +9814,9 @@ def get_telnet_health() -> Dict[str, object]:
     "token_required": token_required,
     "last_error": telnet_last_error,
     "age_s": age_s,
+    "clients": cur_clients,
+    "total_connections": total_conn,
   }
-  if telnet_portal_server is not None and hasattr(telnet_portal_server, "client_count"):
-    try:
-      payload["clients"] = int(getattr(telnet_portal_server, "client_count"))
-    except Exception:
-      pass
   return payload
 
 

@@ -115,12 +115,17 @@ class HermesTelnetPortal:
     self._server: Optional[asyncio.AbstractServer] = None
     self._logger = logging.getLogger("hermes.telnet")
     self._client_count = 0
+    self._total_connections = 0
     self._last_error: Optional[str] = None
     self._started_epoch: Optional[float] = None
 
   @property
   def client_count(self) -> int:
     return int(self._client_count)
+
+  @property
+  def total_connections(self) -> int:
+    return int(self._total_connections)
 
   @property
   def last_error(self) -> Optional[str]:
@@ -278,6 +283,7 @@ class HermesTelnetPortal:
 
   async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     self._client_count += 1
+    self._total_connections += 1
     state = SessionState(authenticated=not bool(self._token), current_screen="1", token_buf="")
     recv_buf = b""
     cmd_buf = bytearray()
