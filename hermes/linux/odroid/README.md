@@ -121,7 +121,7 @@ Quick local test:
 
 ```bash
 cd ~/hermes-src/hermes/linux/odroid/services/dashboard
-TELNET_ENABLE=true TELNET_TOKEN=hermes TELNET_BIND_LAN=true python3 app.py
+TELNET_ENABLE=true TELNET_TOKEN=<set-secret-token> TELNET_BIND_LAN=true python3 app.py
 telnet <odroid_ip> 8023
 ```
 
