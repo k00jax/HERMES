@@ -83,23 +83,25 @@ def telnet_process_iac(data: bytes) -> Tuple[bytes, bytes, bytes]:
   return bytes(clean), bytes(reply), data[i:]
 
 
-MENU_TEXT = (
-  "MENU\n"
-  "1 STATUS\n"
-  "2 ENV\n"
-  "3 AIR\n"
-  "4 PRES\n"
-  "5 REPORT\n"
-  "9 REFRESH\n"
-  "* MENU\n"
-  "0 EXIT"
-)
+MENU_LINES = [
+  "MENU",
+  "1 - STATUS",
+  "2 - ENV",
+  "3 - AIR",
+  "4 - PRES",
+  "5 - REPORT",
+  "* - MENU",
+  "0 - REFRESH",
+  "# - EXIT",
+]
+
+FOOTER_LINE = "*/0/# MENU/RFSH/EXIT"
 
 
 @dataclass
 class SessionState:
   authenticated: bool = False
-  current_screen: str = "1"
+  current_screen: str = "menu"
   token_buf: str = ""
 
 
@@ -173,7 +175,7 @@ class HermesTelnetPortal:
       if not line:
         out.append("")
         continue
-      wrapped = textwrap.wrap(line, width=self._cols, break_long_words=True, break_on_hyphens=False)
+      wrapped = textwrap.wrap(line, width=max(10, self._cols - 7), break_long_words=True, break_on_hyphens=False)
       if not wrapped:
         out.append("")
       else:
@@ -182,8 +184,22 @@ class HermesTelnetPortal:
         break
     return out[:limit]
 
+  def _frame_lines(self, lines: List[str]) -> List[str]:
+    width = max(22, self._cols - 2)
+    inner = width - 4
+    top = "+" + "=" * (width - 2) + "+"
+    bottom = "+" + "-" * (width - 2) + "+"
+    framed = [top]
+    for line in lines:
+      txt = str(line)[:inner]
+      framed.append(f"| {txt.ljust(inner)} |")
+    framed.append(bottom)
+    return framed
+
   async def _send_block(self, writer: asyncio.StreamWriter, lines: List[str], limit: int = 10) -> None:
-    payload = "\r\n".join(self._wrap_lines(lines, limit=limit)) + "\r\n"
+    wrapped = self._wrap_lines(lines, limit=limit)
+    framed = self._frame_lines(wrapped)
+    payload = "\r\n\r\n" + "\r\n".join(framed) + "\r\n"
     out = payload.encode("utf-8", errors="ignore")[:800]
     writer.write(out)
     await writer.drain()
@@ -215,8 +231,8 @@ class HermesTelnetPortal:
       f"ECO2 {self._fmt_num(air.get('eco2_ppm'), 'ppm', 0)}",
       f"TVOC {self._fmt_num(air.get('tvoc_ppb'), 'ppb', 0)}",
       f"PRES {str(prs.get('summary') or 'n/a').upper()}",
-      "9 REFRESH  * MENU",
-      "0 EXIT",
+      "",
+      FOOTER_LINE,
     ]
 
   def _screen_env(self) -> List[str]:
@@ -228,8 +244,8 @@ class HermesTelnetPortal:
       f"TEMP {self._fmt_num(env.get('temp_c'), 'C')}",
       f"HUM  {self._fmt_num(env.get('hum_pct'), '%')}",
       f"AGE  {ts[-8:] if ts else 'n/a'}",
-      "9 REFRESH  * MENU",
-      "0 EXIT",
+      "",
+      FOOTER_LINE,
     ]
 
   def _screen_air(self) -> List[str]:
@@ -241,8 +257,8 @@ class HermesTelnetPortal:
       f"ECO2 {self._fmt_num(air.get('eco2_ppm'), 'ppm', 0)}",
       f"TVOC {self._fmt_num(air.get('tvoc_ppb'), 'ppb', 0)}",
       f"AGE  {ts[-8:] if ts else 'n/a'}",
-      "9 REFRESH  * MENU",
-      "0 EXIT",
+      "",
+      FOOTER_LINE,
     ]
 
   def _screen_presence(self) -> List[str]:
@@ -261,8 +277,8 @@ class HermesTelnetPortal:
       f"STATE {str(prs.get('summary') or 'n/a').upper()}",
       f"DIST  {detect_txt}",
       f"VIS   {yes_txt}",
-      "9 REFRESH  * MENU",
-      "0 EXIT",
+      "",
+      FOOTER_LINE,
     ]
 
   def _screen_report(self) -> List[str]:
@@ -275,7 +291,7 @@ class HermesTelnetPortal:
     clean = [str(item).replace("\r", " ").replace("\n", " ") for item in rows[:6]]
     if not clean:
       clean = ["REPORT n/a"]
-    return ["REPORT", *clean[:6], "9 REFRESH  * MENU", "0 EXIT"]
+    return ["REPORT", *clean[:6], "", FOOTER_LINE]
 
   def _render_screen(self, screen: str) -> List[str]:
     if screen == "1":
@@ -288,10 +304,10 @@ class HermesTelnetPortal:
       return self._screen_presence()
     if screen == "5":
       return self._screen_report()
-    return ["UNKNOWN", "* MENU", "0 EXIT"]
+    return ["UNKNOWN", "", FOOTER_LINE]
 
   async def _show_menu(self, writer: asyncio.StreamWriter) -> None:
-    await self._send_block(writer, ["HERMES TELNET", MENU_TEXT], limit=10)
+    await self._send_block(writer, ["HERMES // WASTELAND CONSOLE", *MENU_LINES, "", FOOTER_LINE], limit=14)
 
   async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     peer = "unknown"
@@ -333,6 +349,7 @@ class HermesTelnetPortal:
       if self._token:
         await self._send_block(writer, ["TOKEN?"], limit=2)
       else:
+        state.current_screen = "menu"
         await self._show_menu(writer)
 
       while not reader.at_eof():
@@ -366,6 +383,7 @@ class HermesTelnetPortal:
                 if state.token_buf == self._token:
                   self._logger.warning("TELNET_CLIENT: %s auth success", peer)
                   state.authenticated = True
+                  state.current_screen = "menu"
                   await self._send_block(writer, ["AUTH OK"], limit=2)
                   await self._show_menu(writer)
                 else:
@@ -375,10 +393,19 @@ class HermesTelnetPortal:
               continue
 
             ch = chr(b)
+            if ch in {"\x08", "\x7f"}:
+              if state.token_buf:
+                state.token_buf = state.token_buf[:-1]
+                writer.write(b"\b \b")
+                await writer.drain()
+              continue
             state.token_buf += ch
+            writer.write(b"$")
+            await writer.drain()
             if state.token_buf == self._token:
               self._logger.warning("TELNET_CLIENT: %s auth success", peer)
               state.authenticated = True
+              state.current_screen = "menu"
               await self._send_block(writer, ["AUTH OK"], limit=2)
               await self._show_menu(writer)
               state.token_buf = ""
@@ -392,20 +419,27 @@ class HermesTelnetPortal:
           if b in (10, 13, 9, 32):
             continue
           ch = chr(b)
-          if ch not in {"0", "1", "2", "3", "4", "5", "9", "*"}:
-            await self._send_block(writer, ["INVALID", "* MENU", "0 EXIT"], limit=4)
+          if ch not in {"0", "1", "2", "3", "4", "5", "9", "*", "#"}:
+            await self._send_block(writer, ["INVALID", "", FOOTER_LINE], limit=4)
             continue
 
-          if ch == "0":
+          if ch == "#":
             await self._send_block(writer, ["BYE"], limit=2)
             return
           if ch == "*":
+            state.current_screen = "menu"
             await self._show_menu(writer)
+            continue
+          if ch in {"0", "9"}:
+            if state.current_screen == "menu":
+              await self._show_menu(writer)
+            else:
+              await self._send_block(writer, self._render_screen(state.current_screen), limit=14)
             continue
           if ch in {"1", "2", "3", "4", "5"}:
             state.current_screen = ch
           screen_lines = self._render_screen(state.current_screen)
-          await self._send_block(writer, screen_lines, limit=10)
+          await self._send_block(writer, screen_lines, limit=14)
 
         if reader.at_eof():
           continue
