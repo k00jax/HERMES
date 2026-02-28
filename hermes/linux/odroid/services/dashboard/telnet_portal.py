@@ -86,13 +86,10 @@ def telnet_process_iac(data: bytes) -> Tuple[bytes, bytes, bytes]:
 MENU_LINES = [
   "MENU",
   "1 - STATUS",
-  "2 - ENV",
-  "3 - AIR",
-  "4 - PRES",
+  "2 - TEMP/HUMIDITY",
+  "3 - AIR QUALITY",
+  "4 - RADAR",
   "5 - REPORT",
-  "* - MENU",
-  "0 - REFRESH",
-  "# - EXIT",
 ]
 
 FOOTER_LINE = "*/0/# MENU/RFSH/EXIT"
@@ -103,6 +100,7 @@ class SessionState:
   authenticated: bool = False
   current_screen: str = "menu"
   token_buf: str = ""
+  last_presence_summary: str = ""
 
 
 class HermesTelnetPortal:
@@ -168,14 +166,19 @@ class HermesTelnetPortal:
     self._server = None
     self._logger.info("TELNET_SHUTDOWN: server closed")
 
+  def _frame_width(self) -> int:
+    # Keep UI compact on small phone screens
+    return max(24, self._cols - 6)
+
   def _wrap_lines(self, lines: List[str], limit: int = 10) -> List[str]:
     out: List[str] = []
+    inner_width = max(10, self._frame_width() - 4)
     for raw in lines[:limit]:
       line = str(raw).replace("\r", " ").replace("\n", " ").strip()
       if not line:
         out.append("")
         continue
-      wrapped = textwrap.wrap(line, width=max(10, self._cols - 7), break_long_words=True, break_on_hyphens=False)
+      wrapped = textwrap.wrap(line, width=inner_width, break_long_words=True, break_on_hyphens=False)
       if not wrapped:
         out.append("")
       else:
@@ -185,7 +188,7 @@ class HermesTelnetPortal:
     return out[:limit]
 
   def _frame_lines(self, lines: List[str]) -> List[str]:
-    width = max(22, self._cols - 2)
+    width = self._frame_width()
     inner = width - 4
     top = "+" + "=" * (width - 2) + "+"
     bottom = "+" + "-" * (width - 2) + "+"
@@ -204,6 +207,11 @@ class HermesTelnetPortal:
     writer.write(out)
     await writer.drain()
 
+  async def _beep(self, writer: asyncio.StreamWriter, count: int = 1) -> None:
+    count = max(1, min(3, int(count)))
+    writer.write(b"\a" * count)
+    await writer.drain()
+
   def _fmt_num(self, value: object, unit: str = "", decimals: int = 1) -> str:
     try:
       num = float(value)
@@ -219,13 +227,21 @@ class HermesTelnetPortal:
       self._last_error = str(exc)
       return {}
 
+  def _title_block(self, title: str) -> List[str]:
+    label = f":: {str(title).upper()} ::"
+    return [label, "----------------"]
+
+  def _age_tail(self, ts_value: object) -> str:
+    ts = str(ts_value or "").strip()
+    return ts[-8:] if ts else "n/a"
+
   def _screen_status(self) -> List[str]:
     s = self._status_payload()
     env = s.get("env") if isinstance(s.get("env"), dict) else {}
     air = s.get("air") if isinstance(s.get("air"), dict) else {}
     prs = s.get("presence") if isinstance(s.get("presence"), dict) else {}
     return [
-      "STATUS",
+      *self._title_block("STATUS"),
       f"TEMP {self._fmt_num(env.get('temp_c'), 'C')}",
       f"HUM  {self._fmt_num(env.get('hum_pct'), '%')}",
       f"ECO2 {self._fmt_num(air.get('eco2_ppm'), 'ppm', 0)}",
@@ -238,12 +254,10 @@ class HermesTelnetPortal:
   def _screen_env(self) -> List[str]:
     s = self._status_payload()
     env = s.get("env") if isinstance(s.get("env"), dict) else {}
-    ts = str(env.get("ts_utc") or s.get("ts") or "")
     return [
-      "ENV",
+      *self._title_block("TEMP/HUMIDITY"),
       f"TEMP {self._fmt_num(env.get('temp_c'), 'C')}",
       f"HUM  {self._fmt_num(env.get('hum_pct'), '%')}",
-      f"AGE  {ts[-8:] if ts else 'n/a'}",
       "",
       FOOTER_LINE,
     ]
@@ -251,12 +265,10 @@ class HermesTelnetPortal:
   def _screen_air(self) -> List[str]:
     s = self._status_payload()
     air = s.get("air") if isinstance(s.get("air"), dict) else {}
-    ts = str(air.get("ts_utc") or s.get("ts") or "")
     return [
-      "AIR",
+      *self._title_block("AIR QUALITY"),
       f"ECO2 {self._fmt_num(air.get('eco2_ppm'), 'ppm', 0)}",
       f"TVOC {self._fmt_num(air.get('tvoc_ppb'), 'ppb', 0)}",
-      f"AGE  {ts[-8:] if ts else 'n/a'}",
       "",
       FOOTER_LINE,
     ]
@@ -273,7 +285,7 @@ class HermesTelnetPortal:
     yes = vis.get("yes")
     yes_txt = "YES" if yes is True else "NO" if yes is False else "n/a"
     return [
-      "PRESENCE",
+      *self._title_block("RADAR"),
       f"STATE {str(prs.get('summary') or 'n/a').upper()}",
       f"DIST  {detect_txt}",
       f"VIS   {yes_txt}",
@@ -282,16 +294,35 @@ class HermesTelnetPortal:
     ]
 
   def _screen_report(self) -> List[str]:
+    s = self._status_payload()
+    env = s.get("env") if isinstance(s.get("env"), dict) else {}
+    air = s.get("air") if isinstance(s.get("air"), dict) else {}
+    prs = s.get("presence") if isinstance(s.get("presence"), dict) else {}
+
     rows: List[str] = []
     try:
       rows = self._report_provider(6) or []
     except Exception as exc:
       self._last_error = str(exc)
       rows = []
-    clean = [str(item).replace("\r", " ").replace("\n", " ") for item in rows[:6]]
+    clean = [str(item).replace("\r", " ").replace("\n", " ")[:28] for item in rows[:1]]
     if not clean:
       clean = ["REPORT n/a"]
-    return ["REPORT", *clean[:6], "", FOOTER_LINE]
+
+    age_env = self._age_tail(env.get("ts_utc") or s.get("ts"))
+    age_air = self._age_tail(air.get("ts_utc") or s.get("ts"))
+    age_rad = self._age_tail(prs.get("ts_utc") or s.get("ts"))
+
+    return [
+      *self._title_block("REPORT"),
+      f"AGE ENV {age_env}",
+      f"AGE AIR {age_air}",
+      f"AGE RAD {age_rad}",
+      "",
+      *clean,
+      "",
+      FOOTER_LINE,
+    ]
 
   def _render_screen(self, screen: str) -> List[str]:
     if screen == "1":
@@ -304,10 +335,11 @@ class HermesTelnetPortal:
       return self._screen_presence()
     if screen == "5":
       return self._screen_report()
-    return ["UNKNOWN", "", FOOTER_LINE]
+    return [*self._title_block("UNKNOWN"), "", FOOTER_LINE]
 
   async def _show_menu(self, writer: asyncio.StreamWriter) -> None:
-    await self._send_block(writer, ["HERMES // WASTELAND CONSOLE", *MENU_LINES, "", FOOTER_LINE], limit=14)
+    await self._beep(writer, 1)
+    await self._send_block(writer, ["HERMES // V1-LITE", "", *MENU_LINES, "", FOOTER_LINE], limit=14)
 
   async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     peer = "unknown"
@@ -382,12 +414,14 @@ class HermesTelnetPortal:
               if state.token_buf:
                 if state.token_buf == self._token:
                   self._logger.warning("TELNET_CLIENT: %s auth success", peer)
+                  await self._beep(writer, 2)
                   state.authenticated = True
                   state.current_screen = "menu"
                   await self._send_block(writer, ["AUTH OK"], limit=2)
                   await self._show_menu(writer)
                 else:
                   self._logger.warning("TELNET_CLIENT: %s auth fail (len=%d)", peer, len(state.token_buf))
+                  await self._beep(writer, 3)
                   await self._send_block(writer, ["AUTH FAIL", "TRY AGAIN"], limit=4)
                 state.token_buf = ""
               continue
@@ -404,6 +438,7 @@ class HermesTelnetPortal:
             await writer.drain()
             if state.token_buf == self._token:
               self._logger.warning("TELNET_CLIENT: %s auth success", peer)
+              await self._beep(writer, 2)
               state.authenticated = True
               state.current_screen = "menu"
               await self._send_block(writer, ["AUTH OK"], limit=2)
@@ -412,6 +447,7 @@ class HermesTelnetPortal:
               continue
             if len(state.token_buf) >= max(len(self._token), 16):
               self._logger.warning("TELNET_CLIENT: %s auth fail (max-length reached len=%d)", peer, len(state.token_buf))
+              await self._beep(writer, 3)
               await self._send_block(writer, ["AUTH FAIL", "TRY AGAIN"], limit=4)
               state.token_buf = ""
             continue
@@ -438,6 +474,19 @@ class HermesTelnetPortal:
             continue
           if ch in {"1", "2", "3", "4", "5"}:
             state.current_screen = ch
+
+          # Alert-state transition chime (presence/radar summary change)
+          try:
+            payload = self._status_payload()
+            prs = payload.get("presence") if isinstance(payload.get("presence"), dict) else {}
+            summary = str(prs.get("summary") or "").upper().strip()
+            if summary and summary != state.last_presence_summary:
+              if state.last_presence_summary and summary in {"NEAR", "PRESENT", "DETECTED", "ALERT"}:
+                await self._beep(writer, 2)
+              state.last_presence_summary = summary
+          except Exception:
+            pass
+
           screen_lines = self._render_screen(state.current_screen)
           await self._send_block(writer, screen_lines, limit=14)
 
