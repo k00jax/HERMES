@@ -2,6 +2,42 @@
 
 Odroid-specific services, scripts, containers, and systemd units.
 
+## What currently resides here
+
+This is the active deployment root for HERMES runtime on Odroid.
+
+### Core service residency
+
+- Dashboard/API app: `linux/odroid/services/dashboard/app.py`
+- Telnet operator console: `linux/odroid/services/dashboard/telnet_portal.py`
+- Service unit: `linux/odroid/systemd/hermes-dashboard.service`
+- Runtime ports:
+	- `:8000` HTTP UI/API
+	- `:8023` Telnet console
+
+### Architecture path (repo → runtime)
+
+```text
+hermes/
+	linux/odroid/
+		services/dashboard/
+			app.py
+			telnet_portal.py
+		systemd/
+			hermes-dashboard.service
+
+systemd -> uvicorn(app:APP) -> FastAPI routes (:8000)
+												 -> HermesTelnetPortal (:8023)
+```
+
+### Verify on-device
+
+```bash
+sudo systemctl status hermes-dashboard.service --no-pager
+sudo ss -ltnp | egrep ':8000|:8023'
+sudo journalctl -u hermes-dashboard.service -n 120 --no-pager
+```
+
 ## OLED Context Pusher
 
 Pushes host-computed deltas to the nRF OLED overlay.
