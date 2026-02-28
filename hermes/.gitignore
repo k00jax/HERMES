@@ -15,5 +15,9 @@
 **/*.log
 **/*.tmp
 
+# Secrets
+.env
+**/.env
+
 # Node
 **/node_modules/
