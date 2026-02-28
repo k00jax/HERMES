@@ -9740,6 +9740,13 @@ def _env_flag(name: str, default: str = "false") -> bool:
 
 
 def _telnet_is_listening(port: int) -> bool:
+  # Prefer checking the server object directly (avoids inflating connection counts)
+  if telnet_portal_server is not None and hasattr(telnet_portal_server, "is_running"):
+    try:
+      return bool(telnet_portal_server.is_running)
+    except Exception:
+      pass
+  # Fallback: actual TCP probe
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   try:
     sock.settimeout(0.4)

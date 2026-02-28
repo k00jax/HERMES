@@ -19,6 +19,18 @@ WILL = 251
 SB = 250
 SE = 240
 
+# Telnet option codes
+OPT_ECHO = 1
+OPT_SGA = 3     # suppress go-ahead
+OPT_NAWS = 31    # negotiate about window size
+
+# Server-initiated negotiation: WILL ECHO + WILL SGA + DO NAWS
+SERVER_IAC_INIT = bytes([
+  IAC, WILL, OPT_ECHO,   # server handles echoing
+  IAC, WILL, OPT_SGA,    # suppress go-ahead (character mode)
+  IAC, DO,   OPT_NAWS,   # ask client for window size
+])
+
 
 def telnet_process_iac(data: bytes) -> Tuple[bytes, bytes, bytes]:
   clean = bytearray()
@@ -282,12 +294,39 @@ class HermesTelnetPortal:
     await self._send_block(writer, ["HERMES TELNET", MENU_TEXT], limit=10)
 
   async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    peer = "unknown"
+    peer_ip = ""
+    try:
+      pi = writer.get_extra_info("peername", ("unknown", 0))
+      peer_ip = str(pi[0]) if isinstance(pi, (tuple, list)) else ""
+      peer = f"{pi[0]}:{pi[1]}" if isinstance(pi, (tuple, list)) else str(pi)
+    except Exception:
+      pass
+    # Only count non-loopback connections as real client connections
+    is_loopback = peer_ip in ("127.0.0.1", "::1", "localhost")
     self._client_count += 1
-    self._total_connections += 1
+    if not is_loopback:
+      self._total_connections += 1
+    self._logger.warning("TELNET_CLIENT: new connection from %s (total=%d, active=%d, loopback=%s)", peer, self._total_connections, self._client_count, is_loopback)
     state = SessionState(authenticated=not bool(self._token), current_screen="1", token_buf="")
     recv_buf = b""
     cmd_buf = bytearray()
     try:
+      # Send server-initiated IAC negotiation first
+      writer.write(SERVER_IAC_INIT)
+      await writer.drain()
+      # Brief pause to let client process negotiation
+      await asyncio.sleep(0.15)
+      # Drain any IAC responses the client sent during negotiation
+      try:
+        early = await asyncio.wait_for(reader.read(512), timeout=0.3)
+        if early:
+          _clean, _reply, recv_buf = telnet_process_iac(early)
+          if _reply:
+            writer.write(_reply)
+            await writer.drain()
+      except asyncio.TimeoutError:
+        pass
       now_local = datetime.datetime.now().astimezone().strftime("%H:%M:%S")
       host = socket.gethostname()
       await self._send_block(writer, ["HERMES", f"HOST {host}", f"TIME {now_local}"], limit=6)
@@ -367,12 +406,13 @@ class HermesTelnetPortal:
         if reader.at_eof():
           continue
     except (ConnectionResetError, BrokenPipeError):
-      pass
+      self._logger.warning("TELNET_CLIENT: %s disconnected (reset/pipe)", peer)
     except Exception as exc:
       self._last_error = str(exc)
-      self._logger.exception("TELNET_CLIENT: handler error")
+      self._logger.exception("TELNET_CLIENT: handler error for %s", peer)
     finally:
       self._client_count = max(0, self._client_count - 1)
+      self._logger.warning("TELNET_CLIENT: %s closed (active=%d)", peer, self._client_count)
       try:
         writer.close()
         await writer.wait_closed()
