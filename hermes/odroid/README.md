@@ -4,10 +4,10 @@ This directory contains the Odroid-side logging tools for HERMES.
 
 ## Verify Device Presence
 
-- Confirm the nRF is visible as a USB CDC ACM device:
+- Confirm stable udev links are present:
 
 ```bash
-ls -l /dev/ttyACM*
+ls -l /dev/hermes-nrf /dev/hermes-esp
 ```
 
 - Optional: view kernel messages after plug-in:
@@ -30,11 +30,13 @@ tmux new -s hermes_logger
 ~/hermes/odroid/logger/hermes_logger.sh
 ```
 
-- If your device is not /dev/ttyACM0, pass it explicitly:
+- If needed, pass a port explicitly:
 
 ```bash
-~/hermes/odroid/logger/hermes_logger.sh /dev/ttyACM1 115200
+~/hermes/odroid/logger/hermes_logger.sh /dev/hermes-nrf 115200
 ```
+
+- Use `/dev/hermes-*` names; `tty*` device numbering is not stable across boots.
 
 - Detach from tmux:
 

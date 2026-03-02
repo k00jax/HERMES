@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PORT="${1:-/dev/ttyACM0}"
+PORT="${1:-${HERMES_NRF_PORT:-/dev/hermes-nrf}}"
 BAUD="${2:-115200}"
 LOG_DIR="$HOME/hermes/logs"
 

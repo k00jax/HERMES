@@ -58,10 +58,10 @@ fi
 
 declare -A acm_targets=()
 
-if [[ "$resolved_nrf" == /dev/ttyACM* ]]; then
+if [[ "$resolved_nrf" == /dev/tty* ]]; then
   acm_targets["$resolved_nrf"]=1
 fi
-if [[ "$resolved_esp" == /dev/ttyACM* ]]; then
+if [[ "$resolved_esp" == /dev/tty* ]]; then
   acm_targets["$resolved_esp"]=1
 fi
 

@@ -34,7 +34,7 @@ These are usually acceptable for open-source infra docs, but reveal deployment t
 
 - Private IP examples (`10.x`, `100.x`) in docs/scripts
 - Absolute local paths (`/home/odroid/...`)
-- Device paths (`/dev/hermes-*`, `/dev/ttyACM*`)
+- Device paths (`/dev/hermes-*`, `/dev/tty*`)
 - Service ports (`8000`, `8023`)
 
 ## Required actions before public release

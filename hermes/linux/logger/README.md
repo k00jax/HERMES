@@ -14,7 +14,7 @@ python3 ~/hermes-src/hermes/linux/logger/logger.py
 ## Override port/baud
 
 ```bash
-export HERMES_NRF_PORT=/dev/ttyACM1
+export HERMES_NRF_PORT=/dev/hermes-nrf
 export HERMES_BAUD=115200
 python3 ~/hermes-src/hermes/linux/logger/logger.py
 ```

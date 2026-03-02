@@ -5,13 +5,25 @@ This folder contains the live dashboard and telnet operator interface.
 ## Files
 
 - `app.py`
-  - FastAPI app
-  - dashboard pages and API routes
-  - startup/shutdown lifecycle for telnet portal
+  - thin entrypoint shim
+  - keeps `python3 app.py` behavior stable
+- `legacy_app.py`
+  - existing monolithic FastAPI runtime preserved during refactor
+  - contains current routes and lifecycle logic
 - `telnet_portal.py`
-  - telnet server and keypad UI
-  - telnet negotiation compatibility (KaiOS/Mocha style clients)
-  - menu/page rendering logic
+  - compatibility import shim
+
+## New module layout
+
+The dashboard service now uses a package layout under `dashboard/` so code can be extracted incrementally without changing runtime behavior. Core directories are:
+
+- `dashboard/app.py` (app factory / assembly)
+- `dashboard/routes/` (route modules)
+- `dashboard/db/` (sqlite connection/query helpers)
+- `dashboard/services/` (calibration/report/export/health logic)
+- `dashboard/net/telnet_portal.py` (telnet portal implementation)
+
+Entrypoint remains unchanged: `python3 app.py`.
 
 ## Runtime wiring
 

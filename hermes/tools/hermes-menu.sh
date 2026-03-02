@@ -64,8 +64,8 @@ while true; do
       read -r -p "Press Enter..."
       ;;
     3)
-      echo "TTY devices:"
-      ls -l /dev/ttyACM* 2>/dev/null || true
+      echo "Stable serial links:"
+      ls -l /dev/hermes-nrf /dev/hermes-esp 2>/dev/null || true
       echo ""
       echo "Block devices:"
       lsblk -o NAME,SIZE,RM,TYPE,FSTYPE,MOUNTPOINT,LABEL
@@ -74,7 +74,7 @@ while true; do
     16)
       echo "Scanning serial devices for ESP32 (USB VID 303a)..."
       found=0
-      for d in /dev/ttyACM* /dev/ttyUSB*; do
+      for d in /dev/hermes-esp /dev/hermes-nrf /dev/ttyUSB*; do
         [[ -e "$d" ]] || continue
         vid="$(udevadm info --query=property --name="$d" 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p' | head -n1)"
         model="$(udevadm info --query=property --name="$d" 2>/dev/null | sed -n 's/^ID_MODEL=//p' | head -n1)"

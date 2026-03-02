@@ -29,7 +29,7 @@ resolve_port() {
 
   local dev vid
   local -a candidates=()
-  for dev in /dev/ttyACM* /dev/ttyUSB*; do
+  for dev in /dev/ttyUSB*; do
     [[ -e "${dev}" ]] || continue
     vid="$(udevadm info --query=property --name="${dev}" 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p' | head -n1)"
     if [[ "${vid,,}" == "303a" ]]; then
@@ -44,13 +44,13 @@ resolve_port() {
 
   if [[ ${#candidates[@]} -gt 1 ]]; then
     echo "[esp] Error: multiple Espressif serial devices found: ${candidates[*]}" >&2
-    echo "[esp] Pass port explicitly: $0 /dev/ttyACM0" >&2
+    echo "[esp] Pass port explicitly: $0 /dev/hermes-esp" >&2
     return 1
   fi
 
   echo "[esp] Error: no Espressif serial device found (expected USB VID 303a)." >&2
   echo "[esp] Try: pio device list" >&2
-  echo "[esp] Or pass port explicitly: $0 /dev/ttyACM0" >&2
+  echo "[esp] Or pass port explicitly: $0 /dev/hermes-esp" >&2
   return 1
 }
 
