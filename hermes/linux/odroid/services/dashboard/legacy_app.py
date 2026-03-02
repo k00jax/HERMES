@@ -2166,7 +2166,6 @@ def render_overlay_sparkline_png(
         del chart_render_ms_samples[: len(chart_render_ms_samples) - CHART_RENDER_SAMPLES_MAX]
 
 
-@APP.get("/api/status")
 def api_status() -> Dict[str, object]:
   cmd = run_cmd(["python3", str(CLIENT_PATH), "status"], timeout_sec=2)
   raw = cmd["stdout"] or cmd["stderr"]
@@ -2487,7 +2486,6 @@ def render_flip_page(status: Dict[str, object]) -> str:
 """
 
 
-@APP.get("/api/health")
 def api_health() -> Dict[str, object]:
     cmd = run_cmd(["python3", str(CLIENT_PATH), "health"], timeout_sec=2)
     raw = cmd["stdout"] or cmd["stderr"]
@@ -2514,17 +2512,14 @@ def api_health() -> Dict[str, object]:
     }
 
 
-@APP.get("/api/flip/status")
 def api_flip_status() -> Dict[str, object]:
   return build_flip_status()
 
 
-@APP.get("/flip", response_class=HTMLResponse)
 def flip_page() -> HTMLResponse:
   return HTMLResponse(render_flip_page(build_flip_status()))
 
 
-@APP.get("/camera/stream")
 def camera_stream() -> StreamingResponse:
   if camera_status() != "connected":
     raise HTTPException(status_code=503, detail="camera disconnected")
@@ -2535,7 +2530,6 @@ def camera_stream() -> StreamingResponse:
   )
 
 
-@APP.post("/camera/trigger")
 def camera_trigger(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
   reason = str(payload.get("reason") or "manual").strip().lower()
   allowed = {"manual", "radar_presence", "audio_spike", "button", "debug"}
@@ -2545,7 +2539,6 @@ def camera_trigger(payload: Dict[str, object] = Body(default={})) -> Dict[str, o
   return capture_snapshot(reason=reason, extra=extra if isinstance(extra, dict) else None)
 
 
-@APP.get("/camera/latest/meta")
 def camera_latest_meta() -> Dict[str, object]:
   if not Path(META_LATEST).exists():
     return {"ok": False, "error": "no_snapshot"}
@@ -2555,7 +2548,6 @@ def camera_latest_meta() -> Dict[str, object]:
   return payload
 
 
-@APP.get("/camera/snapshot")
 def camera_snapshot() -> Response:
   result = capture_snapshot(reason="manual")
   if not result.get("ok"):
@@ -2567,7 +2559,6 @@ def camera_snapshot() -> Response:
   )
 
 
-@APP.get("/api/latest/{table}")
 def api_latest(table: str, limit: int = Query(20, ge=1, le=200)) -> Dict[str, object]:
     if table not in TABLES:
         raise HTTPException(status_code=404, detail="table not allowed")
@@ -2593,7 +2584,6 @@ def api_latest(table: str, limit: int = Query(20, ge=1, le=200)) -> Dict[str, ob
     }
 
 
-@APP.get("/api/events/latest")
 def api_events_latest(
     limit: int = Query(50, ge=1, le=200),
     severity: str = Query(""),
@@ -2632,7 +2622,6 @@ def api_events_latest(
     return {"limit": limit, "rows": rows_out}
 
 
-@APP.get("/api/events")
 def api_events_since(
     since_id: int = Query(0, ge=0),
     limit: int = Query(200, ge=1, le=500),
@@ -2665,7 +2654,6 @@ def api_events_since(
     return {"since_id": since_id, "rows": rows_out}
 
 
-@APP.post("/api/events/ack")
 def api_events_ack(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
     enforce_event_post_rate_limit(request)
     event_id = payload.get("id")
@@ -2683,7 +2671,6 @@ def api_events_ack(request: Request, payload: Dict[str, object] = Body(...)) -> 
     return {"ok": True, "target_type": target_type, "target_value": target_value}
 
 
-@APP.post("/api/events/snooze")
 def api_events_snooze(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
     enforce_event_post_rate_limit(request)
     dedupe_key = str(payload.get("dedupe_key") or "").strip()
@@ -2722,7 +2709,6 @@ def api_events_snooze(request: Request, payload: Dict[str, object] = Body(...)) 
     }
 
 
-@APP.post("/api/events/note")
 def api_events_note(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
     enforce_event_post_rate_limit(request)
     event_id = payload.get("id")
@@ -2740,7 +2726,6 @@ def api_events_note(request: Request, payload: Dict[str, object] = Body(...)) ->
     return {"ok": True, "target_type": "id", "target_value": str(int(event_id)), "note": note}
 
 
-@APP.post("/api/events/ack_bulk")
 def api_events_ack_bulk(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
     enforce_event_post_rate_limit(request)
     ids_raw = payload.get("ids") or []
@@ -2769,7 +2754,6 @@ def api_events_ack_bulk(request: Request, payload: Dict[str, object] = Body(...)
     return {"ok": True, "acked_ids": len(set(ids)), "acked_dedupe": len(set(dedupe_keys))}
 
 
-@APP.post("/api/events/snooze_bulk")
 def api_events_snooze_bulk(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
     enforce_event_post_rate_limit(request)
     ids_raw = payload.get("ids") or []
@@ -2813,7 +2797,6 @@ def api_events_snooze_bulk(request: Request, payload: Dict[str, object] = Body(.
     }
 
 
-@APP.post("/api/events/clear_snooze_kind")
 def api_events_clear_snooze_kind(request: Request, payload: Dict[str, object] = Body(...)) -> Dict[str, object]:
     enforce_event_post_rate_limit(request)
     kind = str(payload.get("kind") or "").strip()
@@ -2891,7 +2874,6 @@ def api_integrity() -> Dict[str, object]:
   return {"fps_1m": {}, "parse_fail": 0, "truncated": 0}
 
 
-@APP.get("/api/state_events")
 def api_state_events(limit: int = Query(50, ge=1, le=200)) -> Dict[str, object]:
   if not DB_PATH.exists():
     return {"rows": []}
@@ -2928,7 +2910,6 @@ def api_state_events(limit: int = Query(50, ge=1, le=200)) -> Dict[str, object]:
   return {"rows": output}
 
 
-@APP.get("/api/ts/{series}")
 def api_ts(series: str, minutes: int = Query(60, ge=1, le=24 * 60)) -> Dict[str, object]:
     points = query_series(series, minutes)
     vals = [p["v"] for p in points if isinstance(p.get("v"), (int, float))]
@@ -3446,7 +3427,6 @@ def api_vision_capture(request: Request, payload: Dict[str, object] = Body(defau
   return trigger_visual_confirm(reason=reason, command=command, upload_url=upload_url)
 
 
-@APP.post("/api/radar/calibrate")
 def api_radar_calibrate_start(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
     duration_s = int(payload.get("duration_s", 60) or 60)
     max_range_cm = int(payload.get("max_range_cm", 600) or 600)
@@ -3503,7 +3483,6 @@ def api_radar_calibrate_start(payload: Dict[str, object] = Body(default={})) -> 
     }
 
 
-@APP.get("/api/radar/calibrate/{session_id}")
 def api_radar_calibrate_status(session_id: str) -> Dict[str, object]:
     with radar_calibration_lock:
       session = radar_calibration_sessions.get(session_id)
@@ -3585,7 +3564,6 @@ def api_radar_calibrate_status(session_id: str) -> Dict[str, object]:
     return response
 
 
-@APP.post("/api/radar/calibrate/{session_id}/cancel")
 def api_radar_calibrate_cancel(session_id: str) -> Dict[str, object]:
     with radar_calibration_lock:
       session = radar_calibration_sessions.get(session_id)
@@ -3598,7 +3576,6 @@ def api_radar_calibrate_cancel(session_id: str) -> Dict[str, object]:
     return {"session_id": session_id, "status": str(session.get("status"))}
 
 
-@APP.post("/api/radar/calibration/{calibration_id}/note")
 def api_radar_calibration_note(calibration_id: int, payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
     note = str(payload.get("note") or "").strip()
     if len(note) > 400:
@@ -3612,7 +3589,6 @@ def api_radar_calibration_note(calibration_id: int, payload: Dict[str, object] =
     return {"ok": True, "id": int(calibration_id), "note": note}
 
 
-@APP.get("/api/radar/calibration/history")
 def api_radar_calibration_history(limit: int = Query(10, ge=1, le=100)) -> Dict[str, object]:
     if not DB_PATH.exists():
       return {"rows": []}
@@ -3628,14 +3604,12 @@ def api_radar_calibration_history(limit: int = Query(10, ge=1, le=100)) -> Dict[
     return {"rows": [decorate_calibration_row(dict(r)) for r in rows]}
 
 
-@APP.get("/api/radar/calibration/latest")
 def api_radar_calibration_latest() -> Dict[str, object]:
     payload = api_radar_calibration_history(limit=1)
     rows = payload.get("rows") or []
     return {"row": rows[0] if rows else None}
 
 
-@APP.get("/chart/{series}.png")
 def chart_png(
   series: str,
   minutes: int = Query(60, ge=1, le=24 * 60),
@@ -3677,7 +3651,6 @@ def chart_png(
     return Response(content=payload, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
-@APP.get("/chart_overlay.png")
 def chart_overlay_png(
   left: str = Query(...),
   right: str = Query(...),
@@ -3724,7 +3697,6 @@ def chart_overlay_png(
     return Response(content=payload, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
-@APP.get("/api/settings")
 def api_settings_get() -> Dict[str, object]:
   if not DB_PATH.exists():
     return dict(SETTINGS_DEFAULTS)
@@ -3732,7 +3704,6 @@ def api_settings_get() -> Dict[str, object]:
     return get_settings_payload(conn)
 
 
-@APP.post("/api/settings")
 def api_settings_post(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
   if not isinstance(payload, dict):
     raise HTTPException(status_code=400, detail="payload must be an object")
@@ -3742,7 +3713,6 @@ def api_settings_post(payload: Dict[str, object] = Body(default={})) -> Dict[str
   return {"ok": True, "settings": result}
 
 
-@APP.post("/api/settings/reset")
 def api_settings_reset() -> Dict[str, object]:
   with open_db() as conn:
     result = reset_settings_payload(conn)
@@ -3750,7 +3720,6 @@ def api_settings_reset() -> Dict[str, object]:
   return {"ok": True, "settings": result}
 
 
-@APP.post("/api/chime/preview")
 def api_chime_preview(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
   if not isinstance(payload, dict):
     raise HTTPException(status_code=400, detail="payload must be an object")
@@ -3804,7 +3773,6 @@ def estimate_radar_sample_seconds(conn: sqlite3.Connection) -> float:
   return float(statistics.median(deltas))
 
 
-@APP.get("/api/analytics/presence_by_hour")
 def api_analytics_presence_by_hour(hours: int = Query(24, ge=1, le=168)) -> Dict[str, object]:
   cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
   cutoff_iso_utc = cutoff.isoformat()
@@ -3840,7 +3808,6 @@ def api_analytics_presence_by_hour(hours: int = Query(24, ge=1, le=168)) -> Dict
   }
 
 
-@APP.get("/api/analytics/eco2_vs_presence")
 def api_analytics_eco2_vs_presence(hours: int = Query(24, ge=1, le=168)) -> Dict[str, object]:
   cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
   cutoff_iso_utc = cutoff.isoformat()
@@ -3937,7 +3904,6 @@ def api_analytics_eco2_vs_presence(hours: int = Query(24, ge=1, le=168)) -> Dict
   }
 
 
-@APP.get("/api/analytics/event_counts")
 def api_analytics_event_counts(days: int = Query(7, ge=1, le=90)) -> Dict[str, object]:
   cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
   cutoff_iso_utc = cutoff.isoformat()
@@ -3975,7 +3941,6 @@ def api_analytics_event_counts(days: int = Query(7, ge=1, le=90)) -> Dict[str, o
   }
 
 
-@APP.post("/api/buzzer/chime")
 def api_buzzer_chime(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
   pattern = str(payload.get("pattern") or "cal_done").strip().lower()
   if pattern != "cal_done":
@@ -4206,7 +4171,6 @@ def api_reports_download(report_id: int) -> FileResponse:
   return FileResponse(path=str(file_path), media_type="text/html", filename=file_path.name)
 
 
-@APP.get("/api/history")
 def api_history(
     kind: str = Query("radar"),
     range: str = Query("24h"),
@@ -4258,7 +4222,6 @@ def api_history(
   }
 
 
-@APP.get("/api/history/export.csv")
 def api_history_export_csv(
     kind: str = Query("radar"),
     range: str = Query("24h"),
@@ -9340,7 +9303,6 @@ async function pollEvents() {
 """
 
 
-@APP.get("/app.js")
 def app_js() -> Response:
   return Response(
     JS_BUNDLE,
@@ -9353,32 +9315,26 @@ def app_js() -> Response:
   )
 
 
-@APP.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
   return HTMLResponse(render_dashboard_page("/"))
 
 
-@APP.get("/home2", response_class=HTMLResponse)
 def home2_page() -> HTMLResponse:
   return HTMLResponse(render_dashboard_page("/home2"))
 
 
-@APP.get("/history", response_class=HTMLResponse)
 def history_page() -> HTMLResponse:
   return HTMLResponse(render_history_page())
 
 
-@APP.get("/events", response_class=HTMLResponse)
 def events_page() -> HTMLResponse:
   return HTMLResponse(render_dashboard_page("/events"))
 
 
-@APP.get("/analytics", response_class=HTMLResponse)
 def analytics_page() -> HTMLResponse:
   return HTMLResponse(render_analytics_page())
 
 
-@APP.get("/calibration", response_class=HTMLResponse)
 def calibration_page() -> HTMLResponse:
   return HTMLResponse(render_calibration_page())
 
@@ -9388,12 +9344,10 @@ def reports_page() -> HTMLResponse:
   return HTMLResponse(render_reports_page())
 
 
-@APP.get("/settings", response_class=HTMLResponse)
 def settings_page() -> HTMLResponse:
   return HTMLResponse(render_settings_page())
 
 
-@APP.get("/field", response_class=HTMLResponse)
 def field_page() -> HTMLResponse:
   return HTMLResponse(render_field_page())
 
@@ -9613,7 +9567,6 @@ async def dashboard_shutdown() -> None:
   await _telnet_shutdown()
 
 
-@APP.get("/healthz")
 def healthz() -> Dict[str, str]:
 
     return {"status": "ok"}
@@ -9871,25 +9824,21 @@ async def telnet_handler(reader, writer):
         logger.info("Telnet server stopped")
 
 
-@APP.get("/health")
 def health() -> Dict[str, object]:
   return {"status": "ok", "camera": camera_health_payload()}
 
 
-@APP.get("/readyz")
 def readyz() -> JSONResponse:
     state = build_ready_state()
     status = 200 if bool(state.get("ready")) else 503
     return JSONResponse(content=state, status_code=status)
 
 
-@APP.get("/api/ready")
 def api_ready() -> JSONResponse:
   state = build_ready_state()
   return JSONResponse(content=state, status_code=200)
 
 
-@APP.get("/metrics", response_class=PlainTextResponse)
 def metrics() -> PlainTextResponse:
     state = build_ready_state()
     table_ages = state.get("table_age_seconds", {})
