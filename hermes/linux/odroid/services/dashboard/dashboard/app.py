@@ -12,6 +12,7 @@ from .routes.flip import router as flip_router
 from .routes.history import router as history_router
 from .routes.home import router as home_router
 from .routes.home2 import router as home2_router
+from .routes.reports import router as reports_router
 
 # ROUTE MAP TABLE (source: legacy_app.py)
 # | Group                  | Endpoints                                                                                                  | Route Module              | Status   |
@@ -24,9 +25,18 @@ from .routes.home2 import router as home2_router
 # | History                | /history, /api/history, /api/history/export.csv                                                           | dashboard/routes/history.py | mapped |
 # | Events                 | /events, /api/events/*, /api/state_events                                                                 | dashboard/routes/events.py | mapped  |
 # | Analytics              | /analytics, /api/analytics/*                                                                              | dashboard/routes/analytics.py | mapped |
+# | Reports                | /reports, /api/reports, /api/reports/generate, /api/reports/{report_id}/download                         | dashboard/routes/reports.py | migrated |
 # | Calibration            | /calibration, /api/radar/calibrate*, /api/radar/calibration/*, /api/buzzer/chime                         | dashboard/routes/calibration.py | mapped |
 #
-# Migration order: Infra -> Settings -> Home -> Flip -> Home2 -> History -> Events -> Analytics -> Calibration
+# Reports Inventory (from legacy_app.py)
+# | Method | Path                               | Handler               | Response Class |
+# |--------|------------------------------------|-----------------------|----------------|
+# | GET    | /reports                           | reports_page          | HTMLResponse   |
+# | GET    | /api/reports                       | api_reports_list      | default/json   |
+# | POST   | /api/reports/generate              | api_reports_generate  | default/json   |
+# | GET    | /api/reports/{report_id}/download  | api_reports_download  | FileResponse   |
+#
+# Migration order: Infra -> Settings -> Home -> Flip -> Home2 -> History -> Events -> Analytics -> Reports -> Calibration
 
 
 _ROUTERS = (
@@ -38,6 +48,7 @@ _ROUTERS = (
   history_router,
   events_router,
   analytics_router,
+  reports_router,
   calibration_router,
 )
 

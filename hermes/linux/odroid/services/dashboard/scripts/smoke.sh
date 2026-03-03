@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 pkill -f 'python3 app.py' >/dev/null 2>&1 || true
 python3 app.py >/tmp/hermes_dash_smoke.log 2>&1 &
 PID=$!
-trap 'kill "$PID" >/dev/null 2>&1 || true; wait "$PID" 2>/dev/null || true' EXIT
+trap 'kill "$PID" >/dev/null 2>&1 || true; sleep 0.5; kill -9 "$PID" >/dev/null 2>&1 || true; wait "$PID" 2>/dev/null || true; pkill -f "python3 app.py" >/dev/null 2>&1 || true' EXIT
 
 for _ in $(seq 1 20); do
 	if curl --max-time 1 -fsS http://127.0.0.1:8000/healthz >/tmp/smoke_healthz.json 2>/dev/null; then
@@ -25,9 +25,11 @@ curl --max-time 5 -fsS http://127.0.0.1:8000/api/settings >/tmp/smoke_settings.j
 curl --max-time 5 -fsS http://127.0.0.1:8000/ >/tmp/smoke_home.html
 curl --max-time 5 -fsS http://127.0.0.1:8000/flip >/tmp/smoke_flip.html
 curl --max-time 5 -fsS http://127.0.0.1:8000/home2 >/tmp/smoke_home2.html
-curl --max-time 5 -fsS "http://127.0.0.1:8000/api/history?range=24h" >/tmp/smoke_history.json
+curl --max-time 5 -fsS "http://127.0.0.1:8000/api/history?range=24h&limit=50" >/tmp/smoke_history.json
 curl --max-time 5 -fsS "http://127.0.0.1:8000/api/events?since_id=0&limit=10" >/tmp/smoke_events.json
 curl --max-time 5 -fsS "http://127.0.0.1:8000/api/analytics/presence_by_hour?hours=24" >/tmp/smoke_analytics_presence.json
 curl --max-time 5 -fsS http://127.0.0.1:8000/calibration >/tmp/smoke_calibration.html
+curl --max-time 5 -fsS http://127.0.0.1:8000/reports >/tmp/smoke_reports.html
+curl --max-time 5 -fsS http://127.0.0.1:8000/api/reports >/tmp/smoke_reports_list.json
 
 echo SMOKE_OK

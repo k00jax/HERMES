@@ -3949,7 +3949,6 @@ def api_buzzer_chime(payload: Dict[str, object] = Body(default={})) -> Dict[str,
   return {"ok": bool(result.get("ok")), "pattern": pattern, "result": result}
 
 
-@APP.post("/api/reports/generate")
 def api_reports_generate(payload: Dict[str, object] = Body(default={})) -> Dict[str, object]:
   preset = str(payload.get("preset") or "24h")
   start_local = payload.get("start_local")
@@ -4130,7 +4129,6 @@ def api_reports_generate(payload: Dict[str, object] = Body(default={})) -> Dict[
   }
 
 
-@APP.get("/api/reports")
 def api_reports_list(limit: int = Query(10, ge=1, le=50)) -> Dict[str, object]:
   with open_db() as conn:
     ensure_reports_table(conn)
@@ -4152,7 +4150,6 @@ def api_reports_list(limit: int = Query(10, ge=1, le=50)) -> Dict[str, object]:
   return {"rows": out}
 
 
-@APP.get("/api/reports/{report_id}/download")
 def api_reports_download(report_id: int) -> FileResponse:
   with open_db() as conn:
     ensure_reports_table(conn)
@@ -9339,7 +9336,6 @@ def calibration_page() -> HTMLResponse:
   return HTMLResponse(render_calibration_page())
 
 
-@APP.get("/reports", response_class=HTMLResponse)
 def reports_page() -> HTMLResponse:
   return HTMLResponse(render_reports_page())
 
