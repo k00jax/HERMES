@@ -30,11 +30,15 @@ All events that fall in the same bucket_index go into the same candidate.
 
 Candidate ID
 ------------
-    "{bucket_index}"
+    "w{window_sec}_{bucket_index}"
 
-Pure integer string derived from the bucket.  Stable and reproducible.
-Prefixed by the context_store with a pipeline-run identifier if needed,
-but the builder itself keeps it simple.
+e.g. "w300_5913518" for a 5-minute bucket.
+
+Deterministic — re-running the pipeline over the same input with the same
+window_sec always produces the same candidate_id.  The window_sec prefix
+prevents collisions if the configured window size changes between daemon
+restarts (e.g. w300_5913518 and w600_5913518 are different time ranges and
+would both be valid, distinct candidates).
 
 Tags emitted by this module
 ---------------------------
@@ -50,9 +54,10 @@ Tags emitted by this module
 from __future__ import annotations
 
 import datetime
-import hashlib
 import logging
 from typing import Dict, List, Optional, Tuple
+
+from .types import SCHEMA_VERSION
 
 from .types import (
     HomeEvent,
@@ -239,7 +244,7 @@ def build_candidates(
             current_prev_target = bool(radar_rows[-1].value.get("target", 0))
 
         candidate = MemoryCandidate(
-            candidate_id=str(bucket_index),
+            candidate_id=f"w{window_sec}_{bucket_index}",
             ts_start=ts_start,
             ts_end=ts_end,
             events=bucket_events,
@@ -249,10 +254,11 @@ def build_candidates(
             summary=None,
             escalate=False,
             provenance={
+                "schema_version":   SCHEMA_VERSION,
                 "pipeline_version": PIPELINE_VERSION,
-                "created_at": created_at,
-                "window_sec": window_sec,
-                "event_count": len(bucket_events),
+                "created_at":       created_at,
+                "window_sec":       window_sec,
+                "event_count":      len(bucket_events),
             },
         )
         candidates.append(candidate)

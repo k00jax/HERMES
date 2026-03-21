@@ -1,22 +1,38 @@
 """
 Core data types for the HERMES home-AI pipeline.
 
-These three types are the backbone of the branch.  They must remain stable
-while everything else evolves around them.
+FROZEN BRANCH CONTRACT — feature/home-ai-core
+==============================================
+HomeEvent, MemoryCandidate, and EscalationPacket are the shared backbone of
+this branch.  Their field names and semantics are frozen.  Do not add, remove,
+or rename fields without a deliberate versioning decision.
 
-Design rules encoded here:
-- raw_ref is NEVER optional on sensor-sourced events (only on synthesised ones).
+If a future slice needs additional metadata:
+  - Prefer adding it inside an existing dict field (value, provenance, payload)
+    rather than adding a top-level field.
+  - If a top-level field truly must change, increment SCHEMA_VERSION and update
+    context_store deserialisation to handle both old and new shapes.
+  - Never silently change the meaning of an existing field.
+
+SCHEMA_VERSION tracks the shape of these three types.  It is stored in every
+MemoryCandidate's provenance dict and every EscalationPacket so that stored
+artifacts can be re-read correctly if the schema ever changes.
+
+Design rules:
+- raw_ref is NEVER None on sensor-sourced events (only on external/synthetic).
 - value holds the raw payload dict — no interpretation, no field removal.
-- MemoryCandidate carries a salience score, not a semantic conclusion.
-- EscalationPacket records which fields were allowed through the privacy filter
-  so the audit trail is part of the artifact, not a separate log.
-- All timestamps are ISO 8601 UTC strings throughout.  No float epochs in
-  the type layer (they live only inside time-arithmetic helpers).
+- MemoryCandidate carries a score, not a semantic conclusion.
+- EscalationPacket records both allowed_fields and stripped_fields; the latter
+  is local audit only and must never be transmitted upstream.
+- All timestamps are ISO 8601 UTC strings.  No float epochs at this layer.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+# Increment when any field name or semantic changes in the three core types.
+SCHEMA_VERSION = "1"
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +98,14 @@ class MemoryCandidate:
 
     Fields
     ------
-    candidate_id  Deterministic string: "{bucket_index}_{first_source_hash}".
+    candidate_id  Deterministic string: "w{window_sec}_{bucket_index}".
+                  e.g. "w300_5913518" for a 5-minute bucket.
                   NOT a random UUID — deterministic IDs mean re-running the
-                  pipeline over the same window produces the same candidate_id,
-                  allowing the context_store to deduplicate without a separate
-                  dedup pass.
+                  pipeline over the same window and same window_sec produces
+                  the same candidate_id, allowing the context_store to
+                  deduplicate without a separate dedup pass.
+                  The window_sec prefix prevents collisions if the configured
+                  window size changes between daemon restarts.
     ts_start      ISO 8601 UTC — inclusive window start (aligned bucket edge).
     ts_end        ISO 8601 UTC — exclusive window end (aligned bucket edge).
     events        All HomeEvents that fell inside this time bucket.  Order is
@@ -106,7 +125,8 @@ class MemoryCandidate:
                   has approved.  Set by privacy_router, not scorer.
     provenance    Arbitrary metadata dict for downstream trust assessment.
                   Must include at minimum:
-                    pipeline_version, created_at (ISO UTC), window_sec.
+                    schema_version, pipeline_version, created_at (ISO UTC),
+                    window_sec.
     """
     candidate_id: str
     ts_start:     str
