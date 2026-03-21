@@ -34,6 +34,15 @@ class AppConfig:
     web_user_agent: str
     web_require_explicit: bool
     event_summary_minutes: int
+    # --- Home-AI pipeline ---
+    hermes_db_path: Path
+    pipeline_interval_s: int
+    pipeline_window_min: int
+    salience_threshold: float
+    escalation_threshold: float
+    escalation_endpoint: str
+    escalation_destination: str
+    privacy_allowlist: str
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
@@ -135,6 +144,36 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         os.getenv("HERMES_EVENT_SUMMARY_MINUTES", None), int(file_cfg.get("event_summary_minutes", 10))
     )
 
+    # --- Home-AI pipeline config ---
+    hermes_db_path = Path(
+        os.getenv(
+            "HERMES_DB_PATH",
+            file_cfg.get("hermes_db_path", os.path.expanduser("~/hermes-data/db/hermes.sqlite3")),
+        )
+    )
+    pipeline_interval_s = _parse_int(
+        os.getenv("HERMES_PIPELINE_INTERVAL_S", None), int(file_cfg.get("pipeline_interval_s", 60))
+    )
+    pipeline_window_min = _parse_int(
+        os.getenv("HERMES_PIPELINE_WINDOW_MIN", None), int(file_cfg.get("pipeline_window_min", 5))
+    )
+    salience_threshold = _parse_float(
+        os.getenv("HERMES_SALIENCE_THRESHOLD", None), float(file_cfg.get("salience_threshold", 0.0))
+    )
+    escalation_threshold = _parse_float(
+        os.getenv("HERMES_ESCALATION_THRESHOLD", None), float(file_cfg.get("escalation_threshold", 0.7))
+    )
+    escalation_endpoint = os.getenv(
+        "HERMES_ESCALATION_ENDPOINT", file_cfg.get("escalation_endpoint", "")
+    )
+    escalation_destination = os.getenv(
+        "HERMES_ESCALATION_DESTINATION", file_cfg.get("escalation_destination", "default")
+    )
+    privacy_allowlist = os.getenv(
+        "HERMES_PRIVACY_ALLOWLIST",
+        file_cfg.get("privacy_allowlist", "ts_start,ts_end,source_mix,tags,salience,summary"),
+    )
+
     return AppConfig(
         base_dir=base_dir,
         knowledge_dir=knowledge_dir,
@@ -157,4 +196,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         web_user_agent=web_user_agent,
         web_require_explicit=web_require_explicit,
         event_summary_minutes=event_summary_minutes,
+        hermes_db_path=hermes_db_path,
+        pipeline_interval_s=pipeline_interval_s,
+        pipeline_window_min=pipeline_window_min,
+        salience_threshold=salience_threshold,
+        escalation_threshold=escalation_threshold,
+        escalation_endpoint=escalation_endpoint,
+        escalation_destination=escalation_destination,
+        privacy_allowlist=privacy_allowlist,
     )
