@@ -13,6 +13,7 @@ from .routes.history import router as history_router
 from .routes.home import router as home_router
 from .routes.home2 import router as home2_router
 from .routes.reports import router as reports_router
+from .routes.context import router as context_router
 
 # ROUTE MAP TABLE (source: legacy_app.py)
 # | Group                  | Endpoints                                                                                                  | Route Module              | Status   |
@@ -50,6 +51,7 @@ _ROUTERS = (
   analytics_router,
   reports_router,
   calibration_router,
+  context_router,
 )
 
 
