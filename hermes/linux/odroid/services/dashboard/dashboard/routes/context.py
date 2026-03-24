@@ -7,6 +7,7 @@ the daemon (separate process) is purely file-based:
 
     ~/hermes-data/pipeline_status.json   — written by daemon after each cycle
     ~/hermes-data/context/               — JSONL candidate store written by daemon
+    ~/hermes-data/escalation/            — JSONL escalation queue written by cloud_client
     ~/hermes-data/omi_queue.jsonl        — written here, drained by daemon
 
 No imports from hermes-brain.  No shared in-process state.  This keeps the
@@ -16,6 +17,7 @@ Endpoints
 ---------
 GET  /context/status       Pipeline health: last run, event counts, errors.
 GET  /context/candidates   Recent memory candidates (query params: limit, min_salience, tag).
+GET  /context/packets      Recent escalation packets (query params: limit, min_salience, destination).
 POST /context/ingest       Accept an Omi memory blob and queue it for the daemon.
 """
 from __future__ import annotations
@@ -50,6 +52,10 @@ def _context_dir() -> Path:
 
 def _omi_queue_path() -> Path:
     return _data_dir() / "omi_queue.jsonl"
+
+
+def _escalation_dir() -> Path:
+    return _data_dir() / "escalation"
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +115,55 @@ def _read_candidates(
                 "escalate":     obj.get("escalate", False),
                 "event_count":  len(obj.get("events", [])),
                 "provenance":   obj.get("provenance", {}),
+            }
+            results.append(condensed)
+            if len(results) >= limit:
+                return results
+    return results
+
+
+def _read_packets(
+    limit: int,
+    min_salience: float,
+    destination_filter: Optional[str],
+) -> List[Dict[str, Any]]:
+    esc_dir = _escalation_dir()
+    if not esc_dir.exists():
+        return []
+
+    results: List[Dict[str, Any]] = []
+    paths = sorted(esc_dir.glob("queue_*.jsonl"), reverse=True)
+
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            sal = obj.get("salience")
+            if sal is not None and float(sal) < min_salience:
+                continue
+            if destination_filter and obj.get("destination") != destination_filter:
+                continue
+            # stripped_fields is a local audit field — never expose via API.
+            condensed = {
+                "packet_id":      obj.get("packet_id"),
+                "created_at":     obj.get("created_at"),
+                "candidate_id":   obj.get("candidate_id"),
+                "summary":        obj.get("summary"),
+                "tags":           obj.get("tags", []),
+                "salience":       obj.get("salience"),
+                "source_mix":     obj.get("source_mix", []),
+                "allowed_fields": obj.get("allowed_fields", []),
+                "destination":    obj.get("destination"),
+                "queued_at":      obj.get("_queued_at"),
             }
             results.append(condensed)
             if len(results) >= limit:
@@ -198,6 +253,33 @@ async def context_candidates(
     return JSONResponse({
         "count": len(candidates),
         "candidates": candidates,
+    })
+
+
+@router.get("/context/packets")
+async def context_packets(
+    limit:       int   = Query(default=20,  ge=1, le=200),
+    min_salience: float = Query(default=0.0, ge=0.0, le=1.0),
+    destination: Optional[str] = Query(default=None),
+) -> JSONResponse:
+    """
+    Return recent escalation packets from the local delivery queue, newest first.
+
+    Packets are written to ~/hermes-data/escalation/queue_YYYY-MM-DD.jsonl by
+    the cloud_client when delivery fails or (in offline mode) no endpoint is
+    configured.  stripped_fields is excluded from the response — it is a local
+    audit field only.
+
+    Query params
+    ------------
+    limit        Max packets to return (1–200, default 20).
+    min_salience Only return packets with salience >= this value.
+    destination  If set, only return packets for this destination name.
+    """
+    packets = _read_packets(limit=limit, min_salience=min_salience, destination_filter=destination)
+    return JSONResponse({
+        "count": len(packets),
+        "packets": packets,
     })
 
 
