@@ -45,14 +45,16 @@ from pathlib import Path
 from typing import List, Optional
 
 # Pipeline modules
-from .pipeline.normalizer      import normalize
+from .pipeline.normalizer        import normalize
 from .pipeline.candidate_builder import build_candidates
-from .pipeline.salience_scorer import score_all
-from .pipeline.privacy_router  import route
-from .pipeline.context_store   import ContextStore
-from .pipeline.types           import HomeEvent, MemoryCandidate
-from .escalation.cloud_client  import EscalationClient
-from .config                   import load_config
+from .pipeline.salience_scorer   import score_all
+from .pipeline.compressor        import compress_all
+from .pipeline.privacy_router    import route
+from .pipeline.context_store     import ContextStore
+from .pipeline.types             import HomeEvent, MemoryCandidate
+from .escalation.cloud_client    import EscalationClient
+from .llm.local_llm              import LocalLLM
+from .config                     import load_config
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +151,7 @@ def run_cycle(
     omi_queue_path: Path,
     prev_radar_target: Optional[bool],
     dry_run: bool,
+    llm: Optional[LocalLLM] = None,
 ) -> dict:
     """
     Execute one pipeline cycle.  Returns a status dict.
@@ -192,7 +195,11 @@ def run_cycle(
         # 4. Score.
         score_all(candidates, use_llm=False)
 
-        # 5. Privacy route — produces escalation packets.
+        # 5. Compress (optional — only when a local model is available).
+        if llm is not None:
+            compress_all(candidates, llm)
+
+        # 6. Privacy route — produces escalation packets.
         packets = route(
             candidates,
             escalation_threshold=escalation_threshold,
@@ -202,13 +209,13 @@ def run_cycle(
         status["packets_queued"] = len(packets)
 
         if not dry_run:
-            # 6. Store.
+            # 7. Store.
             written = store.append_all(
                 [c for c in candidates if (c.salience or 0.0) >= salience_threshold]
             )
             status["candidates_stored"] = written
 
-            # 7. Deliver.
+            # 8. Deliver.
             delivered = client.send_all(packets)
             status["packets_delivered"] = delivered
         else:
@@ -273,6 +280,19 @@ def main(argv=None) -> int:
         if flushed:
             log.info("daemon: flushed %d queued packets on startup", flushed)
 
+    # Load LLM if compression is enabled.
+    llm: Optional[LocalLLM] = None
+    if cfg.compression_enabled:
+        llm = LocalLLM(model_path=cfg.model_path, llama_bin=cfg.llama_bin)
+        if llm.model_path.exists():
+            log.info("daemon: compression enabled — model at %s", cfg.model_path)
+        else:
+            log.warning(
+                "daemon: HERMES_COMPRESSION_ENABLED=true but model not found at %s "
+                "— compression will be skipped each cycle",
+                cfg.model_path,
+            )
+
     prev_radar_target: Optional[bool] = None
 
     while not _SHUTDOWN:
@@ -288,6 +308,7 @@ def main(argv=None) -> int:
             omi_queue_path=omi_queue_path,
             prev_radar_target=prev_radar_target,
             dry_run=args.dry_run,
+            llm=llm,
         )
         _write_status(status_path, status)
 

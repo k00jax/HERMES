@@ -43,6 +43,7 @@ class AppConfig:
     escalation_endpoint: str
     escalation_destination: str
     privacy_allowlist: str
+    compression_enabled: bool
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
@@ -173,6 +174,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         "HERMES_PRIVACY_ALLOWLIST",
         file_cfg.get("privacy_allowlist", "ts_start,ts_end,source_mix,tags,salience,summary"),
     )
+    compression_enabled = _parse_bool(
+        os.getenv("HERMES_COMPRESSION_ENABLED", None),
+        bool(file_cfg.get("compression_enabled", False)),
+    )
 
     return AppConfig(
         base_dir=base_dir,
@@ -204,4 +209,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         escalation_endpoint=escalation_endpoint,
         escalation_destination=escalation_destination,
         privacy_allowlist=privacy_allowlist,
+        compression_enabled=compression_enabled,
     )
