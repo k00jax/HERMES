@@ -2,8 +2,6 @@
   <img src="docs/assets/hermes-logo-hermes.jpg" alt="HERMES logo" width="500" />
 </p>
 
-<h1 align="center">HERMES</h1>
-
 **Heuristic Environmental Real-time Monitoring & Engagement System**
 
 HERMES is first and foremost an attempt at building a real-world "Pip-Boy"-style wearable: a device that gives you live environmental information about your surroundings.
