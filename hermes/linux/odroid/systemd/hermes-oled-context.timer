@@ -1,10 +1,10 @@
 [Unit]
-Description=Push OLED context every 10s
+Description=Push OLED context about every 30s
 
 [Timer]
-OnBootSec=10
-OnUnitActiveSec=10
-AccuracySec=1
+OnBootSec=20
+OnUnitActiveSec=30
+AccuracySec=5
 Unit=hermes-oled-context.service
 
 [Install]

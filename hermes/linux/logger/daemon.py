@@ -47,6 +47,8 @@ INGEST_DIAG_INTERVAL_SECS = 10.0
 RADAR_EXPECTED_PERIOD_S = float(os.environ.get("HERMES_RADAR_EXPECTED_PERIOD_S", "0.1"))
 RADAR_STALE_S = float(os.environ.get("HERMES_RADAR_STALE_S", "6.0"))
 RADAR_DEAD_S = float(os.environ.get("HERMES_RADAR_DEAD_S", "20.0"))
+# Minimum wall time between OLED,CONTEXT / OLED,TIME pairs on the nRF UART (SEND queue coalescing).
+OLED_SERIAL_MIN_INTERVAL_S = float(os.environ.get("HERMES_OLED_SERIAL_MIN_INTERVAL_S", "2.0"))
 
 FRAME_MARKERS = (
     "RADAR,",
@@ -1428,6 +1430,42 @@ def serial_worker(shutdown: threading.Event, out_q: queue.Queue):
         "over_max_prefix_counts": defaultdict(int),
         "max_len_by_prefix": {},
     }
+    last_oled_serial_write = [0.0]
+
+    def _flush_out_queue_to_serial(ser_port) -> None:
+        """Drain SEND queue: coalesce OLED,CONTEXT / OLED,TIME to one pair; rate-limit OLED UART."""
+        items = []
+        while True:
+            try:
+                items.append(out_q.get_nowait())
+            except queue.Empty:
+                break
+        if not items:
+            return
+        oled_ctx = None
+        oled_time = None
+        others = []
+        for it in items:
+            if it.startswith("OLED,CONTEXT"):
+                oled_ctx = it
+            elif it.startswith("OLED,TIME"):
+                oled_time = it
+            else:
+                others.append(it)
+        for it in others:
+            ser_port.write((it + "\n").encode("utf-8"))
+        if oled_ctx is None and oled_time is None:
+            return
+        now = time.time()
+        wait = OLED_SERIAL_MIN_INTERVAL_S - (now - last_oled_serial_write[0])
+        if wait > 0:
+            time.sleep(wait)
+        if oled_ctx is not None:
+            ser_port.write((oled_ctx + "\n").encode("utf-8"))
+        if oled_time is not None:
+            ser_port.write((oled_time + "\n").encode("utf-8"))
+        last_oled_serial_write[0] = time.time()
+
     while not shutdown.is_set():
         if ser is None:
             try:
@@ -1535,12 +1573,7 @@ def serial_worker(shutdown: threading.Event, out_q: queue.Queue):
                     "max_len_by_prefix": {},
                 }
 
-            while True:
-                try:
-                    cmd = out_q.get_nowait()
-                except queue.Empty:
-                    break
-                ser.write((cmd + "\n").encode("utf-8"))
+            _flush_out_queue_to_serial(ser)
 
             now_ts = time.time()
             if (now_ts - last_cleanup) >= RAW_CLEANUP_INTERVAL_SECS:

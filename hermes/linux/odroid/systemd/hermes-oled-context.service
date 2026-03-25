@@ -1,5 +1,5 @@
 [Unit]
-Description=Push OLED context to nRF
+Description=Push OLED context to nRF (oneshot, non-overlapping)
 After=network.target
 
 [Service]
@@ -7,4 +7,8 @@ Type=oneshot
 User=odroid
 Environment=HOME=/home/odroid
 WorkingDirectory=/home/odroid/hermes-src/hermes
-ExecStart=/home/odroid/hermes-src/hermes/tools/push_oled_context.sh
+# Single flight: skip this tick if the previous run is still holding the lock.
+ExecStart=/usr/bin/flock -n /tmp/hermes-oled-context.lock /home/odroid/hermes-src/hermes/tools/push_oled_context.sh
+TimeoutStartSec=90
+StandardOutput=journal
+StandardError=journal

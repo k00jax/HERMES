@@ -43,6 +43,21 @@ sudo journalctl -u hermes-dashboard.service -n 120 --no-pager
 Pushes host-computed deltas to the nRF OLED overlay.
 Also sends host epoch time for OLED time/date fallback.
 
+The timer fires about **every 30s** (not 10s): overlapping runs are prevented with
+`flock`, SQLite is opened **read-only** (`file:…?mode=ro`), queries use
+`ts_utc >= datetime(…)` windows (index-friendly), and the logger coalesces
+`OLED,CONTEXT` / `OLED,TIME` on the UART with a minimum spacing
+(`HERMES_OLED_SERIAL_MIN_INTERVAL_S`, default 2s).
+
+Optional environment (script / systemd `Environment=`):
+
+- `HERMES_OLED_CONTEXT_MIN_INTERVAL_SEC` — min seconds between successful pushes (default 2)
+- `HERMES_OLED_SQL_TIMEOUT_SEC` — cap `sqlite3` runtime (default 45)
+- `HERMES_SQLITE_RO_URI` — override read-only DB URI
+- `HERMES_OLED_SERIAL_MIN_INTERVAL_S` — logger daemon: min seconds between OLED lines on serial
+
+After changing `daemon.py`, restart the logger: `sudo systemctl restart hermes-logger.service`.
+
 Script:
 
 ```bash
