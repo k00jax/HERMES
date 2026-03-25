@@ -9,6 +9,10 @@ Multi-device sensing and logging stack for the HERMES project.
 - `hermes/` firmware, Odroid services, and tools
 - `hermes-brain/` higher-level ingestion and retrieval
 
+## Git workflow
+
+**`main` is the only long-lived branch.** Use short-lived topic branches for work, open pull requests into `main`, then delete the topic branch after merge. Do not rely on permanent `feature/*` branches on the remote.
+
 ## Quick Pointers
 
 - nRF firmware: `hermes/firmware/nrf`
