@@ -1,8 +1,8 @@
 # HERMES Home AI Core — Development Plan
 
-*Branch: feature/home-ai-core*
+*Branch: main (post-merge)*
 *Date: 2026-03-20*
-*Status: Active*
+*Status: Phase 1 slice implemented; roadmap active*
 
 ---
 
@@ -255,27 +255,27 @@ HERMES_CONTEXT_STORE_PATH = "data/context/candidates.jsonl"
 
 ## Definition of Done — First Slice
 
-- [ ] Pipeline types defined and importable
-- [ ] Normalizer reads from SQLite, returns `HomeEvent` list
-- [ ] Candidate builder groups into 5 min windows, detects presence transitions + CO2 spikes
-- [ ] Salience scorer assigns score using rules (no LLM required)
-- [ ] Context store persists candidates to JSONL
-- [ ] Privacy router applies field allowlist before any egress
-- [ ] Cloud client stubs (POST to endpoint, log-only if no endpoint configured)
-- [ ] Omi adapter accepts POST on configurable port
-- [ ] Daemon runs pipeline loop on configurable interval
-- [ ] `/context/status` and `/context/candidates` endpoints live in dashboard
-- [ ] All new code has unit tests covering normalizer, builder, scorer, router
-- [ ] Daemon survives being started with no sensor data (empty tables)
-- [ ] Daemon survives being started with no model loaded
-- [ ] All new config values documented in `config.py`
+- [x] Pipeline types defined and importable
+- [x] Normalizer reads from SQLite, returns `HomeEvent` list
+- [x] Candidate builder groups into 5 min windows, detects presence transitions + CO2 spikes
+- [x] Salience scorer assigns score using rules (no LLM required)
+- [x] Context store persists candidates to JSONL
+- [x] Privacy router applies field allowlist before any egress
+- [x] Cloud client stubs (POST to endpoint, log-only if no endpoint configured)
+- [x] Omi adapter accepts POST via dashboard ingestion route and queue adapter
+- [x] Daemon runs pipeline loop on configurable interval
+- [x] `/context/status` and `/context/candidates` endpoints live in dashboard
+- [x] All new code has unit tests covering normalizer, builder, scorer, router
+- [x] Daemon survives being started with no sensor data (empty tables)
+- [x] Daemon survives being started with no model loaded
+- [x] Core pipeline config values are defined in `config.py` and surfaced via env/YAML
 
 ---
 
-## Future Phases (Not This Branch)
+## Future Phases
 
-- **Phase 2**: LLM compression — compress candidate summaries using local model before escalation.
-- **Phase 3**: Retrieval integration — query local context store for similar past candidates before escalating.
-- **Phase 4**: Multi-zone — add zone tagging when multi-room sensors available.
-- **Phase 5**: Skill registry — pluggable narrow-task modules that consume context packets.
-- **Phase 6**: Family AI integration — HERMES becomes one node in a larger family intelligence graph.
+- **Phase 2 (harden)**: Improve daemon/operator controls and reliability under long-running load.
+- **Phase 3 (enrich)**: Retrieval integration over stored candidates before escalation.
+- **Phase 4 (expand)**: Multi-zone home context and richer home-state abstractions.
+- **Phase 5 (modularize)**: Skill-style, pluggable modules that consume context packets.
+- **Phase 6 (federate)**: Family AI integration where HERMES acts as a local cognition node.

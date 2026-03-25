@@ -1,2 +1,4 @@
 # Local tool / IDE settings (may contain machine-specific paths)
 .claude/settings.local.json
+.venv/
+.mplconfig/
