@@ -195,11 +195,10 @@ def run_cycle(
         # 4. Score.
         score_all(candidates, use_llm=False)
 
-        # 5. Compress (optional — only when a local model is available).
         if llm is not None:
             compress_all(candidates, llm)
 
-        # 6. Privacy route — produces escalation packets.
+        # Privacy route — produces escalation packets.
         packets = route(
             candidates,
             escalation_threshold=escalation_threshold,
@@ -280,7 +279,6 @@ def main(argv=None) -> int:
         if flushed:
             log.info("daemon: flushed %d queued packets on startup", flushed)
 
-    # Load LLM if compression is enabled.
     llm: Optional[LocalLLM] = None
     if cfg.compression_enabled:
         llm = LocalLLM(model_path=cfg.model_path, llama_bin=cfg.llama_bin)

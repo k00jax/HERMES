@@ -125,15 +125,18 @@ def compress_all(candidates: List[MemoryCandidate], llm: LocalLLM) -> int:
 
     Returns the count of candidates that received a new summary.
     """
+    if not candidates:
+        return 0
+
+    if not llm.model_path.exists():
+        log.debug("compressor: model not found — skipping compression for %d candidates", len(candidates))
+        return 0
+
     count = 0
     for c in candidates:
         before = c.summary
         compress(c, llm)
         if c.summary is not None and before is None:
             count += 1
-    if candidates:
-        log.info(
-            "compressor: compressed %d/%d candidates",
-            count, len(candidates),
-        )
+    log.info("compressor: compressed %d/%d candidates", count, len(candidates))
     return count

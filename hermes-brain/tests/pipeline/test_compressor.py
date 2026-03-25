@@ -12,15 +12,13 @@ required.  Tests cover:
 """
 from __future__ import annotations
 
-import datetime
 from pathlib import Path
-from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from app.pipeline.compressor import compress, compress_all, _format_event, _build_context
-from app.pipeline.types import HomeEvent, MemoryCandidate, SCHEMA_VERSION
+from app.pipeline.types import HomeEvent, MemoryCandidate
 from app.llm.local_llm import LocalLLM
 
 # Re-use shared factories from conftest
