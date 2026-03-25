@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/hermes-logo-hermes.jpg" alt="HERMES logo" width="220" />
+  <img src="docs/assets/hermes-logo-hermes.jpg" alt="HERMES logo" width="500" />
 </p>
 
 <h1 align="center">HERMES</h1>
