@@ -43,6 +43,8 @@ These are usually acceptable for open-source infra docs, but reveal deployment t
 - [ ] Rotate any telnet token currently in use on running devices.
 - [ ] Ensure local runtime `.env` files remain untracked.
 - [ ] Ask collaborators to re-clone or hard-reset because history was rewritten.
+- [x] Root `.gitignore` ignores `.claude/settings.local.json` (machine-specific paths); file removed from the index — **if it was ever pushed, purge it from git history** (e.g. `git filter-repo`) or accept path/username exposure in old commits.
+- [x] CI: `.github/workflows/gitleaks.yml` runs [Gitleaks](https://github.com/gitleaks/gitleaks) on push/PR.
 
 ## Safe release commands
 
@@ -60,5 +62,6 @@ git status --short
 ## Recommended longer-term hardening
 
 - Move live Wi-Fi credentials to an untracked local file only.
-- Add CI secret scanning (e.g., Gitleaks) on pull requests.
+- CI secret scanning: see `.github/workflows/gitleaks.yml` (Gitleaks on push/PR).
 - Keep example values as placeholders in docs (`YOUR_*`, `<set-secret>`).
+- Enable **GitHub Secret scanning** for the repo (Settings → Code security) when public.
