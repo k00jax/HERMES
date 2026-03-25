@@ -23,6 +23,13 @@ Today, the project runs as an edge platform while the wearable form factor is be
 - Expand sensing capabilities over time.
 - Treat "home mode" as an engineering bridge, not the end product.
 
+## Project Status
+
+- Stage: Prototype and proof-of-concept (home-mode validation on edge hardware)
+- Primary target: Wearable environmental monitor ("Pip-Boy"-style device)
+- Stable baseline: sensor ingestion -> logger -> dashboard -> optional brain pipeline
+- Active work: hardening, modularization, and sensor expansion toward wearable constraints
+
 ## Upcoming Sensor Expansion
 
 Planned near-term additions include:
