@@ -1,6 +1,8 @@
-<img src="docs/assets/hermes-logo-h.jpg" alt="HERMES H Logo" width="140" />
+<p align="center">
+  <img src="docs/assets/hermes-logo-hermes.jpg" alt="HERMES logo" width="220" />
+</p>
 
-# HERMES
+<h1 align="center">HERMES</h1>
 
 **Heuristic Environmental Real-time Monitoring & Engagement System**
 
