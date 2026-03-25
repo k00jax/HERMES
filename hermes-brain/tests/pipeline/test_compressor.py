@@ -17,7 +17,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.pipeline.compressor import compress, compress_all, _format_event, _build_context
+from app.pipeline.compressor import (
+    MAX_EVENTS_IN_PROMPT,
+    compress,
+    compress_all,
+    _format_event,
+    _build_context,
+)
 from app.pipeline.types import HomeEvent, MemoryCandidate
 from app.llm.local_llm import LocalLLM
 
@@ -195,7 +201,6 @@ def test_build_context_includes_tags_and_window() -> None:
 
 def test_build_context_caps_events() -> None:
     """_build_context() must cap to MAX_EVENTS_IN_PROMPT and note omitted count."""
-    from app.pipeline.compressor import MAX_EVENTS_IN_PROMPT
     events = [make_event(ts_utc=f"2026-01-01T12:{i:02d}:00+00:00") for i in range(MAX_EVENTS_IN_PROMPT + 5)]
     candidate = make_candidate(events=events)
     ctx = _build_context(candidate)
