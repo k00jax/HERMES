@@ -119,6 +119,23 @@ Responsibilities:
 * Calibration workflows
 * History queries and CSV export
 
+### Tier 3 – Home-mode cognition (`hermes-brain`, optional)
+
+Runs only when the **`hermes-brain` daemon** is started (see
+[docs/home-ai-core-ops.md](docs/home-ai-core-ops.md)).  Intended for **home
+mode**: Odroid docked or plugged in, not on-wrist.
+
+* Read recent sensor rows from SQLite → normalized events → time-window **memory
+  candidates**
+* Rule-based **salience**; optional local LLM **compression** (summaries)
+* **Privacy allowlist** then optional **cloud escalation**; local **JSONL** store
+  under `~/hermes-data/context/`
+* Dashboard **`/context/*`** routes expose pipeline status and candidates (daemon
+  writes `pipeline_status.json`; service unit:
+  `hermes/linux/odroid/systemd/hermes-brain.service`)
+
+CLI tools in `hermes-brain` (Q&A, retrieval) are separate from this daemon.
+
 ---
 
 ## 3. DATA FLOW
@@ -304,7 +321,7 @@ Pending architectural work:
 * Power optimization
 * Enclosure constraints
 * Radar duty-cycle strategy
-* Model deployment integration
+* On-device validation of optional local LLM compression under load (`hermes-brain`; see [docs/home-ai-core-ops.md](docs/home-ai-core-ops.md))
 * Formal versioned hardware revision tracking
 
 ---

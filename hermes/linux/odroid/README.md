@@ -82,6 +82,52 @@ systemctl status hermes-logger.service
 sudo journalctl -u hermes-logger.service -n 50
 ```
 
+## Home-AI pipeline (`hermes-brain` daemon, systemd)
+
+Runs the home-mode context pipeline (read SQLite → candidates → store JSONL; see [docs/home-ai-core-ops.md](../../../docs/home-ai-core-ops.md)). Starts **after** the logger so the DB is populated. **Compression is off** unless you set `HERMES_COMPRESSION_ENABLED=true` in the env file.
+
+Dependencies (once per machine, user `odroid`):
+
+```bash
+python3 -m pip install --user -r ~/hermes-src/hermes-brain/requirements.txt
+```
+
+Optional environment file (recommended for non-default paths):
+
+```bash
+sudo mkdir -p /etc/hermes
+sudo tee /etc/hermes/hermes-brain.env <<'EOF'
+# HERMES_DB_PATH=/home/odroid/hermes-data/db/hermes.sqlite3
+# HERMES_DATA_DIR=/home/odroid/hermes-data
+# HERMES_PIPELINE_INTERVAL_S=60
+# HERMES_COMPRESSION_ENABLED=false
+# HERMES_MODEL_PATH=/home/odroid/hermes-brain/data/models/model.gguf
+# HERMES_LLAMA_BIN=llama
+EOF
+```
+
+Install and enable:
+
+```bash
+sudo cp ~/hermes-src/hermes/linux/odroid/systemd/hermes-brain.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-brain.service
+```
+
+Check status and pipeline health (dashboard must be up for HTTP):
+
+```bash
+systemctl status hermes-brain.service --no-pager
+sudo journalctl -u hermes-brain.service -n 80 --no-pager
+curl -sS http://127.0.0.1:8000/context/status | python3 -m json.tool
+```
+
+Single-cycle manual test (no systemd):
+
+```bash
+cd ~/hermes-src/hermes-brain && python3 -m app.daemon --once
+```
+
 ## Dashboard API + UI (systemd)
 
 Install and enable the local dashboard service:

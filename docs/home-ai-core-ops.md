@@ -16,6 +16,14 @@ optionally delivers high-salience packets to a downstream cloud endpoint.
 It does **not** replace any existing HERMES services.  It runs alongside
 `hermes-logger` and `hermes-dashboard` without touching their data paths.
 
+**Home mode:** This pipeline is intended for when the Odroid is **stationary and
+powered** (dock, charger, shelf) — not optimized for on-wrist / bracer power
+budgets.  See [HERMES_MASTER.md](../HERMES_MASTER.md) for the full tier model.
+
+**systemd:** Install `hermes-brain.service` from
+[hermes/linux/odroid/README.md](../hermes/linux/odroid/README.md) for always-on
+operation on the Odroid.
+
 ---
 
 ## Running the daemon
@@ -45,9 +53,15 @@ scheduling, debugging, or first-run verification.
 python -m app.daemon --dry-run
 ```
 
-Runs the full pipeline (normalise → build → score → route) but skips:
+Runs normalise → build → score → (optional LLM **compression** if enabled and a
+`LocalLLM` is loaded) → privacy route, but **skips**:
+
 - Writing candidates to the context store
 - Sending escalation packets to the cloud endpoint
+
+If `HERMES_COMPRESSION_ENABLED` is true and the model file exists, **compression
+still runs** in dry-run (only store/deliver are skipped).  Turn compression off
+to avoid LLM work during dry-run.
 
 Logs what *would* have been stored and delivered.  Use this to verify
 configuration before enabling writes.
@@ -58,14 +72,18 @@ configuration before enabling writes.
 python -m app.daemon --once --dry-run
 ```
 
-One cycle, no side effects.  Safe to run at any time.
+One cycle with no store/deliver.  Compression may still run if enabled (see
+above).
 
 ---
 
 ## Configuration
 
-All config values read from environment variables.  Defaults work without
-any configuration on a standard HERMES Odroid installation.
+All config values read from environment variables.  On a standard Odroid
+install, defaults assume the logger database at `~/hermes-data/db/hermes.sqlite3`
+and pipeline output under `~/hermes-data/` (same root the dashboard
+`/context/*` routes read).  Override `HERMES_DATA_DIR` or `data_dir` in
+`hermes-brain/config.yaml` if you want an isolated dev tree.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -78,9 +96,14 @@ any configuration on a standard HERMES Odroid installation.
 | `HERMES_ESCALATION_ENDPOINT` | `""` | Cloud endpoint URL (empty = offline mode) |
 | `HERMES_ESCALATION_DESTINATION` | `"default"` | Endpoint label stored in packets |
 | `HERMES_PRIVACY_ALLOWLIST` | `ts_start,ts_end,source_mix,tags,salience,summary` | Fields permitted to leave HERMES |
+| `HERMES_COMPRESSION_ENABLED` | `false` | When true, run optional LLM summarisation per candidate (requires model on disk) |
+| `HERMES_MODEL_PATH` | `HERMES_DATA_DIR/models/model.gguf` (via `models_dir` in config) | Path to GGUF for `LocalLLM` |
+| `HERMES_LLAMA_BIN` | `llama` | llama.cpp CLI binary on `PATH` |
 | `HERMES_LOG_LEVEL` | `INFO` | Python logging level |
 
-Values can also be set in `config.yaml` at the repo root; environment
+See [hermes-brain/app/config.py](../hermes-brain/app/config.py) for parsing.  You
+can set `compression_enabled`, `model_path`, `llama_bin`, and other keys in
+`hermes-brain/config.yaml` (or the file pointed to by `HERMES_CONFIG`); environment
 variables take precedence over the YAML file.
 
 ---
@@ -127,8 +150,14 @@ for f in sorted(glob.glob('$HOME/hermes-data/context/candidates_*.jsonl')):
 
 ## Dashboard context endpoints
 
-The dashboard exposes three endpoints under `/context`.  These are served
-by the existing FastAPI app on port 8000 — no additional process is needed.
+The dashboard exposes these endpoints under `/context`.  They are served by the
+existing FastAPI app on port 8000 — the daemon is a **separate** process that
+writes the files this API reads.
+
+- `GET /context/status`
+- `GET /context/candidates`
+- `GET /context/packets`
+- `POST /context/ingest`
 
 ### `GET /context/status`
 

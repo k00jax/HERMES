@@ -1,0 +1,20 @@
+[Unit]
+Description=HERMES Home-AI Pipeline (hermes-brain daemon)
+After=network.target hermes-logger.service
+
+[Service]
+Type=simple
+User=odroid
+Environment=HOME=/home/odroid
+Environment=PYTHONUNBUFFERED=1
+# Same root as dashboard context router and logger DB layout (see docs/home-ai-core-ops.md).
+Environment=HERMES_DATA_DIR=/home/odroid/hermes-data
+WorkingDirectory=/home/odroid/hermes-src/hermes-brain
+# Optional overrides (paths, intervals, compression). Create file if needed; `-` ignores if missing.
+EnvironmentFile=-/etc/hermes/hermes-brain.env
+ExecStart=/usr/bin/python3 -m app.daemon
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

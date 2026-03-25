@@ -7,9 +7,10 @@ Runs the pipeline loop on a configurable interval.  Each cycle:
     2. Merge any pending Omi events from the shared Omi queue.
     3. Group events into time-bucket candidates (candidate_builder).
     4. Score each candidate (salience_scorer).
-    5. Apply privacy filter and route escalation packets (privacy_router).
-    6. Store qualifying candidates locally (context_store).
-    7. Deliver escalation packets (cloud_client).
+    5. Optionally compress summaries with LocalLLM (compressor), if enabled.
+    6. Apply privacy filter and route escalation packets (privacy_router).
+    7. Store qualifying candidates locally (context_store).
+    8. Deliver escalation packets (cloud_client).
 
 The daemon writes a status file (JSON) after every cycle so the dashboard
 context router can surface live pipeline health without the router needing
@@ -31,6 +32,9 @@ See config.py for the full list.  Daemon-specific keys:
     HERMES_ESCALATION_ENDPOINT      (default "" — offline mode)
     HERMES_PRIVACY_ALLOWLIST        (comma-separated field names)
     HERMES_DB_PATH                  (default ~/hermes-data/db/hermes.sqlite3)
+    HERMES_COMPRESSION_ENABLED      (default false)
+    HERMES_MODEL_PATH               (GGUF path for LocalLLM)
+    HERMES_LLAMA_BIN                (llama.cpp binary name)
 """
 from __future__ import annotations
 

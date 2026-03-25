@@ -103,7 +103,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     knowledge_dir = Path(
         os.getenv("HERMES_KNOWLEDGE_DIR", file_cfg.get("knowledge_dir", base_dir / "knowledge"))
     )
-    data_dir = Path(os.getenv("HERMES_DATA_DIR", file_cfg.get("data_dir", base_dir / "data")))
+    data_dir = Path(
+        os.getenv(
+            "HERMES_DATA_DIR",
+            file_cfg.get("data_dir", os.path.expanduser("~/hermes-data")),
+        )
+    )
     events_dir = Path(os.getenv("HERMES_EVENTS_DIR", file_cfg.get("events_dir", data_dir / "events")))
     indexes_dir = Path(
         os.getenv("HERMES_INDEXES_DIR", file_cfg.get("indexes_dir", data_dir / "indexes"))
