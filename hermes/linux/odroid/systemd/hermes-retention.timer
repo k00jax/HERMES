@@ -1,9 +1,10 @@
 [Unit]
-Description=Run HERMES DB retention daily at 03:00
+Description=Run HERMES SQLite retention daily at 03:00
 
 [Timer]
 OnCalendar=*-*-* 03:00:00
 Persistent=true
+AccuracySec=1min
 Unit=hermes-retention.service
 
 [Install]

@@ -2,7 +2,7 @@
 """
 HERMES SQLite time-series retention and downsampling.
 
-Install (Odroid, paths match other hermes units):
+Install (Odroid; repo at ~/hermes-src/):
   sudo ln -sf /home/odroid/hermes-src/hermes/linux/odroid/systemd/hermes-retention.service \\
     /etc/systemd/system/hermes-retention.service
   sudo ln -sf /home/odroid/hermes-src/hermes/linux/odroid/systemd/hermes-retention.timer \\
@@ -10,18 +10,21 @@ Install (Odroid, paths match other hermes units):
   sudo systemctl daemon-reload
   sudo systemctl enable --now hermes-retention.timer
 
-Adjust WorkingDirectory / symlinks if your checkout lives elsewhere.
+Test (no writes):
+  HERMES_DB=~/hermes-data/db/hermes.sqlite3 python3 \\
+    /home/odroid/hermes-src/hermes/linux/odroid/scripts/retention.py --dry-run
+  HERMES_DB=~/hermes-data/db/hermes.sqlite3 python3 \\
+    /home/odroid/hermes-src/hermes/linux/odroid/scripts/retention.py --dry-run --table radar
 
-Policy (UTC, by row age relative to run time):
-  - Last 24h: full resolution (unchanged)
-  - 1d–30d old: 1 row per minute (AVG numerics; last non-numeric by ts_utc)
-  - 30d–365d old: 1 row per hour
-  - Older than 365d: 1 row per day
-  Representative ts_utc is min(ts_utc) per bucket. Original rows in each processed
-  window are deleted after aggregated rows are inserted.
+Policy (UTC, by row age at run time):
+  - Last 24h: full resolution
+  - 1d–30d: one row per minute (AVG numerics; last non-numeric by timestamp)
+  - 30d–365d: one row per hour
+  - Older than 365d: one row per day
 
-First run on a very large DB: use --dry-run, then --table <name> on a copy if possible.
-VACUUM can take a long time and needs exclusive access; use --no-vacuum to skip.
+After a successful run (not --dry-run): PRAGMA wal_checkpoint(TRUNCATE) then VACUUM
+(unless --no-vacuum, which skips only VACUUM). Large DBs: expect long runtime and
+possible writer blocking during maintenance.
 """
 
 from __future__ import annotations
@@ -36,6 +39,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -496,10 +501,6 @@ def process_table(
     boundary_30d = now - timedelta(days=30)
     boundary_365d = now - timedelta(days=365)
 
-    lo_24 = _iso_z(boundary_24h)
-    lo_30 = _iso_z(boundary_30d)
-    lo_365 = _iso_z(boundary_365d)
-
     total_before = conn.execute(
         f"SELECT COUNT(*) FROM {_quote_ident(table)}"
     ).fetchone()
@@ -591,12 +592,15 @@ def main() -> int:
     p = argparse.ArgumentParser(description="HERMES DB retention / downsampling")
     p.add_argument("--dry-run", action="store_true", help="report only, no DB writes")
     p.add_argument("--table", help="single time-series table name")
-    p.add_argument("--no-vacuum", action="store_true", help="skip VACUUM at end")
+    p.add_argument(
+        "--no-vacuum",
+        action="store_true",
+        help="skip VACUUM at end (wal_checkpoint still runs)",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
     _setup_logging(args.verbose)
-    log = logging.getLogger("retention")
 
     db_path = resolve_db_path()
     if not db_path.is_file():
@@ -632,10 +636,22 @@ def main() -> int:
                 if not args.dry_run:
                     log.error("stopping after failure (previous tables committed)")
                     return 1
-        if not args.dry_run and not args.no_vacuum:
-            log.info("running VACUUM (can take a long time; stop logger if you see lock errors)")
-            conn.execute("VACUUM")
-            log.info("VACUUM complete")
+        if not args.dry_run:
+            log.info("running PRAGMA wal_checkpoint(TRUNCATE)")
+            ck = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if ck is not None and len(ck) >= 3:
+                log.info(
+                    "wal_checkpoint(TRUNCATE) busy=%s log=%s checkpointed=%s",
+                    ck[0],
+                    ck[1],
+                    ck[2],
+                )
+            else:
+                log.info("wal_checkpoint(TRUNCATE) result=%s", ck)
+            if not args.no_vacuum:
+                log.info("running VACUUM (can take a long time)")
+                conn.execute("VACUUM")
+                log.info("VACUUM complete")
     finally:
         conn.close()
 
