@@ -1,0 +1,15 @@
+[Unit]
+Description=HERMES SQLite time-series retention and downsampling (oneshot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=odroid
+Environment=HOME=/home/odroid
+Environment=HERMES_DB=/home/odroid/hermes-data/db/hermes.sqlite3
+WorkingDirectory=/home/odroid/hermes-src/hermes
+# Large DB first run can take many hours; adjust if needed.
+TimeoutStartSec=0
+ExecStart=/usr/bin/python3 /home/odroid/hermes-src/hermes/linux/odroid/tools/retention.py
+StandardOutput=journal
+StandardError=journal
